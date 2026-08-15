@@ -1,0 +1,28 @@
+{
+  "name": "whatsapp-mcp-personal",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "pair": "node src/pair.mjs",
+    "start": "node src/server.mjs",
+    "test": "node test_allowlist.mjs",
+    "postinstall": "bash scripts/setup-voice.sh",
+    "format": "oxfmt src/ scripts/ test_allowlist.mjs",
+    "format:check": "oxfmt --check src/ scripts/ test_allowlist.mjs",
+    "lint": "oxlint src/ scripts/ test_allowlist.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.29.0",
+    "@whiskeysockets/baileys": "7.0.0-rc14",
+    "pino": "9.6.0",
+    "zod": "3.25.76"
+  },
+  "devDependencies": {
+    "oxfmt": "0.59.0",
+    "oxlint": "1.74.0"
+  }
+}

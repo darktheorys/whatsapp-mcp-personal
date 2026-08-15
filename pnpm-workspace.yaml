@@ -1,0 +1,17 @@
+allowBuilds:
+  '@whiskeysockets/baileys': false
+  protobufjs: false
+
+# Nothing published in the last 30 days gets installed (43200 minutes — the unit is minutes, not
+# days). Compromised npm releases are almost always caught and unpublished within days, so waiting
+# a month turns "first victim" into "someone else already found it". Applies to transitive
+# dependencies too, which is where a supply-chain attack actually lands.
+#
+# When this blocks an upgrade you genuinely need sooner, add the package to minimumReleaseAgeExclude
+# rather than lowering the number — an exception should be visible and per-package.
+minimumReleaseAge: 43200
+minimumReleaseAgeExclude:
+  # Baileys reimplements a protocol Meta changes without notice, and this repo tracks a release
+  # candidate. An old version here does not mean "safer", it means "stops connecting" — which is
+  # exactly what happened the evening this was added. The one package where currency beats age.
+  - '@whiskeysockets/baileys'
