@@ -58,6 +58,10 @@ Four files under `src/`, each importable independently and wired together in `se
   socket object because a logged-out socket keeps `.user` set and looks alive to a naive check.
   WhatsApp allows exactly one live socket per linked device; if another process takes over
   (`connectionReplaced`), this process exits deliberately rather than idling as a dead MCP server.
+  Also subscribes to presence updates (`presenceSubscribe`) for every allowlisted jid on connect and
+  forwards `presence.update` events via the `onPresence` callback — `server.mjs`'s
+  `handlePresenceUpdate` uses this purely to debounce the wake signal (see "Event-driven wake" in
+  the README), not to persist anything.
 - **`store.mjs`** — SQLite (`node:sqlite`, no dependency) at `state/messages.db`. One `messages`
   table: a handful of real columns (`jid`, `id`, `ts`, `text`, `archived`) plus the entire original
   entry as `json`, with a few fields (`media_kind`, `to_id`, `reply_to_id`, `view_once`) promoted to

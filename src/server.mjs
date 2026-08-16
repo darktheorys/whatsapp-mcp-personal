@@ -629,6 +629,83 @@ function helpText(jid) {
   return `Commands:\n${commands.map((c) => `- ${c}`).join("\n")}\n\nCurrent status (this chat unless marked global):\n${status.map((s) => `- ${s}`).join("\n")}`;
 }
 
+// Presence-aware wake debounce -------------------------------------------------------------
+// logInbox (via state/inbox.log) is what a Monitor tails to wake a session — waking on every
+// message mid-burst means reacting to fragment 1 of a thought someone is still typing out.
+// Instead, each inbox-log line is queued per jid and only flushed (in order, all of them, none
+// dropped) once that jid goes 10 continuous seconds without a "composing"/"recording" presence
+// update. This only delays the *wake* signal: appendMessage (the actual message store) already
+// ran synchronously before this queue is touched, so wa_recent/wa_search see a message the
+// instant it arrives regardless of how long the wake itself is deferred.
+//
+// Ephemeral by design -- nothing here is persisted. If a durable trail of presence/composing
+// events is wanted later (Burak: "in the future i want traceability"), that's a deliberate
+// addition on top of this, not implied by it.
+const PRESENCE_WAKE_DEBOUNCE_MS = 10_000;
+// A "composing" signal that never stops (a scripted client leaving the indicator on, or just an
+// unusually long real typing session) would otherwise re-arm the 10s timer forever, deferring the
+// wake indefinitely and growing `lines` without bound for the life of the process. This caps the
+// total wait from the *first* queued message, independent of how many times composing resets the
+// 10s countdown -- flush is guaranteed within 5 minutes of the oldest pending line no matter what.
+const PRESENCE_WAKE_MAX_WAIT_MS = 5 * 60_000;
+// jid -> { lines: {label, text}[], debounceTimer: NodeJS.Timeout | null, ceilingTimer: NodeJS.Timeout }
+// Two independent timers on purpose. `debounceTimer` is the 10s idle countdown -- composing resets
+// it, non-composing (re)arms it. `ceilingTimer` is set once, when the jid's queue goes from empty
+// to non-empty, and is NEVER reset by composing -- if it were, a presence signal that never stops
+// (a scripted client leaving "composing" on, or handlePresenceUpdate's own clearTimeout call below)
+// would mean this fires only when something re-arms `debounceTimer`, which composing specifically
+// prevents. An independent, un-resettable timer is what actually guarantees the 5-minute ceiling
+// regardless of how continuously composing signals arrive.
+const pendingWake = new Map();
+
+function flushWake(jid) {
+  const entry = pendingWake.get(jid);
+  if (!entry) return;
+  clearTimeout(entry.debounceTimer);
+  clearTimeout(entry.ceilingTimer);
+  pendingWake.delete(jid);
+  for (const { label, text } of entry.lines) logInbox(jid, label, text);
+}
+
+// Arms (or re-arms) the 10s debounce countdown for a jid with a non-empty queue. Called both when
+// a new line is queued and when presence goes back to non-composing.
+function armDebounce(jid) {
+  const entry = pendingWake.get(jid);
+  if (!entry || entry.lines.length === 0) return;
+  clearTimeout(entry.debounceTimer);
+  entry.debounceTimer = setTimeout(() => flushWake(jid), PRESENCE_WAKE_DEBOUNCE_MS);
+}
+
+function queueWake(jid, label, text) {
+  let entry = pendingWake.get(jid);
+  if (!entry) {
+    entry = {
+      lines: [],
+      debounceTimer: null,
+      ceilingTimer: setTimeout(() => flushWake(jid), PRESENCE_WAKE_MAX_WAIT_MS),
+    };
+    pendingWake.set(jid, entry);
+  }
+  entry.lines.push({ label, text });
+  armDebounce(jid);
+}
+
+// Baileys' presence.update: `id` is the chat jid, `presences` maps participant jid -> state (a
+// DM has one entry keyed by the chat's own jid; a group has one per participant). Only
+// "composing"/"recording" count as "still typing" -- "paused"/"available"/anything else means
+// the 10s countdown should (re)start, since typing has stopped for now.
+function handlePresenceUpdate({ id, presences }) {
+  const states = Object.values(presences ?? {}).map((p) => p?.lastKnownPresence);
+  const stillComposing = states.some((s) => s === "composing" || s === "recording");
+  const entry = pendingWake.get(id);
+  if (!entry) return; // nothing queued for this jid -- presence here has nothing to debounce yet
+  if (stillComposing) {
+    clearTimeout(entry.debounceTimer);
+  } else {
+    armDebounce(id);
+  }
+}
+
 async function handleIncoming(waMessage) {
   const { key } = waMessage;
   const jid = allowedJid(key.remoteJid, key.remoteJidAlt);
@@ -783,7 +860,10 @@ async function handleIncoming(waMessage) {
     // nor kind, and rendered "[undefined]" in the wake feed — which reads like a bug in the quote
     // rather than "they replied to something I don't store".
     const quotedLabel = quoted?.text || `[${quoted?.kind ?? "media"}]`;
-    logInbox(jid, label, quoted ? `(replying to "${quotedLabel}") ${logText}` : logText);
+    // Queued, not written immediately -- see the presence-aware wake debounce above. The message
+    // itself is already durably stored (appendMessage above ran before this point), so nothing
+    // here affects wa_recent/wa_search; only when the Monitor-visible wake line appears is delayed.
+    queueWake(jid, label, quoted ? `(replying to "${quotedLabel}") ${logText}` : logText);
   }
   if (!key.fromMe) {
     // `from` is the resolved group participant when set, so a name is credited to the person
@@ -1499,6 +1579,7 @@ server.registerTool(
       await startWhatsApp({
         onMessage: handleIncoming,
         onReaction: handleReaction,
+        onPresence: handlePresenceUpdate,
       });
       // startWhatsApp returns as soon as the socket object exists, which is well before WhatsApp
       // has accepted (or rejected) it. Reporting success there is how "Connected." came back for
@@ -1536,6 +1617,7 @@ if (!process.env.WA_NO_CONNECT) {
   void startWhatsApp({
     onMessage: handleIncoming,
     onReaction: handleReaction,
+    onPresence: handlePresenceUpdate,
   }).catch((err) => {
     process.stderr.write(`whatsapp-mcp-personal: startup failed: ${err}\n`);
   });

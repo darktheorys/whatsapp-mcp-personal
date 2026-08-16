@@ -35,6 +35,18 @@ scripts/convert_to_mp4.py input.webm --quality high  # Default: medium
 
 **Quality options**: `low` (480p), `medium` (720p, default), `high` (1080p)
 
+### probe_media.py
+
+Prints duration/codec/resolution for a local media file via ffprobe — fixed argument list, no
+passthrough flags. Use this instead of ever invoking raw `ffmpeg`/`ffprobe` directly (neither is
+allowlisted, on purpose — see the README's Security notes).
+
+**Usage**:
+```bash
+scripts/probe_media.py path/to/video.mp4
+scripts/probe_media.py path/to/video.mp4 --json
+```
+
 ### fetch_and_send_meme.py
 
 Complete workflow: search → download → convert → output path.

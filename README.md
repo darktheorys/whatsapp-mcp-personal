@@ -27,6 +27,16 @@ Nothing is written to `~`, nothing reads from any other repo.
   session watching it — zero cost until a message actually arrives, no poll interval to tune. Only
   lives as long as the session that armed it; re-arm it after a restart (ask Claude to do this near
   the start of a session if WhatsApp monitoring is wanted).
+- **The wake itself is debounced on typing presence, not fired per-message.** Each `state/inbox.log`
+  line is queued per chat and only flushed — all of them, in order, none dropped — once that chat
+  goes 10 continuous seconds without a "composing"/"recording" presence update (any presence
+  activity resets the countdown; no presence data at all just falls back to a flat 10s after the
+  message arrives). This only delays the _wake_: the message is already durably stored in
+  `state/messages.db` the instant it arrives, so `wa_recent`/`wa_search` are never behind, only the
+  Monitor notification is. The point is not reacting to word 1 of a thought someone is still typing
+  out. Presence is not persisted anywhere — purely an ephemeral wake-timing signal for now. A
+  5-minute ceiling (independent of the 10s debounce — a continuously-composing signal that never
+  stops can't defer it) guarantees the wake fires eventually no matter what.
 - Only runs while the Claude Code session using it is open, same as any other local MCP server.
   **One live socket per linked device** — if two sessions both connect, the second kicks the first
   off; see "Multiple sessions" below.
@@ -265,9 +275,12 @@ The working path, used throughout this repo's actual sessions, is entirely local
   [[whatsapp-yt-dlp-meme-fallback]] for the search patterns that have worked for Turkish meme/scene
   clips specifically) — the two are complementary, not redundant.
 - **Metadata without downloading, given a URL already in hand**:
-  `yt-dlp --no-download --print title --print duration --print uploader <url>` (allowlisted
-  directly, see `.claude/settings.json`) — same idea as above, for a single known URL rather than
-  a fresh search.
+  `.claude/skills/yt-dlp/scripts/video_info.py <url>` — same idea as above, for a single known URL
+  rather than a fresh search. A fixed-argument wrapper, not a raw `yt-dlp` call — raw `yt-dlp` is
+  deliberately **not** allowlisted (see "Security notes"): any allowlist pattern with a trailing
+  wildcard still permits a smuggled `--exec <command>` flag later in the same invocation, which
+  runs arbitrary shell commands. Wrapper scripts that only accept a URL/query as their CLI surface
+  don't have that problem, which is why every yt-dlp interaction here goes through one.
 - **Downloading**: `.claude/skills/yt-dlp/scripts/download_video.py <url> -o state/tmp -q 480p`
   (or `-f "best[height<=480]"` if `-q` hits a 403 — see pitfalls below).
 - **Extracting audio only**: `.claude/skills/yt-dlp/scripts/extract_audio.py`.
@@ -324,7 +337,7 @@ this with the local scripts (there is no MCP shortcut for this — see "YouTube 
   uploads title the video as its own source link (`"... | https://youtu.be/xyz"`). Since
   `download_video.py`'s output template is `%(title)s.%(ext)s`, the slashes in that title become
   literal path separators — you get nested empty `.../https:/youtu.be/` directories instead of a
-  video file, silently. Check the title first (`yt-dlp --print title <url>`) and pass an explicit
+  video file, silently. Check the title first (`video_info.py <url>`) and pass an explicit
   filename (not just a directory) in `-o` when the title contains `/` or `:`.
 - **Some format pairings 403.** yt-dlp's default "best" selection can pick an itag pair YouTube
   throttles/blocks mid-download (`HTTP Error 403: Forbidden`). Passing `-q 480p` (a broader format
@@ -346,6 +359,21 @@ this with the local scripts (there is no MCP shortcut for this — see "YouTube 
 - `state/` is gitignored and mode-700; it holds your WhatsApp linked-device keys, message log,
   and any images, documents, or voice notes downloaded from allowlisted chats.
   Losing it means re-pairing, not a leaked account — but treat it like a credential file anyway.
+- **The raw `yt-dlp` binary is never allowlisted directly, only fixed-argument wrapper scripts
+  around it are.** `Bash(<script>.py *)` patterns only auto-approve a _literal command prefix_ —
+  the trailing `*` still permits anything after it, so a pattern that starts with `yt-dlp` (even
+  something that looks scoped, like `Bash(yt-dlp --print *)`) still lets `--exec <command>` (or
+  `--exec-before-download`) ride along later in the same invocation, which runs an arbitrary shell
+  command per download with file-path template expansion — full command execution with no
+  confirmation, found in an audit 2026-08-16. A wrapper script whose CLI surface only accepts a
+  URL/query (never passthrough flags) can't have this problem, which is why `download_video.py`,
+  `search_videos.py`, `video_info.py`, `extract_audio.py`, `extract_urls.py`, and `watch_video.py`
+  are the only yt-dlp-touching things this repo allowlists. Same reasoning for `ffmpeg`/`ffprobe` —
+  neither is allowlisted directly either (arbitrary output paths, the `concat:` demuxer reading a
+  list of files as one input, `http://`/`https://` input protocols); `convert_to_mp4.py` and
+  `probe_media.py` are the fixed-argument wrappers used instead. General rule, not just for these
+  two tools: any CLI with a large or dangerous flag surface gets a wrapper script, never a direct
+  Bash allowlist entry for the binary itself, no matter how scoped the pattern looks.
 - **Nothing published in the last 30 days is installable.** `minimumReleaseAge: 43200` (minutes) in
   `pnpm-workspace.yaml` covers transitive dependencies too, which is where a supply-chain attack
   actually lands. Compromised releases are usually caught and pulled within days, so the wait turns
@@ -406,8 +434,23 @@ this with the local scripts (there is no MCP shortcut for this — see "YouTube 
   `PreToolUse` gate: file tools may only touch this repo and the session scratchpad (symlinks and
   `..` are resolved first), and Bash is refused any path resolving under `$HOME` outside the repo,
   plus any mention of a known credential location. Bash cannot be gated exactly — a command is a
-  program, not a path — so `sandbox.enabled` remains the real boundary there; this is the cheap
-  layer in front of it.
+  program, not a path — so `sandbox.enabled` is the real boundary there (enabled 2026-08-16, after
+  a security audit found it had never actually been turned on despite this note already claiming
+  it); this hook is the cheap layer in front of it.
+  `sandbox` in `.claude/settings.json` uses OS-level isolation (macOS Seatbelt — built in, nothing
+  extra to install) confining **Bash tool calls and their child processes only**: `filesystem`
+  restricts writes to the repo + session scratchpad and denies reads of the same credential
+  locations the `deny` list above already blocks for the Read tool (a second, OS-enforced layer,
+  not a duplicate). `network` is deliberately left unrestricted — this repo's own job involves
+  fetching from unpredictable domains (YouTube's CDN, TikTok, Instagram, Pinterest, DuckDuckGo),
+  so a tight domain allowlist would break the meme/yt-dlp workflow more than it would help.
+  **What this does _not_ cover**: the long-running `node src/server.mjs` process itself (the
+  actual WhatsApp connection — sandboxing wraps how Claude's _own_ Bash commands run during a
+  session, not a daemon already spawned before the sandbox rule applies), and Read/Edit/Write
+  tools or hooks, which run unsandboxed regardless. For isolating the WhatsApp bot process itself
+  from the host, that's a Docker/VM decision, not a Claude Code setting — see the "Multiple
+  sessions" section for why a container needs to swap `afconvert`/macOS `say` for an
+  `ffmpeg`-based equivalent if that's ever done, since neither exists outside macOS.
 
 Voice notes can't carry the `(_Claude_)` text marker WhatsApp text sends end in — there used to be
 an audible tone standing in for it, removed at Burak's request as not worth it. A voice note is
