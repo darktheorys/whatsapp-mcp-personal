@@ -192,6 +192,31 @@ Also set from inside the chat, same `fromMe`-only rule:
   the _wake_ is gated.
 - `/wakelevel verbose` — back to normal (every message wakes the session).
 
+## Per-chat reply verbosity
+
+Also set from inside the chat, same `fromMe`-only rule, persisted as `verbosity_jids` in
+`state/config.json` (default `low` for any chat not in the map — a WhatsApp reply is a chat
+message, not a report):
+
+- `/verbosity low` — short, terse replies (the default for any chat not set otherwise).
+- `/verbosity mid` — more explanation than `low`, still a chat reply, not a report.
+- `/verbosity high` — full detail/reasoning in replies, closest to how Claude Code talks in a
+  terminal session.
+
+Unlike `/s2t-tier`/`/t2s-tier`, there's no model file behind this to check for existence — it's
+not enforced anywhere in code, just a setting `wa_status`'s `verbosityJids` surfaces so Claude can
+read the current chat's level and self-regulate reply length/detail accordingly.
+
+## /help
+
+`/help` — the one in-chat command that replies into the chat instead of silently changing a
+setting (same `fromMe`-only rule as the others). Lists every command form, plus this chat's
+current settings (`wakelevel`, `speaking`, `language`, `read-image`, `read-audio`, `verbosity`) and
+the global ones (`speaking-speed`, `s2t-tier`, `t2s-tier`) — so "what's this set to right now"
+never needs `wa_status` or reading `state/config.json` by hand. The command list lives in one
+function (`helpText` in `src/server.mjs`) rather than scattered across each command's handler, so
+it can't silently drift out of sync with what `COMMANDS` actually recognizes.
+
 ## Multiple sessions
 
 WhatsApp/Baileys allows exactly one live socket per linked device. Each Claude Code
@@ -341,9 +366,10 @@ this with the local scripts (there is no MCP shortcut for this — see "YouTube 
   `process.stderr.write` or the `state/baileys.log` logger instead. (`src/pair.mjs` is the one
   exception: it's run directly in a terminal, never through Claude Code, so `console.log` is fine
   there.)
-- In-chat commands (`/wakelevel`, `/speaking`, `/speaking-speed`, `/s2t-tier`, `/read-image`,
-  `/read-audio`) only fire on `key.fromMe` — a
-  message from anyone else in a group can never change these settings, by design.
+- In-chat commands (`/wakelevel`, `/speaking`, `/speaking-speed`, `/s2t-tier`, `/t2s-tier`,
+  `/language`, `/read-image`, `/read-audio`, `/verbosity`, `/help`) only fire on `key.fromMe` — a
+  message from anyone else in a group can never change these settings (or, for `/help`, see the
+  list of them), by design.
 - **A sender's display name proves nothing.** `pushName` is free text chosen by whoever sent the
   message, so an inbound one can claim to be you. Every `state/inbox.log` line is therefore
   prefixed `(self)` or `(them)` from `key.fromMe`, which is the only real signal, and an inbound
