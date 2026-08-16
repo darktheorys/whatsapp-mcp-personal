@@ -66,7 +66,7 @@ if [[ "$tool" == "Bash" ]]; then
   # command *text*, so `sqlite3 state/messages.db` is caught while a script that opens the same file
   # without naming it is not. It stops the casual path, not a determined one; sandbox.enabled is the
   # real boundary for Bash.
-  if grep -qE '(\.ssh|\.aws/|\.gnupg|\.netrc|\.git-credentials|\.pypirc|\.npmrc|id_rsa|id_ed25519|id_ecdsa|Keychains|\.credentials\.json|state/auth|messages\.db|inbox\.log|state/contacts\.json|state/poll-state\.json|/\.env)' <<<"$cmd"; then
+  if grep -qE '(\.ssh|\.aws/|\.gnupg|\.netrc|\.git-credentials|\.pypirc|\.npmrc|id_rsa|id_ed25519|id_ecdsa|Keychains|\.credentials\.json|state/auth|messages\.db|state/contacts\.json|state/poll-state\.json|/\.env)' <<<"$cmd"; then
     deny "this command" "references a credential location or the message store. Read it through a tool if you genuinely need it, so the deny rules apply."
   fi
 

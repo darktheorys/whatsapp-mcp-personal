@@ -16,19 +16,24 @@ import {
   allowedJid,
   hasImageDisabled,
   hasVoiceDisabled,
+  isEnglish,
   isMentionOnly,
   isVoiceOnly,
   loadConfig,
   ownerName,
+  PIPER_VOICES,
+  setEnglish,
   setImageEnabled,
   setMentionOnly,
   S2T_MODELS,
   s2tTier,
   setS2tTier,
   setSpeakingRate,
+  setT2sTier,
   setVoiceEnabled,
   setVoiceOnly,
   speakingRate,
+  t2sTier,
 } from "./config.mjs";
 import {
   appendMessage,
@@ -79,7 +84,30 @@ function whisperModel() {
   return fallback ?? wanted;
 }
 const PIPER_BIN = join(STATE_DIR, "piper-venv", "bin", "piper");
-const PIPER_MODEL = join(STATE_DIR, "piper-models", "tr_TR-dfki-medium.onnx");
+
+// Resolved per call, not once at load: "/language en" or "/t2s-tier high" has to take effect on
+// the next voice note, not on the next server restart. `lang` is "tr" or "en", resolved by the
+// caller from the chat's default (isEnglish(jid)) or a per-call override — this function itself
+// has no notion of "current" language, since that varies per chat/message, not globally. Same
+// fallback shape as whisperModel(): a missing file degrades to whatever Piper voice is actually
+// on disk rather than crashing every send, since a hand-edited config or a not-yet-downloaded
+// tier shouldn't take TTS down entirely.
+function piperModel(lang) {
+  const dir = join(STATE_DIR, "piper-models");
+  const wanted = join(dir, PIPER_VOICES[lang][t2sTier()]);
+  if (existsSync(wanted)) return wanted;
+  const fallback = Object.values(PIPER_VOICES)
+    .flatMap((tiers) => Object.values(tiers))
+    .map((f) => join(dir, f))
+    .find((p) => existsSync(p));
+  logger.warn(
+    { wanted, fallback },
+    fallback
+      ? "configured language/t2s tier's Piper voice is missing — falling back to the one on disk (bash scripts/setup-voice.sh <tier> to fix)"
+      : "no Piper voice on disk at all — voice notes will not synthesise",
+  );
+  return fallback ?? wanted;
+}
 
 const DEFAULT_SAY_WPM = 175; // macOS `say`'s own default rate, used as the 1.0x baseline
 const SENTENCE_SILENCE = "0.35"; // seconds of gap after each sentence (Piper default 0.2 runs sentences together)
@@ -142,11 +170,12 @@ export function resolveSendable(path) {
 const TONE_HZ = 880;
 const TONE_SECONDS = 0.15;
 
-// Writes `text` to `outWav`. Piper (no `voice`) is the default engine; naming a macOS `say` voice
-// falls back to it for other languages/genders, since only one Piper voice is installed. `rate` is
-// a speed multiplier (1.0 normal, >1 faster, <1 slower), applied as Piper's inverse length-scale
-// or `say`'s -r words-per-minute.
-function synthWav(text, voice, rate, outWav) {
+// Writes `text` to `outWav`. Piper (no `voice`) is the default engine, using PIPER_VOICES[lang];
+// naming a macOS `say` voice falls back to it for other languages/genders instead (`lang` is
+// unused on that path — the voice name already picks the language). `rate` is a speed multiplier
+// (1.0 normal, >1 faster, <1 slower), applied as Piper's inverse length-scale or `say`'s -r
+// words-per-minute.
+function synthWav(text, voice, rate, lang, outWav) {
   if (!voice) {
     // ponytail: punctuation + sentence gaps are the only prosody Piper has (no SSML, no emotion
     // embedding in a single-speaker VITS). Tune SENTENCE_SILENCE by ear; real expressiveness
@@ -155,7 +184,7 @@ function synthWav(text, voice, rate, outWav) {
       PIPER_BIN,
       [
         "--model",
-        PIPER_MODEL,
+        piperModel(lang),
         "--length-scale",
         String(1 / rate),
         "--sentence-silence",
@@ -212,12 +241,13 @@ function withMarkerTone(audioPath) {
 
 // Shared by wa_send_voice and wa_send's voice-only auto-route, so both go through one TTS path.
 // `rate` omitted falls back to the persisted default (see speakingRate()/"/speaking-speed"),
-// not to each engine's own stock pace.
-function speakToBuffer(text, voice, rate = speakingRate()) {
+// not to each engine's own stock pace. `lang` ("tr"/"en") picks the Piper voice on the default
+// (no `voice`) path — callers resolve it from the chat's default (isEnglish) unless overridden.
+function speakToBuffer(text, voice, rate = speakingRate(), lang = "tr") {
   const dir = mkdtempSync(join(tmpdir(), "wa-tts-"));
   try {
     const wav = join(dir, "out.wav");
-    synthWav(text, voice, rate, wav);
+    synthWav(text, voice, rate, lang, wav);
     return withMarkerTone(wav);
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -506,6 +536,8 @@ export const COMMANDS = {
   speaking: /^\/speaking\s+(voice-only|text-only)\s*$/i,
   speakingSpeed: /^\/speaking-speed\s+([0-9.]+)\s*$/,
   s2tTier: /^\/s2t-tier\s+(low|mid|high)\s*$/i,
+  t2sTier: /^\/t2s-tier\s+(low|mid|high)\s*$/i,
+  language: /^\/language\s+(tr|en)\s*$/i,
   readMedia: /^\/read-(image|audio)\s+(yes|no)\s*$/i,
 };
 
@@ -550,6 +582,43 @@ async function handleIncoming(waMessage) {
         return;
       }
       setS2tTier(tier);
+      return;
+    }
+    // Global too: TTS voice quality, decoupled from s2t_tier — wanting a fast, low-effort
+    // transcript and a good-sounding reply are independent preferences. Same missing-file guard
+    // as s2t-tier, checked against *this chat's* language, since that's the voice this chat would
+    // actually select next.
+    const t2s = COMMANDS.t2sTier.exec(trimmed);
+    if (t2s) {
+      const tier = t2s[1].toLowerCase();
+      const voice = PIPER_VOICES[isEnglish(jid) ? "en" : "tr"][tier];
+      const model = join(STATE_DIR, "piper-models", voice);
+      if (!existsSync(model)) {
+        await getSocket()?.sendMessage(jid, {
+          text: `Piper voice for "${tier}" not downloaded yet (${voice}). Run: bash scripts/setup-voice.sh ${tier}${ATTRIBUTION}`,
+        });
+        return;
+      }
+      setT2sTier(tier);
+      return;
+    }
+    // Per-chat, unlike the others above: which language this chat's outgoing voice notes default
+    // to (PIPER_VOICES[lang][t2s_tier]). Incoming voice notes don't use this at all — whisper runs
+    // with "-l auto" so STT adapts per clip regardless of who's texting. Refused the same way as
+    // s2t-tier/t2s-tier if the resulting Piper voice isn't downloaded, so switching can't silently
+    // break TTS for this chat.
+    const lang = COMMANDS.language.exec(trimmed);
+    if (lang) {
+      const newLang = lang[1].toLowerCase();
+      const voice = PIPER_VOICES[newLang][t2sTier()];
+      const model = join(STATE_DIR, "piper-models", voice);
+      if (!existsSync(model)) {
+        await getSocket()?.sendMessage(jid, {
+          text: `Piper voice for "${newLang}" at the current t2s tier not downloaded yet (${voice}). Run: bash scripts/setup-voice.sh ${t2sTier()}${ATTRIBUTION}`,
+        });
+        return;
+      }
+      setEnglish(jid, newLang === "en");
       return;
     }
     const media = COMMANDS.readMedia.exec(trimmed);
@@ -668,7 +737,7 @@ server.registerTool(
   },
   async () => {
     const sock = getSocket();
-    const { allowlist } = loadConfig();
+    const { allowlist, english_jids } = loadConfig();
     const { live, lastError } = connectionState();
     const status = {
       connected: live,
@@ -677,8 +746,13 @@ server.registerTool(
       ...(lastError ? { problem: lastError } : {}),
       // The tier that is configured and the model actually in use — they differ when the
       // configured tier's file was never downloaded, which is otherwise invisible until you
-      // notice transcripts have quietly stopped.
+      // notice transcripts have quietly stopped. Incoming voice notes always use "-l auto",
+      // independent of s2t_tier, so there's nothing chat-specific to report for STT language.
       s2t: { tier: s2tTier(), model: basename(whisperModel()) },
+      // Language is per-chat (see /language), so status reports which chats default to English
+      // rather than a single value — t2s_tier still applies uniformly across chats.
+      t2sTier: t2sTier(),
+      englishJids: english_jids,
       ownJid: sock?.user?.id ?? null,
       allowlist,
       loggedMessages: Object.fromEntries(allowlist.map((jid) => [jid, messageCount(jid)])),
@@ -732,7 +806,7 @@ server.registerTool(
     if (isVoiceOnly(to)) {
       let buffer;
       try {
-        buffer = speakToBuffer(text);
+        buffer = speakToBuffer(text, undefined, undefined, isEnglish(to) ? "en" : "tr");
       } catch (err) {
         return { isError: true, content: [{ type: "text", text: `TTS failed: ${err}` }] };
       }
@@ -834,14 +908,20 @@ server.registerTool(
     description:
       "Speak text (free, offline, no API key) and send it as a WhatsApp voice note. Use for a change " +
       "of pace instead of always texting. Defaults to Piper's Turkish neural voice; pass a macOS " +
-      "`say` voice name (see `say -v '?'`) to use that instead, for other languages/genders.",
+      "`say` voice name (see `say -v '?'`) to use that instead, for other languages/genders. " +
+      "`language` defaults to this chat's usual language (set with /language) but can be overridden " +
+      "per call — e.g. to reply in English for one message in an otherwise-Turkish chat.",
     inputSchema: {
       to: z.string().describe("Recipient JID, e.g. 491701234567@s.whatsapp.net"),
       text: z.string().min(1),
       voice: z
         .string()
         .optional()
-        .describe("A macOS `say` voice name, e.g. Cem or Daniel — omit for the default Piper Turkish voice"),
+        .describe("A macOS `say` voice name, e.g. Cem or Daniel — omit for the default Piper voice"),
+      language: z
+        .enum(["tr", "en"])
+        .optional()
+        .describe("Piper voice language for this one message — omit to use the chat's default (see /language)"),
       rate: z
         .number()
         .positive()
@@ -851,13 +931,13 @@ server.registerTool(
         ),
     },
   },
-  async ({ to, text, voice, rate }) => {
+  async ({ to, text, voice, language: lang, rate }) => {
     const refusal = guardSend(to, text);
     if (refusal) return refusal;
     const sock = getSocket();
     let buffer;
     try {
-      buffer = speakToBuffer(text, voice, rate);
+      buffer = speakToBuffer(text, voice, rate, lang ?? (isEnglish(to) ? "en" : "tr"));
     } catch (err) {
       return { isError: true, content: [{ type: "text", text: `TTS failed: ${err}` }] };
     }

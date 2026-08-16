@@ -31,6 +31,8 @@ function defaultConfig() {
     owner_name: "Me",
     speaking_rate: 1.15,
     s2t_tier: "low",
+    t2s_tier: "low",
+    english_jids: [],
   };
 }
 
@@ -41,6 +43,17 @@ export const S2T_MODELS = {
   low: "ggml-small.bin",
   mid: "ggml-medium.bin",
   high: "ggml-large-v3-turbo.bin",
+};
+
+// Piper voice file per language per t2s tier. Both languages currently map every tier to the
+// same single file: Turkish has exactly one voice on huggingface.co/rhasspy/piper-voices
+// (dfki-medium — the others were pulled at the contributors' request), and English uses
+// hfc_male-medium (a male voice — the alternative "lessac" voice is female and does have real
+// low/medium/high variants, but hfc_male only ships a "medium" tier). /t2s-tier still switches
+// the setting either way; on English it just has nothing to bite on right now.
+export const PIPER_VOICES = {
+  tr: { low: "tr_TR-dfki-medium.onnx", mid: "tr_TR-dfki-medium.onnx", high: "tr_TR-dfki-medium.onnx" },
+  en: { low: "en_US-hfc_male-medium.onnx", mid: "en_US-hfc_male-medium.onnx", high: "en_US-hfc_male-medium.onnx" },
 };
 
 export function loadConfig() {
@@ -62,6 +75,8 @@ export function loadConfig() {
     // Object.hasOwn, not `in`: `in` walks the prototype, so a hand-edited "constructor" passed
     // this guard and then threw inside whisperModel() — the exact break the fallback exists to stop.
     s2t_tier: Object.hasOwn(S2T_MODELS, raw.s2t_tier ?? "") ? raw.s2t_tier : "low",
+    t2s_tier: Object.hasOwn(S2T_MODELS, raw.t2s_tier ?? "") ? raw.t2s_tier : "low",
+    english_jids: Array.isArray(raw.english_jids) ? raw.english_jids : [],
   };
 }
 
@@ -74,6 +89,36 @@ export function s2tTier() {
 export function setS2tTier(tier) {
   const cfg = loadConfig();
   cfg.s2t_tier = tier;
+  writeFileSync(CONFIG_PATH, JSON.stringify(cfg, null, 2), { mode: 0o600 });
+}
+
+// "/t2s low|mid|high" picks the Piper voice quality for outgoing voice notes. Separate from
+// s2t_tier on purpose: STT accuracy and TTS voice quality are different things to want different
+// levels of, and they use different model files (whisper vs. Piper).
+export function t2sTier() {
+  return loadConfig().t2s_tier;
+}
+
+export function setT2sTier(tier) {
+  const cfg = loadConfig();
+  cfg.t2s_tier = tier;
+  writeFileSync(CONFIG_PATH, JSON.stringify(cfg, null, 2), { mode: 0o600 });
+}
+
+// "/language tr|en" per chat: which Piper voice (via PIPER_VOICES[lang][t2s_tier]) that chat's
+// outgoing voice notes default to. Opt-in like voice_only_jids, not opt-out like no_image_jids —
+// almost every allowlisted chat is Turkish, so "not in this list" should mean the common case.
+// Incoming voice notes deliberately don't use this: whisper is run with "-l auto" (see
+// transcribeVoice in server.mjs) so STT adapts per clip regardless of who's texting.
+// A per-call override still exists (wa_send_voice's `language` param) for the case Claude is
+// replying in a different language than the chat's usual one for that one message.
+export function isEnglish(jid) {
+  return loadConfig().english_jids.includes(jid);
+}
+
+export function setEnglish(jid, on) {
+  const cfg = loadConfig();
+  cfg.english_jids = on ? [...new Set([...cfg.english_jids, jid])] : cfg.english_jids.filter((j) => j !== jid);
   writeFileSync(CONFIG_PATH, JSON.stringify(cfg, null, 2), { mode: 0o600 });
 }
 
