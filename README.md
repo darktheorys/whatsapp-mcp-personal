@@ -211,7 +211,9 @@ MCP server connected in only one session at a time.
 | `wa_groups`     | Groups this number is in, with their JIDs. The only way to learn a group JID.                                                              |
 | `wa_contacts`   | jid → display name, derived only from logged messages for allowlisted chats.                                                               |
 | `wa_send`       | `{ to, text }` — sends only if `to` is on the allowlist. Auto-routes to a spoken voice note if the chat is in `/speaking voice-only` mode. |
+| `wa_send_text_only` | `{ to, text }` — sends text to a voice-only chat without converting to voice. Useful for structured data (URLs, metadata, transcripts). |
 | `wa_send_image` | `{ to, path, caption? }` — sends a local image file, from a sendable directory only (see Security notes).                                  |
+| `wa_send_video` | `{ to, path, caption? }` — sends a local video file (MP4 format) with optional caption, from a sendable directory only.                    |
 | `wa_send_voice` | `{ to, text, voice?, language?, rate? }` — speaks `text` (Piper by default, or a macOS `say` voice) and sends it as a voice note.           |
 | `wa_send_audio` | `{ to, path }` — sends an already-made audio file as a voice note.                                                                         |
 | `wa_react`      | `{ jid, messageId, emoji }` — reacts to a specific logged message; empty `emoji` removes a reaction.                                       |
@@ -220,6 +222,39 @@ MCP server connected in only one session at a time.
 | `wa_connect`    | Reclaims the WhatsApp socket in this process without an `/mcp` reload — see "Multiple sessions".                                           |
 | `wa_recent`     | `{ jid?, limit?, all? }` — recent logged messages for one allowed chat. Omitting `jid` returns per-chat unread counts only, never text.    |
 | `wa_search`     | `{ jid, query, limit? }` — case-insensitive substring search over one chat's active + archived messages.                                   |
+
+## YouTube Tools
+
+The YouTube MCP server (`yt-dlp-mcp`) is available in this session and can be used to search for videos, fetch metadata, and share information about YouTube content in WhatsApp chats:
+
+| Tool                           | Does                                                                                                               |
+| ------------------------------ | ------------------------------------------------------------------------------------------------------------------ |
+| `ytdlp_search_videos`          | `{ query, maxResults?, offset?, uploadDateFilter? }` — search YouTube by keywords; returns titles, URLs, uploaders, durations. Supports pagination (`offset`) and date filtering (`hour`, `today`, `week`, `month`, `year`). |
+| `ytdlp_get_video_metadata_summary` | `{ url }` — quick human-readable summary: title, channel, duration, view/like counts, upload date, description excerpt, tags. Use this to quickly get video info to share. |
+| `ytdlp_get_video_metadata`     | `{ url, fields? }` — comprehensive video metadata as structured JSON: all the above plus subtitles available, categories, channel ID, timestamps, format details. Useful for analysis or programmatic use. |
+| `ytdlp_download_video`         | `{ url, resolution?, startTime?, endTime? }` — download video to `~/Downloads` with quality selection (`480p`, `720p`, `1080p`, `best`) and optional trimming by timestamp. |
+| `ytdlp_download_audio`         | `{ url }` — extract and download audio track to `~/Downloads` (best quality, typically M4A or MP3). Useful for music, podcasts, or lectures. |
+| `ytdlp_download_transcript`    | `{ url }` — get video transcript as text. Falls back to auto-generated captions if manual transcript unavailable. |
+| `ytdlp_download_video_subtitles` | `{ url }` — download subtitle file; use `ytdlp_list_subtitle_languages` first to see what's available. |
+| `ytdlp_list_subtitle_languages` | `{ url }` — list available subtitle languages for a video. |
+| `ytdlp_get_video_comments`     | `{ url }` — fetch video comments (returns structured data: author, text, likes, timestamps). |
+| `ytdlp_get_video_comments_summary` | `{ url }` — get summary of top/trending comments for quick insight into community reaction. |
+
+**Workflow example:** Search for a video → get metadata summary to share in chat → if needed, extract audio or transcript for further use.
+
+## Meme Tools
+
+A dedicated skill (`.claude/skills/meme-tools/`) for safely working with a curated collection of funny videos stored in a public Gist. All scripts confine operations to `state/memes/` and use safe subprocess calls (no shell injection).
+
+**Scripts** (run without permission prompts via allowlist):
+
+- `search_gist_memes.py "keyword"` — search the meme collection by keyword. Options: `--random` for a random match, `--limit N` for top N results, `--json` for structured output.
+- `convert_to_mp4.py input.webm -o output.mp4` — convert videos to MP4 format (WhatsApp-compatible). Quality: `low` (480p), `medium` (720p, default), `high` (1080p).
+- `fetch_and_send_meme.py "keyword"` — complete workflow: search → download via yt-dlp → convert to MP4 → output JSON with file path (Claude calls `wa_send_video` to send).
+
+**Example workflow**: User asks "send me a funny meme" → script searches Gist, downloads, converts, outputs path → Claude calls `wa_send_video` to send. No manual video juggling.
+
+The meme collection Gist contains 100+ curated funny videos with YouTube links. To use a different collection, update `GIST_URL` in each script.
 
 ## Security notes
 
@@ -295,11 +330,9 @@ MCP server connected in only one session at a time.
   program, not a path — so `sandbox.enabled` remains the real boundary there; this is the cheap
   layer in front of it.
 
-Voice notes can't carry the `(_Claude_)` text marker, so they get an audible one instead: a short
-880 Hz tone appended to every outbound voice note (`withMarkerTone` in `src/server.mjs`, which
-every path routes through — synthesised or pre-made — so no call site can forget it). Quieter than
-a spoken disclaimer, and unmistakable once you've heard it. It is still a weaker signal than the
-text marker: a listener who doesn't know what the beep means learns nothing from it.
+Voice notes can't carry the `(_Claude_)` text marker WhatsApp text sends end in — there used to be
+an audible tone standing in for it, removed at Burak's request as not worth it. A voice note is
+therefore indistinguishable from one the owner recorded, in chats where that matters.
 
 One gap worth knowing rather than pretending away: **allowlisting a group extends to whoever is
 added to it later**, with no re-approval.
