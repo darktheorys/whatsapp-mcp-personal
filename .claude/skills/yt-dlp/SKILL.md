@@ -123,6 +123,20 @@ scripts/search_videos.py "query" --limit 10
 scripts/search_videos.py "query" --json  # structured output
 ```
 
+### video_info.py
+
+Prints title/duration/uploader for a single known URL, no download — a fixed-argument wrapper
+around `yt-dlp --no-download --print ...`. Use this instead of ever invoking raw `yt-dlp`
+directly: it isn't allowlisted (a wrapper whose CLI surface only accepts a URL can't be tricked
+into passing `--exec`, unlike any allowlist pattern starting with the bare `yt-dlp` binary).
+
+**Usage**:
+
+```bash
+scripts/video_info.py <url>
+scripts/video_info.py <url> --json
+```
+
 ### watch_video.py
 
 Samples frames + a transcript from a downloaded video so its content can be checked before
@@ -202,9 +216,10 @@ the README wins (this file gets stale faster). Summary, kept in sync as of 2026-
 
    `-q 480p` avoids a 403 the unconstrained "best" format selector can hit on some URLs — if it
    still 403s, try `-f "best[height<=480]"` instead. **Check the video's title first**
-   (`yt-dlp --print title <url>`) if it might contain a URL itself (some reposted/aggregator
+   (`scripts/video_info.py <url>`) if it might contain a URL itself (some reposted/aggregator
    uploads title the video as its own source link) — the `%(title)s` output template turns
-   slashes in the title into literal nested directories otherwise.
+   slashes in the title into literal nested directories otherwise. Never invoke raw `yt-dlp`
+   directly (it isn't allowlisted, and shouldn't be — see the README's Security notes on why).
 
 3. **Convert to MP4 and place the finished file in `state/memes/`** (the only sendable directory,
    besides the session scratchpad) — use the meme-tools skill's converter, not a hand-rolled

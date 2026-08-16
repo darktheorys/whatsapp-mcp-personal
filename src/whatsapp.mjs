@@ -5,7 +5,7 @@ import makeWASocket, {
   useMultiFileAuthState,
 } from "@whiskeysockets/baileys";
 
-import { AUTH_DIR, LOG_PATH, ensureDirs } from "./config.mjs";
+import { AUTH_DIR, LOG_PATH, ensureDirs, loadConfig } from "./config.mjs";
 
 // MCP runs over stdio: stdout is the JSON-RPC channel. Baileys' logger must never touch it.
 ensureDirs();
@@ -33,7 +33,7 @@ export function connectionState() {
 // takes the whole server down. Every dispatch goes through here.
 const safely = (fn, arg, what) => Promise.resolve(fn?.(arg)).catch((err) => logger.error(err, `${what} failed`));
 
-export async function startWhatsApp({ onMessage, onReaction }) {
+export async function startWhatsApp({ onMessage, onReaction, onPresence }) {
   const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
   const { version } = await fetchLatestBaileysVersion();
 
@@ -58,6 +58,14 @@ export async function startWhatsApp({ onMessage, onReaction }) {
     const { connection, lastDisconnect } = update;
     if (connection === "open") {
       lastError = null;
+      // Presence updates for a jid only arrive after subscribing to it (and only if that
+      // contact's privacy settings allow sharing last-seen/composing status at all — if they
+      // don't, this silently gets nothing, same as WhatsApp's own UI would show no indicator
+      // either). Best-effort per allowlisted jid; one failing (e.g. a group jid, which
+      // presenceSubscribe doesn't apply to the same way) must not stop the rest.
+      for (const jid of loadConfig().allowlist) {
+        thisSock.presenceSubscribe(jid).catch(() => {});
+      }
       return;
     }
     if (connection === "close") {
@@ -86,7 +94,7 @@ export async function startWhatsApp({ onMessage, onReaction }) {
       // servers if the connection keeps failing immediately (robotic-looking retries are
       // themselves one of the signals WhatsApp's abuse detection weighs).
       setTimeout(() => {
-        startWhatsApp({ onMessage, onReaction }).catch((err) => logger.error(err, "reconnect failed"));
+        startWhatsApp({ onMessage, onReaction, onPresence }).catch((err) => logger.error(err, "reconnect failed"));
       }, 3000);
     }
   });
@@ -101,6 +109,16 @@ export async function startWhatsApp({ onMessage, onReaction }) {
     if (getSocket() !== thisSock) return;
     for (const r of reactions) safely(onReaction, r, "onReaction");
   });
+
+  // Composing/recording/paused status for whichever jid(s) presenceSubscribe was called on above.
+  // Not persisted anywhere yet (ephemeral wake-timing signal only) -- if this needs a durable
+  // trail later, that's a deliberate addition to make then, not a side effect of this listener.
+  if (onPresence) {
+    thisSock.ev.on("presence.update", (update) => {
+      if (getSocket() !== thisSock) return;
+      safely(onPresence, update, "onPresence");
+    });
+  }
 
   return thisSock;
 }
