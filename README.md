@@ -246,7 +246,10 @@ containing "@claude" wakes a session while it's on. The chat stays on the allowl
 `/ai off`) and the command itself still works in both directions from inside the chat regardless
 of the current state, so turning it back off is always possible. `wa_status`'s `incognitoJids`
 surfaces which chats currently have it on, since "nothing shows up in `wa_recent` for this chat"
-would otherwise look like a bug rather than the intended effect.
+would otherwise look like a bug rather than the intended effect. **The toggle itself is still
+recorded** in `command_log` (see Security notes) even while content is hidden — the fact that
+incognito was turned on/off for a jid, and when, is exactly the one thing that should survive
+regardless of what incognito otherwise suppresses.
 
 ## Multiple sessions
 
@@ -264,6 +267,7 @@ MCP server connected in only one session at a time.
 | Tool                | Does                                                                                                                                       |
 | ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
 | `wa_status`         | Connection state, own linked JID, allowlist, logged-message counts.                                                                        |
+| `wa_audit_log`      | `{ jid?, limit? }` — recent in-chat commands that fired (setting + new value, never message content); records even under `/incognito`.     |
 | `wa_groups`         | Groups this number is in, with their JIDs. The only way to learn a group JID.                                                              |
 | `wa_contacts`       | jid → display name, derived only from logged messages for allowlisted chats.                                                               |
 | `wa_send`           | `{ to, text }` — sends only if `to` is on the allowlist. Auto-routes to a spoken voice note if the chat is in `/speaking voice-only` mode. |
@@ -378,7 +382,12 @@ this with the local scripts (there is no MCP shortcut for this — see "YouTube 
   Archiving is a flag rather than a file move. `state/inbox.log` stays a plain file on purpose —
   a `Monitor` tails it, and nothing tails a database. Migrating from the older JSONL layout:
   `node scripts/migrate-to-sqlite.mjs` (idempotent, leaves the `.jsonl` files in place for you to
-  delete once you've checked the counts).
+  delete once you've checked the counts). The same database also has a `command_log` table (one
+  row per in-chat command that actually fired — `/wakelevel`, `/verbosity`, `/incognito`, all of
+  them) via `logCommand`/`readCommandLog` in `store.mjs` — an audit trail of _that_ a setting
+  changed, not message content, so it survives regardless of incognito (see below): the one thing
+  worth recording about a chat with incognito on is that incognito was toggled at all. No tool
+  wraps `readCommandLog` yet; call it directly if the history is ever needed.
 - `state/` is gitignored and mode-700; it holds your WhatsApp linked-device keys, message log,
   and any images, documents, or voice notes downloaded from allowlisted chats.
   Losing it means re-pairing, not a leaked account — but treat it like a credential file anyway.

@@ -45,8 +45,10 @@ import {
   appendMessage,
   archiveOldMessages,
   findMessage,
+  logCommand,
   logInbox,
   messageCount,
+  readCommandLog,
   readContacts,
   readNewMessages,
   readRecent,
@@ -727,18 +729,23 @@ async function handleIncoming(waMessage) {
     const trimmed = content.text?.trim() ?? "";
     const wakeLevel = COMMANDS.wakelevel.exec(trimmed);
     if (wakeLevel) {
-      setMentionOnly(jid, wakeLevel[1].toLowerCase() === "mention-only");
+      const level = wakeLevel[1].toLowerCase();
+      setMentionOnly(jid, level === "mention-only");
+      logCommand(jid, "wakelevel", level);
       return;
     }
     const speaking = COMMANDS.speaking.exec(trimmed);
     if (speaking) {
-      setVoiceOnly(jid, speaking[1].toLowerCase() === "voice-only");
+      const mode = speaking[1].toLowerCase();
+      setVoiceOnly(jid, mode === "voice-only");
+      logCommand(jid, "speaking", mode);
       return;
     }
     // Global, not per-chat — see speakingRate()'s comment in config.mjs.
     const speed = COMMANDS.speakingSpeed.exec(trimmed);
     if (speed) {
       setSpeakingRate(Number(speed[1]));
+      logCommand(jid, "speaking-speed", speed[1]);
       return;
     }
     // Global too: transcription quality doesn't vary by who is speaking. Missing model files are
@@ -755,6 +762,7 @@ async function handleIncoming(waMessage) {
         return;
       }
       setS2tTier(tier);
+      logCommand(jid, "s2t-tier", tier);
       return;
     }
     // Global too: TTS voice quality, decoupled from s2t_tier — wanting a fast, low-effort
@@ -773,6 +781,7 @@ async function handleIncoming(waMessage) {
         return;
       }
       setT2sTier(tier);
+      logCommand(jid, "t2s-tier", tier);
       return;
     }
     // Per-chat, unlike the others above: which language this chat's outgoing voice notes default
@@ -792,13 +801,16 @@ async function handleIncoming(waMessage) {
         return;
       }
       setEnglish(jid, newLang === "en");
+      logCommand(jid, "language", newLang);
       return;
     }
     const media = COMMANDS.readMedia.exec(trimmed);
     if (media) {
       const on = media[2].toLowerCase() === "yes";
-      if (media[1].toLowerCase() === "image") setImageEnabled(jid, on);
+      const kind = media[1].toLowerCase();
+      if (kind === "image") setImageEnabled(jid, on);
       else setVoiceEnabled(jid, on);
+      logCommand(jid, `read-${kind}`, on ? "yes" : "no");
       return;
     }
     // Per-chat, like /language -- how much detail Claude's own replies to *this* chat carry.
@@ -806,7 +818,9 @@ async function handleIncoming(waMessage) {
     // changes what verbosity(jid) reads back at reply time, never a code path that can be "missing."
     const verbosityCmd = COMMANDS.verbosity.exec(trimmed);
     if (verbosityCmd) {
-      setVerbosity(jid, verbosityCmd[1].toLowerCase());
+      const level = verbosityCmd[1].toLowerCase();
+      setVerbosity(jid, level);
+      logCommand(jid, "verbosity", level);
       return;
     }
     // Unlike every command above, this one replies into the chat instead of silently flipping a
@@ -814,6 +828,7 @@ async function handleIncoming(waMessage) {
     // something or it looks like it didn't fire.
     if (COMMANDS.help.exec(trimmed)) {
       await getSocket()?.sendMessage(jid, { text: helpText(jid) + ATTRIBUTION });
+      logCommand(jid, "help", null);
       return;
     }
     // "/ai off" removes this chat from the allowlist entirely -- a one-way door, deliberately.
@@ -824,6 +839,10 @@ async function handleIncoming(waMessage) {
     // confirming the change. `jid` was already validated at the top of this function while the
     // chat was still allowlisted, so this one send is safe despite bypassing that gate.
     if (COMMANDS.ai.exec(trimmed)) {
+      // Logged before removing the jid from the allowlist, not after -- command_log is keyed by
+      // jid same as everything else, and there is no reason this one entry needs to be the
+      // exception to "log before acting" the others above already follow.
+      logCommand(jid, "ai", "off");
       removeFromAllowlist(jid);
       await getSocket()?.sendMessage(jid, {
         text: `AI kapatıldı bu chat için — tekrar açmak için state/config.json'a elle eklemek gerekiyor.${ATTRIBUTION}`,
@@ -838,7 +857,12 @@ async function handleIncoming(waMessage) {
     // off has to be possible from inside the chat, so this branch runs before the early-return.
     const incognitoCmd = COMMANDS.incognito.exec(trimmed);
     if (incognitoCmd) {
-      setIncognito(jid, incognitoCmd[1].toLowerCase() === "on");
+      const mode = incognitoCmd[1].toLowerCase();
+      setIncognito(jid, mode === "on");
+      // Unconditional, never gated by incognito state -- this is the one thing that must survive
+      // regardless of what incognito otherwise suppresses. See logCommand's own comment in
+      // store.mjs.
+      logCommand(jid, "incognito", mode);
       return;
     }
   }
@@ -997,6 +1021,33 @@ server.registerTool(
     };
     return {
       content: [{ type: "text", text: JSON.stringify(status, null, 2) }],
+    };
+  },
+);
+
+server.registerTool(
+  "wa_audit_log",
+  {
+    title: "In-chat command audit log",
+    description:
+      "Recent in-chat commands that actually fired (/wakelevel, /verbosity, /incognito, etc.) — the setting and its new value, never message content. " +
+      "Reads command_log in state/messages.db, which is otherwise unreadable directly (denied for both the Read tool and, since sandboxing was enabled, " +
+      "raw filesystem access from Bash) — this MCP tool runs inside the server process itself, not through that boundary, so it's the intended way to " +
+      "check this. Records unconditionally, including while a chat has /incognito on: the toggle event itself is the one thing meant to survive that.",
+    inputSchema: {
+      jid: z.string().optional().describe("Restrict to one allowlisted JID; omit for every chat's commands"),
+      limit: z.number().int().positive().max(200).optional(),
+    },
+  },
+  async ({ jid, limit }) => {
+    if (jid && !allowedJid(jid)) {
+      return {
+        isError: true,
+        content: [{ type: "text", text: `Refused: ${jid} is not on the allowlist.` }],
+      };
+    }
+    return {
+      content: [{ type: "text", text: JSON.stringify(readCommandLog(jid, limit ?? 50), null, 2) }],
     };
   },
 );

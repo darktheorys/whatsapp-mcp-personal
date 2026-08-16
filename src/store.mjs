@@ -60,6 +60,18 @@ function getDb() {
     -- active/archive split used to be two separate files and is now a predicate.
     CREATE INDEX IF NOT EXISTS messages_jid_ts ON messages (jid, archived, ts);
     CREATE INDEX IF NOT EXISTS messages_jid_id ON messages (jid, id);
+    -- One row per in-chat command that actually fired (/wakelevel, /verbosity, /incognito, etc.)
+    -- -- an audit trail of *that a setting was changed*, not the message content, so it survives
+    -- regardless of incognito: the whole point of logging a toggle is knowing it happened. detail
+    -- is the matched argument ("mention-only", "on", "low"), not the raw message text.
+    CREATE TABLE IF NOT EXISTS command_log (
+      rowid   INTEGER PRIMARY KEY,
+      ts      INTEGER NOT NULL,
+      jid     TEXT NOT NULL,
+      command TEXT NOT NULL,
+      detail  TEXT
+    );
+    CREATE INDEX IF NOT EXISTS command_log_jid_ts ON command_log (jid, ts);
   `);
   // A database created before these columns existed keeps its old shape — CREATE TABLE IF NOT
   // EXISTS is a no-op on it, indexes on missing columns then fail. Adding them here is cheap and
@@ -101,6 +113,32 @@ export function findRelated(jid, messageId) {
 
 // ponytail: no findMedia() helper yet — media_kind is indexed and ready, but nothing asks for
 // "every voice note in this chat" today. Add the query when a tool needs it, not before.
+
+// Records that an in-chat command fired -- called from every command branch in server.mjs,
+// unconditionally, before any incognito early-return. This must never be gated by incognito: the
+// one thing worth recording about a chat with incognito on is that incognito was toggled at all.
+export function logCommand(jid, command, detail) {
+  getDb()
+    .prepare("INSERT INTO command_log (ts, jid, command, detail) VALUES (?, ?, ?, ?)")
+    .run(Date.now(), jid, command, detail ?? null);
+}
+
+// No tool wraps this yet -- added alongside logCommand so the audit trail is queryable the moment
+// it's asked for, not a second follow-up change. `jid` optional: omit for every chat's commands.
+//
+// Ordered by rowid, not ts: several commands logged within the same millisecond (any scripted
+// burst, or just two fast toggles) tie on ts, and ORDER BY ts DESC then has no defined order among
+// ties -- reversing that back to "chronological" scrambled it. rowid is monotonically increasing
+// on insert with node:sqlite's INTEGER PRIMARY KEY, so it can never tie.
+export function readCommandLog(jid, limit = 50) {
+  const db = getDb();
+  const rows = jid
+    ? db
+        .prepare("SELECT ts, jid, command, detail FROM command_log WHERE jid = ? ORDER BY rowid DESC LIMIT ?")
+        .all(jid, limit)
+    : db.prepare("SELECT ts, jid, command, detail FROM command_log ORDER BY rowid DESC LIMIT ?").all(limit);
+  return rows.reverse();
+}
 
 // One line per inbound message, tailed by a Monitor to wake the Claude session on arrival. This
 // stays a plain file on purpose: `tail -f` is the wake mechanism, and nothing tails a database.
