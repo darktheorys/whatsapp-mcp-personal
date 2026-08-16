@@ -109,6 +109,33 @@ Extract video URLs from text or files.
 cat file.txt | /scripts/extract_urls.py
 ```
 
+### search_videos.py
+
+Search YouTube directly via yt-dlp's `ytsearch` (no API key, no download) — title, url, duration,
+uploader, view count per hit. Prefer this over `WebSearch` once the target is known to be a
+YouTube video: duration is visible up front, so filtering for a short clip doesn't require
+downloading a candidate first.
+
+**Usage**:
+
+```bash
+scripts/search_videos.py "query" --limit 10
+scripts/search_videos.py "query" --json  # structured output
+```
+
+### watch_video.py
+
+Samples frames + a transcript from a downloaded video so its content can be checked before
+sending, rather than guessed from the filename/title. See the README's "Watching a downloaded
+video before sending it" section for the full behavior (frame sampling, subsampling for long
+clips, the `first_frame` → `contact_sheet` → `frames[]` read order).
+
+**Usage**:
+
+```bash
+scripts/watch_video.py <path> [--fps 1] [--out-dir DIR]
+```
+
 ## Video Platform Support
 
 The skill recognizes URLs from:
@@ -152,46 +179,62 @@ The skill recognizes URLs from:
 
 ### YouTube to WhatsApp Workflow
 
-When user asks to send YouTube video/audio to WhatsApp chat:
+The repo README's "YouTube / video tools" and "Meme Tools" → "When the Gist has no match" sections
+are the source of truth for this workflow — read those first if this file and the README disagree,
+the README wins (this file gets stale faster). Summary, kept in sync as of 2026-08-16:
 
-1. **Search for video** (optional):
+1. **Search for a video** — prefer the dedicated script over hand-rolling the `ytsearch:` call:
+
    ```bash
-   yt-dlp "ytsearch5:query" --no-warnings --print "%(title)s - %(duration)ds - https://youtu.be/%(id)s" --flat-playlist
+   scripts/search_videos.py "query" --limit 5
    ```
 
-2. **Download to sendable directory** (`state/memes`):
+   Structured output (title/url/duration/uploader/views), no download, no API key. Check duration
+   here before committing to a download — catches a 6-minute compilation when a short clip was
+   wanted, cheaply. `WebSearch` is still the better first move for a scene/quote that might not
+   even be on YouTube (TikTok reposts, etc.).
+
+2. **Download raw footage into `state/tmp/`, never `state/memes/` and never the repo root**:
+
    ```bash
-   scripts/download_video.py <url> -o /path/to/state/memes
-   scripts/extract_audio.py <url> -o /path/to/state/memes
+   scripts/download_video.py <url> -o /path/to/repo/state/tmp -q 480p
    ```
 
-3. **Send to WhatsApp using three separate tools**:
-   - **`wa_send_text_only`** → metadata, link, duration, description (bypasses voice-only mode)
-   - **`wa_send_video`** → video file from `state/memes` with caption
-   - **`wa_send_audio`** → audio file from `state/memes` (sent as voice note)
-   - **Transcript** → if available, send via `wa_send_text_only`
+   `-q 480p` avoids a 403 the unconstrained "best" format selector can hit on some URLs — if it
+   still 403s, try `-f "best[height<=480]"` instead. **Check the video's title first**
+   (`yt-dlp --print title <url>`) if it might contain a URL itself (some reposted/aggregator
+   uploads title the video as its own source link) — the `%(title)s` output template turns
+   slashes in the title into literal nested directories otherwise.
 
-**Example workflow**:
-```
-User: search for kolpacino video and send to chat
+3. **Convert to MP4 and place the finished file in `state/memes/`** (the only sendable directory,
+   besides the session scratchpad) — use the meme-tools skill's converter, not a hand-rolled
+   `ffmpeg` call:
 
-1. yt-dlp "ytsearch:kolpacino" --print "%(title)s - %(duration)ds - https://youtu.be/%(id)s"
-2. download_video.py "https://youtu.be/e6c_GaZGzMA" -o state/memes
-3. extract_audio.py "https://youtu.be/e6c_GaZGzMA" -o state/memes
-4. wa_send_text_only: metadata + link + duration
-5. wa_send_video: video file with caption
-6. wa_send_audio: audio file
-```
+   ```bash
+   ../meme-tools/scripts/convert_to_mp4.py state/tmp/<downloaded>.webm -o state/memes/<name>.mp4
+   ```
 
-**Key points**:
-- Always download to `state/memes` (only sendable directory apart from session scratchpad)
-- Use `wa_send_text_only` for structured data (links, metadata, transcripts) to avoid TTS conversion in voice-only chats
-- Video and audio files must be in `state/memes` before sending
-- For video-only chats, use `wa_send_video` directly without text_only
-- **WhatsApp video format**: Use MP4, not WebM. If download produces WebM, convert with:
-  ```bash
-  ffmpeg -i input.webm -c:v libx264 -c:a aac output.mp4
-  ```
+   Then `rm -rf state/tmp/*` to clear the raw download and its `.info.json`/`.webp` sidecars.
+
+4. **Watch it before sending**, if the content isn't already known/confirmed:
+
+   ```bash
+   scripts/watch_video.py state/memes/<name>.mp4
+   ```
+
+   Read `first_frame` first (catches a bad source — bootleg screen recording, wrong scene, ad
+   overlay — cheaply), then `contact_sheet` for the whole flow in one image, only falling back to
+   individual `frames[]` for a specific moment. Don't skip this for anything going to someone other
+   than the owner.
+
+5. **Send to WhatsApp**:
+   - **`wa_send_video`** → the finished file in `state/memes/`, with a caption.
+   - **`wa_send_text_only`** → link/metadata/transcript as text, if the chat is voice-only and the
+     info is more useful read than heard (structured data doesn't survive TTS well).
+
+6. **Add it to `state/memes/description.md`** once confirmed — what it shows, when to send it —
+   so a future request for the same meme never needs re-searching, re-downloading, or
+   re-`watch_video`-ing it.
 
 ## Quality and Format Selection
 

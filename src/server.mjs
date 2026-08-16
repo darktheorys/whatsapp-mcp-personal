@@ -1,23 +1,12 @@
 import { execFile, execFileSync } from "node:child_process";
-import {
-  existsSync,
-  mkdtempSync,
-  readFileSync,
-  realpathSync,
-  rmSync,
-  statSync,
-  writeFileSync,
-} from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join, sep } from "node:path";
 import { promisify } from "node:util";
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import {
-  downloadMediaMessage,
-  normalizeMessageContent,
-} from "@whiskeysockets/baileys";
+import { downloadMediaMessage, normalizeMessageContent } from "@whiskeysockets/baileys";
 import { z } from "zod";
 
 import {
@@ -41,11 +30,13 @@ import {
   setS2tTier,
   setSpeakingRate,
   setT2sTier,
+  setVerbosity,
   setVoiceEnabled,
   setVoiceOnly,
   speakingRate,
   STATE_DIR,
   t2sTier,
+  verbosity,
 } from "./config.mjs";
 import {
   appendMessage,
@@ -60,12 +51,7 @@ import {
   updateContact,
   updatePollState,
 } from "./store.mjs";
-import {
-  connectionState,
-  getSocket,
-  logger,
-  startWhatsApp,
-} from "./whatsapp.mjs";
+import { connectionState, getSocket, logger, startWhatsApp } from "./whatsapp.mjs";
 
 const execFileAsync = promisify(execFile);
 
@@ -208,15 +194,7 @@ function synthWav(text, voice, rate, lang, outWav) {
     return;
   }
   const aiff = `${outWav}.aiff`;
-  execFileSync("say", [
-    "-v",
-    voice,
-    "-r",
-    String(Math.round(DEFAULT_SAY_WPM * rate)),
-    "-o",
-    aiff,
-    text,
-  ]);
+  execFileSync("say", ["-v", voice, "-r", String(Math.round(DEFAULT_SAY_WPM * rate)), "-o", aiff, text]);
   execFileSync("afconvert", [aiff, outWav, "-d", "LEI16", "-f", "WAVE"]);
   rmSync(aiff, { force: true });
 }
@@ -242,8 +220,7 @@ function encodeVoiceNote(audioPath) {
 // Neither Piper nor macOS `say` reads emoji sensibly — Piper silently drops them (harmless) but
 // `say` on some voices spells out the Unicode name ("grinning face"), so strip them before either
 // engine sees the text rather than depend on that being true for every voice going forward.
-const EMOJI_PATTERN =
-  /[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\u{2190}-\u{21FF}\u{2B00}-\u{2BFF}]/gu;
+const EMOJI_PATTERN = /[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\u{2190}-\u{21FF}\u{2B00}-\u{2BFF}]/gu;
 // \u{FE0F} (VARIATION SELECTOR-16) rides along on emoji like 🍽️ but is a lone combining mark, not
 // part of the main emoji ranges -- a standalone pattern rather than folded into the character
 // class above, since a combining mark inside a `[...]` class is a lint error (it can never combine
@@ -275,10 +252,7 @@ function respellLoanwords(text) {
   const pattern = new RegExp(`\\b(${keys.join("|")})([a-zçğıöşü]*)`, "giu");
   return text.replace(pattern, (_match, base, suffix) => {
     const respelling = dict[base.toLowerCase()];
-    const cased =
-      base[0] === base[0].toUpperCase()
-        ? respelling[0].toUpperCase() + respelling.slice(1)
-        : respelling;
+    const cased = base[0] === base[0].toUpperCase() ? respelling[0].toUpperCase() + respelling.slice(1) : respelling;
     return cased + suffix;
   });
 }
@@ -294,13 +268,7 @@ function speakToBuffer(text, voice, rate = speakingRate(), lang = "tr") {
   try {
     const wav = join(dir, "out.wav");
     const clean = stripEmoji(text);
-    synthWav(
-      lang === "tr" ? respellLoanwords(clean) : clean,
-      voice,
-      rate,
-      lang,
-      wav,
-    );
+    synthWav(lang === "tr" ? respellLoanwords(clean) : clean, voice, rate, lang, wav);
     return encodeVoiceNote(wav);
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -340,9 +308,7 @@ function linkedDeviceSecrets() {
   if (authSecrets?.length) return authSecrets;
   authSecrets = [];
   try {
-    const creds = JSON.parse(
-      readFileSync(join(STATE_DIR, "auth", "creds.json"), "utf8"),
-    );
+    const creds = JSON.parse(readFileSync(join(STATE_DIR, "auth", "creds.json"), "utf8"));
     const walk = (v) => {
       if (typeof v === "string" && v.length >= 24) authSecrets.push(v);
       else if (v && typeof v === "object") Object.values(v).forEach(walk);
@@ -352,10 +318,7 @@ function linkedDeviceSecrets() {
     // No creds yet (unpaired), or unreadable: the pattern checks above still apply. Logged rather
     // than swallowed outright — if this keeps failing after pairing, the exact-match check is not
     // running and nothing else would say so.
-    logger.warn(
-      { err: String(err?.message ?? err) },
-      "could not read linked-device secrets for the outbound scan",
-    );
+    logger.warn({ err: String(err?.message ?? err) }, "could not read linked-device secrets for the outbound scan");
   }
   return authSecrets;
 }
@@ -366,8 +329,7 @@ export function scanOutbound(text) {
     if (re.test(text)) return `it looks like it contains ${what}`;
   }
   for (const secret of linkedDeviceSecrets()) {
-    if (text.includes(secret))
-      return "it contains WhatsApp linked-device key material";
+    if (text.includes(secret)) return "it contains WhatsApp linked-device key material";
   }
   return null;
 }
@@ -379,8 +341,7 @@ const SEND_LIMIT_PER_MIN = 20;
 const recentSends = [];
 export function overSendLimit() {
   const now = Date.now();
-  while (recentSends.length && now - recentSends[0] > 60_000)
-    recentSends.shift();
+  while (recentSends.length && now - recentSends[0] > 60_000) recentSends.shift();
   if (recentSends.length >= SEND_LIMIT_PER_MIN) return true;
   recentSends.push(now);
   return false;
@@ -473,17 +434,12 @@ export function guardOwnMessage(jid, messageId) {
     return {
       error: {
         isError: true,
-        content: [
-          { type: "text", text: `Refused: ${messageId} was already deleted.` },
-        ],
+        content: [{ type: "text", text: `Refused: ${messageId} was already deleted.` }],
       },
     };
   }
   if (target.by !== "claude") {
-    logger.warn(
-      { jid, messageId },
-      "refused to edit/delete a message this server did not send",
-    );
+    logger.warn({ jid, messageId }, "refused to edit/delete a message this server did not send");
     return {
       error: {
         isError: true,
@@ -525,11 +481,7 @@ export function extractContent(m) {
 //
 // Worth knowing: downloading does not notify the sender, and WhatsApp shows them nothing. The
 // marker is for you, not for them.
-const VIEW_ONCE_KEYS = [
-  "viewOnceMessage",
-  "viewOnceMessageV2",
-  "viewOnceMessageV2Extension",
-];
+const VIEW_ONCE_KEYS = ["viewOnceMessage", "viewOnceMessageV2", "viewOnceMessageV2Extension"];
 export function isViewOnce(m) {
   return Boolean(m && VIEW_ONCE_KEYS.some((k) => m[k]));
 }
@@ -543,9 +495,7 @@ export function extractQuoted(m) {
   for (const node of Object.values(m)) {
     // Normalised for the same reason as the message itself: a reply to a disappearing or
     // view-once message carries the quote inside a wrapper too.
-    const quoted =
-      node?.contextInfo?.quotedMessage &&
-      normalizeMessageContent(node.contextInfo.quotedMessage);
+    const quoted = node?.contextInfo?.quotedMessage && normalizeMessageContent(node.contextInfo.quotedMessage);
     // `stanzaId` is the quoted message's own id, which is what makes a reply an actual link back
     // to a stored row rather than just a copy of its text. Logging only the text (as this did
     // originally) means a reply chain can be read but never followed.
@@ -573,8 +523,7 @@ export function mediaName(node, id) {
 // come back as a field on the record rather than as an exception.
 async function saveMedia(waMessage, { kind, node }, id) {
   const bytes = Number(node.fileLength ?? 0);
-  if (bytes > MAX_MEDIA_BYTES)
-    return { kind, skipped: `${Math.round(bytes / 1e6)} MB exceeds cap` };
+  if (bytes > MAX_MEDIA_BYTES) return { kind, skipped: `${Math.round(bytes / 1e6)} MB exceeds cap` };
   try {
     const path = join(MEDIA_DIR, mediaName(node, id));
     writeFileSync(path, await downloadMediaMessage(waMessage, "buffer", {}), {
@@ -600,27 +549,16 @@ async function transcribeVoice(path) {
   try {
     const wav = join(dir, "in.wav");
     const limit = { timeout: 120_000, killSignal: "SIGKILL" };
-    await execFileAsync(
-      "ffmpeg",
-      ["-y", "-i", path, "-ar", "16000", "-ac", "1", wav],
-      limit,
-    );
-    const { stdout } = await execFileAsync(
-      "whisper-cli",
-      ["-m", whisperModel(), "-f", wav, "-nt", "-l", "auto"],
-      {
-        ...limit,
-        encoding: "utf8",
-      },
-    );
+    await execFileAsync("ffmpeg", ["-y", "-i", path, "-ar", "16000", "-ac", "1", wav], limit);
+    const { stdout } = await execFileAsync("whisper-cli", ["-m", whisperModel(), "-f", wav, "-nt", "-l", "auto"], {
+      ...limit,
+      encoding: "utf8",
+    });
     return stdout.trim() || null;
   } catch (err) {
     // Silence here would make a missing whisper-cli or model file look exactly like an
     // unintelligible recording — every voice note would quietly log as "[voice]" forever.
-    logger.warn(
-      { err: String(err?.message ?? err) },
-      "voice transcription failed",
-    );
+    logger.warn({ err: String(err?.message ?? err) }, "voice transcription failed");
     return null;
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -633,9 +571,7 @@ async function transcribeVoice(path) {
 async function resolveSender(jid) {
   if (!jid?.endsWith("@lid")) return jid;
   try {
-    return (
-      (await getSocket()?.signalRepository?.lidMapping?.getPNForLID(jid)) ?? jid
-    );
+    return (await getSocket()?.signalRepository?.lidMapping?.getPNForLID(jid)) ?? jid;
   } catch {
     return jid; // an unresolvable sender is worth far less than a dropped message
   }
@@ -657,7 +593,41 @@ export const COMMANDS = {
   t2sTier: /^\/t2s-tier\s+(low|mid|high)\s*$/i,
   language: /^\/language\s+(tr|en)\s*$/i,
   readMedia: /^\/read-(image|audio)\s+(yes|no)\s*$/i,
+  verbosity: /^\/verbosity\s+(low|mid|high)\s*$/i,
+  help: /^\/help\s*$/i,
 };
+
+// "/help" -- the one command that answers into the chat instead of silently flipping a setting.
+// Lists every command form plus this chat's current settings and the global ones, so "what's this
+// set to right now" never needs `wa_status` or reading state/config.json by hand. Kept as one
+// function (not spread across the command handlers above) so the list of commands shown here and
+// the list actually recognized by COMMANDS can't drift apart from having two places to update.
+function helpText(jid) {
+  const commands = [
+    '/wakelevel mention-only|verbose — wake only on "@claude" mentions, or every message',
+    "/speaking voice-only|text-only — replies to this chat as voice notes, or as text",
+    "/speaking-speed N — global TTS speed multiplier (1.0 = native pace)",
+    "/s2t-tier low|mid|high — global whisper model tier for incoming voice notes",
+    "/t2s-tier low|mid|high — global Piper voice quality tier for outgoing voice notes",
+    "/language tr|en — this chat's outgoing voice notes default to Turkish or English",
+    "/read-image yes|no — keep (or stop keeping) images/documents/stickers from this chat",
+    "/read-audio yes|no — keep and transcribe (or stop) voice notes from this chat",
+    "/verbosity low|mid|high — how much detail Claude's replies to this chat carry",
+    "/help — this message",
+  ];
+  const status = [
+    `wakelevel: ${isMentionOnly(jid) ? "mention-only" : "verbose"}`,
+    `speaking: ${isVoiceOnly(jid) ? "voice-only" : "text-only"}`,
+    `language: ${isEnglish(jid) ? "en" : "tr"}`,
+    `read-image: ${hasImageDisabled(jid) ? "no" : "yes"}`,
+    `read-audio: ${hasVoiceDisabled(jid) ? "no" : "yes"}`,
+    `verbosity: ${verbosity(jid)}`,
+    `(global) speaking-speed: ${speakingRate()}`,
+    `(global) s2t-tier: ${s2tTier()}`,
+    `(global) t2s-tier: ${t2sTier()}`,
+  ];
+  return `Commands:\n${commands.map((c) => `- ${c}`).join("\n")}\n\nCurrent status (this chat unless marked global):\n${status.map((s) => `- ${s}`).join("\n")}`;
+}
 
 async function handleIncoming(waMessage) {
   const { key } = waMessage;
@@ -746,30 +716,36 @@ async function handleIncoming(waMessage) {
       else setVoiceEnabled(jid, on);
       return;
     }
+    // Per-chat, like /language -- how much detail Claude's own replies to *this* chat carry.
+    // Unlike s2t-tier/t2s-tier there is no model file to check for existence: this only ever
+    // changes what verbosity(jid) reads back at reply time, never a code path that can be "missing."
+    const verbosityCmd = COMMANDS.verbosity.exec(trimmed);
+    if (verbosityCmd) {
+      setVerbosity(jid, verbosityCmd[1].toLowerCase());
+      return;
+    }
+    // Unlike every command above, this one replies into the chat instead of silently flipping a
+    // setting — there's nothing to flip, and a command that changes nothing needs to say
+    // something or it looks like it didn't fire.
+    if (COMMANDS.help.exec(trimmed)) {
+      await getSocket()?.sendMessage(jid, { text: helpText(jid) + ATTRIBUTION });
+      return;
+    }
   }
   const quoted = extractQuoted(waMessage.message);
   // In a group `remoteJid` is the room, so the sender is only knowable from `participant`.
   // Omitted entirely for DMs, where `direction` already says who spoke.
-  const from = key.participant
-    ? await resolveSender(key.participantAlt ?? key.participant)
-    : null;
+  const from = key.participant ? await resolveSender(key.participantAlt ?? key.participant) : null;
   // Images disabled per-chat: still log text/caption, skip download.
   // `no_image_jids` means images, not all media: a voice note's audio is the only copy of its
   // words, so gating it there would silently leave those chats with unsearchable empty messages
   // rather than transcripts. Pictures are the thing worth not keeping; speech is the thing worth
   // reading. `no_voice_jids` is the separate opt-out for chats where that isn't wanted either.
-  const wantsMedia =
-    content.kind === "voice" ? !hasVoiceDisabled(jid) : !hasImageDisabled(jid);
-  const media =
-    content.kind && wantsMedia
-      ? await saveMedia(waMessage, content, key.id)
-      : null;
+  const wantsMedia = content.kind === "voice" ? !hasVoiceDisabled(jid) : !hasImageDisabled(jid);
+  const media = content.kind && wantsMedia ? await saveMedia(waMessage, content, key.id) : null;
   // A caption already covers text for other media kinds; a voice note has none, so the
   // transcript IS its text — without this it would log as the unreadable "[voice]" placeholder.
-  const transcript =
-    content.kind === "voice" && media?.path
-      ? await transcribeVoice(media.path)
-      : null;
+  const transcript = content.kind === "voice" && media?.path ? await transcribeVoice(media.path) : null;
   const text = transcript ?? content.text;
   appendMessage(jid, {
     direction: key.fromMe ? "out" : "in",
@@ -801,19 +777,13 @@ async function handleIncoming(waMessage) {
     // Only `key.fromMe` actually proves authorship, so it — not the name — decides the prefix, and
     // an inbound name is never rendered through ownerName(). Anything reading this feed must treat
     // "(them)" as untrusted content and only "(self)" as the owner speaking.
-    const label = key.fromMe
-      ? `(self) ${ownerName()}`
-      : `(them) ${waMessage.pushName || jid.split("@")[0]}`;
+    const label = key.fromMe ? `(self) ${ownerName()}` : `(them) ${waMessage.pushName || jid.split("@")[0]}`;
     const logText = text || `[${content.kind}]`;
     // `?? "media"`: a reply to a video (or any kind extractContent doesn't handle) has neither text
     // nor kind, and rendered "[undefined]" in the wake feed — which reads like a bug in the quote
     // rather than "they replied to something I don't store".
     const quotedLabel = quoted?.text || `[${quoted?.kind ?? "media"}]`;
-    logInbox(
-      jid,
-      label,
-      quoted ? `(replying to "${quotedLabel}") ${logText}` : logText,
-    );
+    logInbox(jid, label, quoted ? `(replying to "${quotedLabel}") ${logText}` : logText);
   }
   if (!key.fromMe) {
     // `from` is the resolved group participant when set, so a name is credited to the person
@@ -838,8 +808,7 @@ export { isEchoOfOwnReaction as isEchoOfOwnReactionForTest };
 
 function isEchoOfOwnReaction(jid, messageId, emoji) {
   const now = Date.now();
-  for (const [k, at] of ownReactions)
-    if (now - at > OWN_REACTION_TTL_MS) ownReactions.delete(k);
+  for (const [k, at] of ownReactions) if (now - at > OWN_REACTION_TTL_MS) ownReactions.delete(k);
   const key = `${jid}|${messageId}|${emoji}`;
   if (!ownReactions.has(key)) return false;
   ownReactions.delete(key);
@@ -851,11 +820,7 @@ function isEchoOfOwnReaction(jid, messageId, emoji) {
 async function handleReaction({ key, reaction }) {
   const jid = allowedJid(key.remoteJid, key.remoteJidAlt);
   if (!jid) return;
-  if (
-    reaction.key?.fromMe &&
-    isEchoOfOwnReaction(jid, key.id, reaction.text ?? "")
-  )
-    return;
+  if (reaction.key?.fromMe && isEchoOfOwnReaction(jid, key.id, reaction.text ?? "")) return;
   const reactor = reaction.key?.participant ?? key.participant;
   appendMessage(jid, {
     direction: reaction.key?.fromMe ? "out" : "in",
@@ -878,13 +843,12 @@ server.registerTool(
   "wa_status",
   {
     title: "WhatsApp connection status",
-    description:
-      "Connection state, linked own number, and the configured allowlist.",
+    description: "Connection state, linked own number, and the configured allowlist.",
     inputSchema: {},
   },
   async () => {
     const sock = getSocket();
-    const { allowlist, english_jids } = loadConfig();
+    const { allowlist, english_jids, verbosity_jids } = loadConfig();
     const { live, lastError } = connectionState();
     const status = {
       connected: live,
@@ -899,12 +863,14 @@ server.registerTool(
       // Language is per-chat (see /language), so status reports which chats default to English
       // rather than a single value — t2s_tier still applies uniformly across chats.
       t2sTier: t2sTier(),
+      // Per-chat, like englishJids -- how much detail/length Claude's own replies to each chat
+      // carry (see "/verbosity"). Only chats that have set a non-default level appear here; every
+      // other allowlisted chat is implicitly "low".
+      verbosityJids: verbosity_jids,
       englishJids: english_jids,
       ownJid: sock?.user?.id ?? null,
       allowlist,
-      loggedMessages: Object.fromEntries(
-        allowlist.map((jid) => [jid, messageCount(jid)]),
-      ),
+      loggedMessages: Object.fromEntries(allowlist.map((jid) => [jid, messageCount(jid)])),
     };
     return {
       content: [{ type: "text", text: JSON.stringify(status, null, 2) }],
@@ -934,14 +900,12 @@ server.registerTool(
       };
     }
     const { allowlist } = loadConfig();
-    const groups = Object.values(await sock.groupFetchAllParticipating()).map(
-      (g) => ({
-        jid: g.id,
-        subject: g.subject ?? "",
-        participants: g.participants?.length ?? 0,
-        allowed: allowlist.includes(g.id),
-      }),
-    );
+    const groups = Object.values(await sock.groupFetchAllParticipating()).map((g) => ({
+      jid: g.id,
+      subject: g.subject ?? "",
+      participants: g.participants?.length ?? 0,
+      allowed: allowlist.includes(g.id),
+    }));
     groups.sort((a, b) => a.subject.localeCompare(b.subject));
     return {
       content: [{ type: "text", text: JSON.stringify(groups, null, 2) }],
@@ -956,9 +920,7 @@ server.registerTool(
     description:
       "Send a text message to an allowlisted WhatsApp JID. Refuses anything not in state/config.json's allowlist.",
     inputSchema: {
-      to: z
-        .string()
-        .describe("Recipient JID, e.g. 491701234567@s.whatsapp.net"),
+      to: z.string().describe("Recipient JID, e.g. 491701234567@s.whatsapp.net"),
       text: z.string().min(1),
     },
   },
@@ -971,12 +933,7 @@ server.registerTool(
     if (isVoiceOnly(to)) {
       let buffer;
       try {
-        buffer = speakToBuffer(
-          text,
-          undefined,
-          undefined,
-          isEnglish(to) ? "en" : "tr",
-        );
+        buffer = speakToBuffer(text, undefined, undefined, isEnglish(to) ? "en" : "tr");
       } catch (err) {
         return {
           isError: true,
@@ -1026,12 +983,8 @@ server.registerTool(
       "voice note. For speaking text directly, use wa_send_voice instead — this is for a file that " +
       "already exists on disk.",
     inputSchema: {
-      to: z
-        .string()
-        .describe("Recipient JID, e.g. 491701234567@s.whatsapp.net"),
-      path: z
-        .string()
-        .describe("Absolute local path to the audio file (m4a/ogg/mp3 etc.)"),
+      to: z.string().describe("Recipient JID, e.g. 491701234567@s.whatsapp.net"),
+      path: z.string().describe("Absolute local path to the audio file (m4a/ogg/mp3 etc.)"),
     },
   },
   async ({ to, path }) => {
@@ -1086,9 +1039,7 @@ server.registerTool(
       "Send an image (from a local file path) to an allowlisted WhatsApp JID, with an optional caption. " +
       "Refuses anything not in state/config.json's allowlist.",
     inputSchema: {
-      to: z
-        .string()
-        .describe("Recipient JID, e.g. 491701234567@s.whatsapp.net"),
+      to: z.string().describe("Recipient JID, e.g. 491701234567@s.whatsapp.net"),
       path: z.string().describe("Absolute local path to the image file"),
       caption: z.string().optional(),
     },
@@ -1147,22 +1098,16 @@ server.registerTool(
       "`language` defaults to this chat's usual language (set with /language) but can be overridden " +
       "per call — e.g. to reply in English for one message in an otherwise-Turkish chat.",
     inputSchema: {
-      to: z
-        .string()
-        .describe("Recipient JID, e.g. 491701234567@s.whatsapp.net"),
+      to: z.string().describe("Recipient JID, e.g. 491701234567@s.whatsapp.net"),
       text: z.string().min(1),
       voice: z
         .string()
         .optional()
-        .describe(
-          "A macOS `say` voice name, e.g. Cem or Daniel — omit for the default Piper voice",
-        ),
+        .describe("A macOS `say` voice name, e.g. Cem or Daniel — omit for the default Piper voice"),
       language: z
         .enum(["tr", "en"])
         .optional()
-        .describe(
-          "Piper voice language for this one message — omit to use the chat's default (see /language)",
-        ),
+        .describe("Piper voice language for this one message — omit to use the chat's default (see /language)"),
       rate: z
         .number()
         .positive()
@@ -1178,12 +1123,7 @@ server.registerTool(
     const sock = getSocket();
     let buffer;
     try {
-      buffer = speakToBuffer(
-        text,
-        voice,
-        rate,
-        lang ?? (isEnglish(to) ? "en" : "tr"),
-      );
+      buffer = speakToBuffer(text, voice, rate, lang ?? (isEnglish(to) ? "en" : "tr"));
     } catch (err) {
       return {
         isError: true,
@@ -1216,16 +1156,8 @@ server.registerTool(
       "Send an emoji reaction to a specific logged message instead of a text reply. Pass an empty string to remove a reaction.",
     inputSchema: {
       jid: z.string().describe("Allowlisted chat JID the message belongs to"),
-      messageId: z
-        .string()
-        .describe(
-          "The message id to react to (id field from wa_recent/wa_search)",
-        ),
-      emoji: z
-        .string()
-        .describe(
-          "Emoji to react with, e.g. 👍. Empty string removes an existing reaction.",
-        ),
+      messageId: z.string().describe("The message id to react to (id field from wa_recent/wa_search)"),
+      emoji: z.string().describe("Emoji to react with, e.g. 👍. Empty string removes an existing reaction."),
     },
   },
   async ({ jid, messageId, emoji }) => {
@@ -1250,9 +1182,7 @@ server.registerTool(
       remoteJid: jid,
       id: messageId,
       fromMe: target.direction === "out",
-      ...(jid.endsWith("@g.us") && target.from
-        ? { participant: target.from }
-        : {}),
+      ...(jid.endsWith("@g.us") && target.from ? { participant: target.from } : {}),
     };
     await sock.sendMessage(jid, { react: { text: emoji, key } });
     noteOwnReaction(jid, messageId, emoji);
@@ -1286,9 +1216,7 @@ server.registerTool(
       "sending and marks the result as edited; both are its rules, not this server's.",
     inputSchema: {
       jid: z.string().describe("Allowlisted chat JID the message belongs to"),
-      messageId: z
-        .string()
-        .describe("The message id to edit (id field from wa_recent/wa_search)"),
+      messageId: z.string().describe("The message id to edit (id field from wa_recent/wa_search)"),
       text: z.string().min(1).describe("The replacement text"),
     },
   },
@@ -1331,11 +1259,7 @@ server.registerTool(
       "in the chat; the content goes, the fact of it does not.",
     inputSchema: {
       jid: z.string().describe("Allowlisted chat JID the message belongs to"),
-      messageId: z
-        .string()
-        .describe(
-          "The message id to delete (id field from wa_recent/wa_search)",
-        ),
+      messageId: z.string().describe("The message id to delete (id field from wa_recent/wa_search)"),
     },
   },
   async ({ jid, messageId }) => {
@@ -1376,19 +1300,12 @@ server.registerTool(
       "message text — read a chat by naming it, so one chat's content is never pulled into context " +
       "as a side effect of checking another.",
     inputSchema: {
-      jid: z
-        .string()
-        .optional()
-        .describe(
-          "The allowlisted JID to read; omit for a counts-only digest across chats",
-        ),
+      jid: z.string().optional().describe("The allowlisted JID to read; omit for a counts-only digest across chats"),
       limit: z.number().int().positive().max(200).optional(),
       all: z
         .boolean()
         .optional()
-        .describe(
-          "If true, fetch all recent messages; if false (default), fetch only new since last poll",
-        ),
+        .describe("If true, fetch all recent messages; if false (default), fetch only new since last poll"),
     },
   },
   async ({ jid, limit, all = false }) => {
@@ -1399,9 +1316,7 @@ server.registerTool(
       if (!allowedJid(jid)) {
         return {
           isError: true,
-          content: [
-            { type: "text", text: `Refused: ${jid} is not on the allowlist.` },
-          ],
+          content: [{ type: "text", text: `Refused: ${jid} is not on the allowlist.` }],
         };
       }
       archiveOldMessages(jid);
@@ -1467,9 +1382,7 @@ server.registerTool(
     if (!allowedJid(jid)) {
       return {
         isError: true,
-        content: [
-          { type: "text", text: `Refused: ${jid} is not on the allowlist.` },
-        ],
+        content: [{ type: "text", text: `Refused: ${jid} is not on the allowlist.` }],
       };
     }
     const n = limit ?? 20;
@@ -1492,9 +1405,7 @@ server.registerTool(
       "Send plain text to a voice-only chat without converting it to a voice note. Useful for sharing " +
       "structured information (URLs, metadata, transcripts) where text is clearer than spoken audio.",
     inputSchema: {
-      to: z
-        .string()
-        .describe("Recipient JID, e.g. 491701234567@s.whatsapp.net"),
+      to: z.string().describe("Recipient JID, e.g. 491701234567@s.whatsapp.net"),
       text: z.string().min(1),
     },
   },
@@ -1512,9 +1423,7 @@ server.registerTool(
       id: sent?.key?.id ?? null,
     });
     return {
-      content: [
-        { type: "text", text: `Sent text to ${to} (bypassed voice-only).` },
-      ],
+      content: [{ type: "text", text: `Sent text to ${to} (bypassed voice-only).` }],
     };
   },
 );
@@ -1527,12 +1436,8 @@ server.registerTool(
       "Send a video file to an allowlisted WhatsApp JID, with an optional caption. " +
       "Refuses anything not in state/config.json's allowlist.",
     inputSchema: {
-      to: z
-        .string()
-        .describe("Recipient JID, e.g. 491701234567@s.whatsapp.net"),
-      path: z
-        .string()
-        .describe("Absolute local path to the video file (mp4/mkv/mov etc.)"),
+      to: z.string().describe("Recipient JID, e.g. 491701234567@s.whatsapp.net"),
+      path: z.string().describe("Absolute local path to the video file (mp4/mkv/mov etc.)"),
       caption: z.string().optional(),
     },
   },
@@ -1599,11 +1504,7 @@ server.registerTool(
       // has accepted (or rejected) it. Reporting success there is how "Connected." came back for
       // an account that had been logged out. Wait for the connection to actually resolve.
       // ponytail: poll rather than wire up an event listener — this runs once per tool call.
-      for (
-        let i = 0;
-        i < 40 && !connectionState().live && !connectionState().lastError;
-        i++
-      ) {
+      for (let i = 0; i < 40 && !connectionState().live && !connectionState().lastError; i++) {
         await new Promise((r) => setTimeout(r, 250));
       }
       const { live, lastError } = connectionState();

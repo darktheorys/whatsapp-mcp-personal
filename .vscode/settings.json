@@ -1,0 +1,8 @@
+{
+    "oxc.enable.oxfmt": true,
+    "editor.defaultFormatter": "oxc.oxc-vscode",
+    "editor.formatOnSave": true,
+    "[javascript]": {
+        "editor.defaultFormatter": "oxc.oxc-vscode"
+    }
+}

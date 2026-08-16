@@ -13,8 +13,7 @@ export const MEMES_DIR = join(STATE_DIR, "memes");
 // that debris out of both the repo root and state/memes/ (the sendable, indexed directory).
 export const TMP_DIR = join(STATE_DIR, "tmp");
 // Overridable so the allowlist test can run against a throwaway config instead of your real one.
-export const CONFIG_PATH =
-  process.env.WA_CONFIG_PATH ?? join(STATE_DIR, "config.json");
+export const CONFIG_PATH = process.env.WA_CONFIG_PATH ?? join(STATE_DIR, "config.json");
 export const LOG_PATH = join(STATE_DIR, "baileys.log");
 
 export function ensureDirs() {
@@ -99,21 +98,65 @@ function defaultLoanwordRespellings() {
   };
 }
 
+// state/config.json is plain JSON -- no comment syntax, and every setter below does a full
+// read-modify-write of the file, so any hand-added "// comment"-style text or a "_comment" key
+// would just get silently dropped the next time any single setting changes (e.g. the next
+// /language command in any chat). This function is the durable place for what each field means --
+// read it here, not by asking someone to annotate the JSON file itself.
 function defaultConfig() {
   return {
+    // JIDs allowed to be read from or written to at all -- the single gate every inbound/outbound
+    // path checks (allowedJid). Anything not here is invisible in both directions.
     allowlist: [],
+    // Opt-*out* lists (see hasImageDisabled/hasVoiceDisabled): a chat in here still gets its
+    // caption/transcript logged, only the media file itself isn't downloaded/transcribed.
     no_image_jids: [],
     no_voice_jids: [],
+    // "/wakelevel mention-only" chats: only a message containing "@claude" wakes the session via
+    // state/inbox.log -- everything is still logged either way, only the wake trigger is gated.
     mention_only_jids: [],
+    // "/speaking voice-only" chats: every reply wa_send sends to this chat auto-routes through TTS
+    // and goes out as a voice note instead of text.
     voice_only_jids: [],
+    // Display name for the owner's own messages in logs/prompts -- not currently exposed via any
+    // in-chat command, hand-edit if it needs to change.
     owner_name: "Me",
+    // "/speaking-speed N" -- global TTS speed multiplier for outgoing voice notes (1.0 = each
+    // engine's native pace, >1 faster, <1 slower). Not per-chat: there's no per-chat use case for
+    // it the way there is for wake level or voice mode.
     speaking_rate: 1.15,
+    // "/s2t-tier low|mid|high" -- global whisper.cpp model tier for transcribing *incoming* voice
+    // notes (low=ggml-small.bin, mid=ggml-medium.bin, high=ggml-large-v3-turbo.bin -- see
+    // S2T_MODELS below). Global because transcription quality doesn't vary by who's speaking.
     s2t_tier: "low",
+    // "/t2s-tier low|mid|high" -- global Piper voice quality tier for *outgoing* voice notes.
+    // Decoupled from s2t_tier on purpose: wanting a fast transcript and a good-sounding reply are
+    // independent preferences (see PIPER_VOICES below for what each tier maps to per language).
     t2s_tier: "low",
+    // "/language tr|en" per chat: which Piper voice (PIPER_VOICES[lang][t2s_tier]) this chat's
+    // *outgoing* voice notes default to. Opt-in, not opt-out -- almost every allowlisted chat is
+    // Turkish, so this list only needs to name the English exception. Incoming voice notes are
+    // unaffected either way (whisper runs with "-l auto", adapting per clip automatically).
     english_jids: [],
+    // word -> Turkish-orthography respelling, so Piper's Turkish phonemizer reads an embedded
+    // English/tech word roughly correctly instead of applying Turkish letter-to-sound rules to
+    // English spelling (see respellLoanwords in server.mjs). No in-chat command yet -- extend by
+    // hand-editing this map directly, or via config.mjs's setLoanwordRespelling().
     loanword_respellings: defaultLoanwordRespellings(),
+    // "/verbosity low|mid|high" per chat: how much detail/length Claude's own replies to *that*
+    // chat carry -- not a mechanical truncation enforced in code, just what verbosity(jid) reads
+    // back for Claude to self-regulate reply length/detail by. Defaults to "low" for any chat
+    // absent from this map (a WhatsApp reply is a chat message, not a report).
+    verbosity_jids: {},
   };
 }
+
+// "/verbosity low|mid|high", per chat like /language -- how much explanation/detail Claude's own
+// replies to *that chat* carry. Not a mechanical truncation enforced anywhere in this file: this
+// only ever changes what verbosity(jid) reads back, so Claude can self-regulate reply length/detail
+// per chat at reply time. "low" is the default for any chat not in the map -- a WhatsApp reply is a
+// chat message, not a report.
+export const VERBOSITY_LEVELS = ["low", "mid", "high"];
 
 // Whisper model per tier. All three are the same whisper.cpp binary and flags — only the file
 // differs — so switching is a config change, not a code path. `large-v3-turbo` is both the most
@@ -155,25 +198,16 @@ export function loadConfig() {
     allowlist: Array.isArray(raw.allowlist) ? raw.allowlist : [],
     no_image_jids: Array.isArray(raw.no_image_jids) ? raw.no_image_jids : [],
     no_voice_jids: Array.isArray(raw.no_voice_jids) ? raw.no_voice_jids : [],
-    mention_only_jids: Array.isArray(raw.mention_only_jids)
-      ? raw.mention_only_jids
-      : [],
-    voice_only_jids: Array.isArray(raw.voice_only_jids)
-      ? raw.voice_only_jids
-      : [],
+    mention_only_jids: Array.isArray(raw.mention_only_jids) ? raw.mention_only_jids : [],
+    voice_only_jids: Array.isArray(raw.voice_only_jids) ? raw.voice_only_jids : [],
     owner_name: typeof raw.owner_name === "string" ? raw.owner_name : "Me",
-    speaking_rate:
-      typeof raw.speaking_rate === "number" ? raw.speaking_rate : 1.15,
+    speaking_rate: typeof raw.speaking_rate === "number" ? raw.speaking_rate : 1.15,
     // An unknown tier falls back to "low" rather than throwing: a typo in a hand-edited config
     // should degrade transcription, not stop every voice note from being transcribed at all.
     // Object.hasOwn, not `in`: `in` walks the prototype, so a hand-edited "constructor" passed
     // this guard and then threw inside whisperModel() — the exact break the fallback exists to stop.
-    s2t_tier: Object.hasOwn(S2T_MODELS, raw.s2t_tier ?? "")
-      ? raw.s2t_tier
-      : "low",
-    t2s_tier: Object.hasOwn(S2T_MODELS, raw.t2s_tier ?? "")
-      ? raw.t2s_tier
-      : "low",
+    s2t_tier: Object.hasOwn(S2T_MODELS, raw.s2t_tier ?? "") ? raw.s2t_tier : "low",
+    t2s_tier: Object.hasOwn(S2T_MODELS, raw.t2s_tier ?? "") ? raw.t2s_tier : "low",
     english_jids: Array.isArray(raw.english_jids) ? raw.english_jids : [],
     // Backfills the seed dictionary for configs written before this field existed, rather than
     // silently going empty (no respelling at all, back to raw Turkish-phonemized English) the
@@ -182,7 +216,23 @@ export function loadConfig() {
       raw.loanword_respellings && typeof raw.loanword_respellings === "object"
         ? raw.loanword_respellings
         : defaultLoanwordRespellings(),
+    // A hand-edited or stale entry falls back to "low" per-jid rather than throwing, same
+    // rationale as s2t_tier/t2s_tier above -- one bad value shouldn't break every chat's status.
+    verbosity_jids: raw.verbosity_jids && typeof raw.verbosity_jids === "object" ? raw.verbosity_jids : {},
   };
+}
+
+// "/verbosity low|mid|high" reply for one chat -- how much explanation/detail Claude's own
+// replies to *that* chat carry. Defaults to "low" for any chat not in the map.
+export function verbosity(jid) {
+  const level = loadConfig().verbosity_jids[jid];
+  return VERBOSITY_LEVELS.includes(level) ? level : "low";
+}
+
+export function setVerbosity(jid, level) {
+  const cfg = loadConfig();
+  cfg.verbosity_jids = { ...cfg.verbosity_jids, [jid]: level };
+  writeFileSync(CONFIG_PATH, JSON.stringify(cfg, null, 2), { mode: 0o600 });
 }
 
 // Read fresh each call (not cached) so a hand-edit to state/config.json's loanword_respellings
@@ -240,9 +290,7 @@ export function isEnglish(jid) {
 
 export function setEnglish(jid, on) {
   const cfg = loadConfig();
-  cfg.english_jids = on
-    ? [...new Set([...cfg.english_jids, jid])]
-    : cfg.english_jids.filter((j) => j !== jid);
+  cfg.english_jids = on ? [...new Set([...cfg.english_jids, jid])] : cfg.english_jids.filter((j) => j !== jid);
   writeFileSync(CONFIG_PATH, JSON.stringify(cfg, null, 2), { mode: 0o600 });
 }
 
@@ -292,16 +340,12 @@ export function hasVoiceDisabled(jid) {
 // "/read-image yes" means downloads are on, i.e. the chat is absent from no_image_jids.
 function setListed(key, jid, listed) {
   const cfg = loadConfig();
-  cfg[key] = listed
-    ? [...new Set([...cfg[key], jid])]
-    : cfg[key].filter((j) => j !== jid);
+  cfg[key] = listed ? [...new Set([...cfg[key], jid])] : cfg[key].filter((j) => j !== jid);
   writeFileSync(CONFIG_PATH, JSON.stringify(cfg, null, 2), { mode: 0o600 });
 }
 
-export const setImageEnabled = (jid, on) =>
-  setListed("no_image_jids", jid, !on);
-export const setVoiceEnabled = (jid, on) =>
-  setListed("no_voice_jids", jid, !on);
+export const setImageEnabled = (jid, on) => setListed("no_image_jids", jid, !on);
+export const setVoiceEnabled = (jid, on) => setListed("no_voice_jids", jid, !on);
 
 // "/wakelevel mention-only" for a chat: Claude only wakes for a message containing "@claude",
 // instead of every inbound message. "/wakelevel verbose" is the default (not in this list).
@@ -327,8 +371,6 @@ export function isVoiceOnly(jid) {
 
 export function setVoiceOnly(jid, on) {
   const cfg = loadConfig();
-  cfg.voice_only_jids = on
-    ? [...new Set([...cfg.voice_only_jids, jid])]
-    : cfg.voice_only_jids.filter((j) => j !== jid);
+  cfg.voice_only_jids = on ? [...new Set([...cfg.voice_only_jids, jid])] : cfg.voice_only_jids.filter((j) => j !== jid);
   writeFileSync(CONFIG_PATH, JSON.stringify(cfg, null, 2), { mode: 0o600 });
 }
