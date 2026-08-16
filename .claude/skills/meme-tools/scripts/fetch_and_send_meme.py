@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Complete workflow: search meme → download → convert → send to WhatsApp.
+Meme workflow: search → download → convert → output ready file path.
+Claude handles WhatsApp sending via wa_send_video tool.
 """
 
 import argparse
 import sys
 import subprocess
-import os
 import json
 from pathlib import Path
 
@@ -117,26 +117,6 @@ def convert_if_needed(input_file, quality="medium"):
     return input_file
 
 
-def send_to_whatsapp(video_path):
-    """Verify video is ready to send via WhatsApp."""
-    try:
-        # Get WhatsApp self-chat JID from config
-        config_path = "./state/config.json"
-        with open(config_path) as f:
-            config = json.load(f)
-
-        # Self-chat JID is the first allowlisted entry (usually)
-        jid = config.get('allowlist', [])[0] if config.get('allowlist') else None
-        if not jid:
-            print("Error: Could not find WhatsApp JID", file=sys.stderr)
-            return False
-
-        print(f"✓ Ready to send: {os.path.basename(video_path)}", file=sys.stderr)
-        return True
-
-    except Exception as e:
-        print(f"Error: {e}", file=sys.stderr)
-        return False
 
 
 def main():
@@ -173,16 +153,13 @@ def main():
     print("Converting to MP4...", file=sys.stderr)
     final_file = convert_if_needed(downloaded, args.quality)
 
-    # Ready to send
-    if send_to_whatsapp(final_file):
-        print(json.dumps({
-            'title': video_info['title'],
-            'url': video_info['url'],
-            'file': final_file,
-            'ready': True
-        }))
-    else:
-        sys.exit(1)
+    # Output result (Claude will handle sending via WhatsApp)
+    print(json.dumps({
+        'title': video_info['title'],
+        'url': video_info['url'],
+        'file': final_file,
+        'ready': True
+    }))
 
 
 if __name__ == "__main__":

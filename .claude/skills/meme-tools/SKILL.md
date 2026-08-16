@@ -37,7 +37,7 @@ scripts/convert_to_mp4.py input.webm --quality high  # Default: medium
 
 ### fetch_and_send_meme.py
 
-Complete workflow: search → download → convert → send to WhatsApp.
+Complete workflow: search → download → convert → output path.
 
 **Usage**:
 ```bash
@@ -49,7 +49,7 @@ scripts/fetch_and_send_meme.py "keyword" --random
 1. Searches Gist for matching video
 2. Downloads to `state/memes` using yt-dlp
 3. Converts to MP4 if needed
-4. Sends to WhatsApp self-chat via `wa_send_video`
+4. Outputs JSON with file path (Claude calls wa_send_video)
 
 ## Workflow Examples
 
