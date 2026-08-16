@@ -20,8 +20,9 @@
     "allow": [
       "mcp__whatsapp-personal__wa_*",
       "Bash(./.claude/skills/meme-tools/scripts/*.py *)",
-      "Bash(./.claude/skills/yt-dlp/scripts/download_video.py *)",
-      "Bash(./.claude/skills/yt-dlp/scripts/extract_audio.py *)"
+      "Bash(./.claude/skills/yt-dlp/scripts/*.py *)",
+      "Bash(ffmpeg *)",
+      "Bash(ffprobe *)"
     ],
     "deny": [
       "Read(~/.ssh/**)",
