@@ -205,42 +205,65 @@ MCP server connected in only one session at a time.
 
 ## Tools
 
-| Tool            | Does                                                                                                                                       |
-| --------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
-| `wa_status`     | Connection state, own linked JID, allowlist, logged-message counts.                                                                        |
-| `wa_groups`     | Groups this number is in, with their JIDs. The only way to learn a group JID.                                                              |
-| `wa_contacts`   | jid → display name, derived only from logged messages for allowlisted chats.                                                               |
-| `wa_send`       | `{ to, text }` — sends only if `to` is on the allowlist. Auto-routes to a spoken voice note if the chat is in `/speaking voice-only` mode. |
-| `wa_send_text_only` | `{ to, text }` — sends text to a voice-only chat without converting to voice. Useful for structured data (URLs, metadata, transcripts). |
-| `wa_send_image` | `{ to, path, caption? }` — sends a local image file, from a sendable directory only (see Security notes).                                  |
-| `wa_send_video` | `{ to, path, caption? }` — sends a local video file (MP4 format) with optional caption, from a sendable directory only.                    |
-| `wa_send_voice` | `{ to, text, voice?, language?, rate? }` — speaks `text` (Piper by default, or a macOS `say` voice) and sends it as a voice note.           |
-| `wa_send_audio` | `{ to, path }` — sends an already-made audio file as a voice note.                                                                         |
-| `wa_react`      | `{ jid, messageId, emoji }` — reacts to a specific logged message; empty `emoji` removes a reaction.                                       |
-| `wa_edit`       | `{ jid, messageId, text }` — rewrites a message **Claude sent**; refuses anything else. WhatsApp allows ~15 min and marks it edited.       |
-| `wa_delete`     | `{ jid, messageId }` — delete-for-everyone on a message **Claude sent**; refuses anything else. Leaves WhatsApp's "deleted" placeholder.   |
-| `wa_connect`    | Reclaims the WhatsApp socket in this process without an `/mcp` reload — see "Multiple sessions".                                           |
-| `wa_recent`     | `{ jid?, limit?, all? }` — recent logged messages for one allowed chat. Omitting `jid` returns per-chat unread counts only, never text.    |
-| `wa_search`     | `{ jid, query, limit? }` — case-insensitive substring search over one chat's active + archived messages.                                   |
+| Tool                | Does                                                                                                                                       |
+| ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| `wa_status`         | Connection state, own linked JID, allowlist, logged-message counts.                                                                        |
+| `wa_groups`         | Groups this number is in, with their JIDs. The only way to learn a group JID.                                                              |
+| `wa_contacts`       | jid → display name, derived only from logged messages for allowlisted chats.                                                               |
+| `wa_send`           | `{ to, text }` — sends only if `to` is on the allowlist. Auto-routes to a spoken voice note if the chat is in `/speaking voice-only` mode. |
+| `wa_send_text_only` | `{ to, text }` — sends text to a voice-only chat without converting to voice. Useful for structured data (URLs, metadata, transcripts).    |
+| `wa_send_image`     | `{ to, path, caption? }` — sends a local image file, from a sendable directory only (see Security notes).                                  |
+| `wa_send_video`     | `{ to, path, caption? }` — sends a local video file (MP4 format) with optional caption, from a sendable directory only.                    |
+| `wa_send_voice`     | `{ to, text, voice?, language?, rate? }` — speaks `text` (Piper by default, or a macOS `say` voice) and sends it as a voice note.          |
+| `wa_send_audio`     | `{ to, path }` — sends an already-made audio file as a voice note.                                                                         |
+| `wa_react`          | `{ jid, messageId, emoji }` — reacts to a specific logged message; empty `emoji` removes a reaction.                                       |
+| `wa_edit`           | `{ jid, messageId, text }` — rewrites a message **Claude sent**; refuses anything else. WhatsApp allows ~15 min and marks it edited.       |
+| `wa_delete`         | `{ jid, messageId }` — delete-for-everyone on a message **Claude sent**; refuses anything else. Leaves WhatsApp's "deleted" placeholder.   |
+| `wa_connect`        | Reclaims the WhatsApp socket in this process without an `/mcp` reload — see "Multiple sessions".                                           |
+| `wa_recent`         | `{ jid?, limit?, all? }` — recent logged messages for one allowed chat. Omitting `jid` returns per-chat unread counts only, never text.    |
+| `wa_search`         | `{ jid, query, limit? }` — case-insensitive substring search over one chat's active + archived messages.                                   |
 
-## YouTube Tools
+## YouTube / video tools
 
-The YouTube MCP server (`yt-dlp-mcp`) is available in this session and can be used to search for videos, fetch metadata, and share information about YouTube content in WhatsApp chats:
+There is no `yt-dlp-mcp` (or any other) MCP server for video search/download wired into this repo,
+and per Burak (2026-08-16) there will not be one — don't reach for one or suggest connecting one.
+The working path, used throughout this repo's actual sessions, is entirely local:
 
-| Tool                           | Does                                                                                                               |
-| ------------------------------ | ------------------------------------------------------------------------------------------------------------------ |
-| `ytdlp_search_videos`          | `{ query, maxResults?, offset?, uploadDateFilter? }` — search YouTube by keywords; returns titles, URLs, uploaders, durations. Supports pagination (`offset`) and date filtering (`hour`, `today`, `week`, `month`, `year`). |
-| `ytdlp_get_video_metadata_summary` | `{ url }` — quick human-readable summary: title, channel, duration, view/like counts, upload date, description excerpt, tags. Use this to quickly get video info to share. |
-| `ytdlp_get_video_metadata`     | `{ url, fields? }` — comprehensive video metadata as structured JSON: all the above plus subtitles available, categories, channel ID, timestamps, format details. Useful for analysis or programmatic use. |
-| `ytdlp_download_video`         | `{ url, resolution?, startTime?, endTime? }` — download video to `~/Downloads` with quality selection (`480p`, `720p`, `1080p`, `best`) and optional trimming by timestamp. |
-| `ytdlp_download_audio`         | `{ url }` — extract and download audio track to `~/Downloads` (best quality, typically M4A or MP3). Useful for music, podcasts, or lectures. |
-| `ytdlp_download_transcript`    | `{ url }` — get video transcript as text. Falls back to auto-generated captions if manual transcript unavailable. |
-| `ytdlp_download_video_subtitles` | `{ url }` — download subtitle file; use `ytdlp_list_subtitle_languages` first to see what's available. |
-| `ytdlp_list_subtitle_languages` | `{ url }` — list available subtitle languages for a video. |
-| `ytdlp_get_video_comments`     | `{ url }` — fetch video comments (returns structured data: author, text, likes, timestamps). |
-| `ytdlp_get_video_comments_summary` | `{ url }` — get summary of top/trending comments for quick insight into community reaction. |
+- **Finding a video on YouTube specifically**: `.claude/skills/yt-dlp/scripts/search_videos.py "query" --limit N`
+  — queries YouTube's own search directly via yt-dlp's `ytsearchN:` pseudo-URL (no API key, no
+  download), returning title/url/duration/uploader/view count per result. Prefer this over
+  `WebSearch` when the target is specifically a YouTube video: it returns the actual video listing
+  with duration up front, so filtering for "kısa" (short) is a glance at the output instead of
+  downloading a candidate to find out it's a 6-minute compilation. Pass `--json` for structured
+  output. `WebSearch` is still the better first move when the query is about a _scene/quote_ that
+  might live on YouTube, TikTok, or elsewhere and you don't know which yet (see
+  [[whatsapp-yt-dlp-meme-fallback]] for the search patterns that have worked for Turkish meme/scene
+  clips specifically) — the two are complementary, not redundant.
+- **Metadata without downloading, given a URL already in hand**:
+  `yt-dlp --no-download --print title --print duration --print uploader <url>` (allowlisted
+  directly, see `.claude/settings.json`) — same idea as above, for a single known URL rather than
+  a fresh search.
+- **Downloading**: `.claude/skills/yt-dlp/scripts/download_video.py <url> -o state/tmp -q 480p`
+  (or `-f "best[height<=480]"` if `-q` hits a 403 — see pitfalls below).
+- **Extracting audio only**: `.claude/skills/yt-dlp/scripts/extract_audio.py`.
+- **Watching a downloaded video before sending it**: see below.
 
-**Workflow example:** Search for a video → get metadata summary to share in chat → if needed, extract audio or transcript for further use.
+### Watching a downloaded video before sending it
+
+`.claude/skills/yt-dlp/scripts/watch_video.py <path> [--fps 1]` — call this when you don't know
+much about a video yet (e.g. right after downloading a fallback clip and before `wa_send_video`),
+so you can actually look at it rather than guess from the filename/title. It samples frames via
+`ffmpeg` (default 1/sec, capped at ~40 frames — longer clips get subsampled across their length,
+never silently truncated to the first N seconds) into a temp dir (or `--out-dir` if given), plus a
+full transcript via `whisper-cli` using the best model already on disk under
+`state/whisper-models/` (same tool `src/server.mjs` uses for voice notes — no new dependency).
+Prints a JSON object with `out_dir`, `first_frame`, `contact_sheet`, `frames` (the full list of
+sampled `.jpg` paths), and `transcript`. Read cheapest-first: `first_frame` alone is usually enough
+to catch a bad source (bootleg screen recording, wrong scene, watermark/ad overlay) since that's
+visible from frame one; `contact_sheet` is a single low-res grid image tiling every sampled frame
+into one picture (via `ffmpeg`'s `tile` filter) so you can see the whole flow — cuts, gestures,
+outro cards — in one `Read` call instead of pulling each frame individually. Only fall back to
+individual paths in `frames[]` for a closer look at one specific moment the grid didn't make clear.
 
 ## Meme Tools
 
@@ -255,6 +278,36 @@ A dedicated skill (`.claude/skills/meme-tools/`) for safely working with a curat
 **Example workflow**: User asks "send me a funny meme" → script searches Gist, downloads, converts, outputs path → Claude calls `wa_send_video` to send. No manual video juggling.
 
 The meme collection Gist contains 100+ curated funny videos with YouTube links. To use a different collection, update `GIST_URL` in each script.
+
+**When the Gist has no match**, search YouTube directly (`WebSearch` for a clip, then
+`.claude/skills/yt-dlp/scripts/download_video.py <url> -o state/tmp -q 480p`) and convert with
+`convert_to_mp4.py`, writing the finished file straight into `state/memes/` — `state/tmp/` is raw
+yt-dlp/ffmpeg scratch space (sidecars, intermediate formats, anything a title-with-slashes trick
+might spray around), `state/memes/` stays only the clean, sendable, indexed result. Both are under
+`state/`, so both are gitignored and mode-700 already; no extra setup needed. Known pitfalls doing
+this with the local scripts (there is no MCP shortcut for this — see "YouTube / video tools" above):
+
+- **Allowlisted Bash patterns match on the literal command prefix.** `Bash(/abs/path/script.py *)`
+  in `.claude/settings.json` only auto-approves when the command _starts with_ that exact path —
+  `python3 /abs/path/script.py ...` does not match and still prompts. Always invoke these scripts
+  by their own path (they're executable, with a shebang), never via `python3 <path>`.
+- **Default output goes to the repo root, not a state/ folder.** `download_video.py` writes to
+  `os.getcwd()` unless you pass `-o`; always pass
+  `-o /Users/burak/Desktop/repos/whatsapp-mcp-personal/state/tmp` explicitly, or the file lands
+  somewhere `wa_send_video` can't send from and clutters the repo root.
+- **A title containing a URL can break the output path entirely.** Some reposted/aggregator
+  uploads title the video as its own source link (`"... | https://youtu.be/xyz"`). Since
+  `download_video.py`'s output template is `%(title)s.%(ext)s`, the slashes in that title become
+  literal path separators — you get nested empty `.../https:/youtu.be/` directories instead of a
+  video file, silently. Check the title first (`yt-dlp --print title <url>`) and pass an explicit
+  filename (not just a directory) in `-o` when the title contains `/` or `:`.
+- **Some format pairings 403.** yt-dlp's default "best" selection can pick an itag pair YouTube
+  throttles/blocks mid-download (`HTTP Error 403: Forbidden`). Passing `-q 480p` (a broader format
+  selector) resolved it when the default failed on the same URL.
+- **`--write-info-json`/`--write-thumbnail` leave debris** — a `.webm`, `.info.json`, and `.webp`
+  per download alongside the raw video. Landing these in `state/tmp/` instead of `state/memes/`
+  means there's nothing to clean up mid-task — just `rm -rf state/tmp/*` once the converted file
+  is safely in `state/memes/`.
 
 ## Security notes
 

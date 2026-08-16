@@ -37,6 +37,13 @@ claude mcp add whatsapp-personal -- node /absolute/path/to/whatsapp-mcp-personal
 **After editing any file under `src/`, an `/mcp` reconnect is required** — the server process only
 loads code at startup, so changes don't take effect until Claude Code reconnects.
 
+## YouTube / video search and download
+
+There is no MCP server for this and there will not be one (per Burak, 2026-08-16) — don't suggest
+connecting one. The working path is `WebSearch` for the video + the local
+`.claude/skills/yt-dlp/scripts/*.py` scripts to download/watch it. See README's "YouTube / video
+tools" and "Meme Tools" → "When the Gist has no match" sections for the full workflow and pitfalls.
+
 ## Architecture
 
 Four files under `src/`, each importable independently and wired together in `server.mjs`:
