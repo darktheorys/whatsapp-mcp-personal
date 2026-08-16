@@ -14,6 +14,7 @@ import {
   hasImageDisabled,
   hasVoiceDisabled,
   isEnglish,
+  isIncognito,
   isMentionOnly,
   isVoiceOnly,
   loadConfig,
@@ -22,10 +23,12 @@ import {
   MEMES_DIR,
   ownerName,
   PIPER_VOICES,
+  removeFromAllowlist,
   S2T_MODELS,
   s2tTier,
   setEnglish,
   setImageEnabled,
+  setIncognito,
   setMentionOnly,
   setS2tTier,
   setSpeakingRate,
@@ -595,6 +598,8 @@ export const COMMANDS = {
   readMedia: /^\/read-(image|audio)\s+(yes|no)\s*$/i,
   verbosity: /^\/verbosity\s+(low|mid|high)\s*$/i,
   help: /^\/help\s*$/i,
+  ai: /^\/ai\s+off\s*$/i,
+  incognito: /^\/incognito\s+(on|off)\s*$/i,
 };
 
 // "/help" -- the one command that answers into the chat instead of silently flipping a setting.
@@ -614,8 +619,11 @@ function helpText(jid) {
     "/read-audio yes|no — keep and transcribe (or stop) voice notes from this chat",
     "/verbosity low|mid|high — how much detail Claude's replies to this chat carry",
     "/help — this message",
+    "/ai off — remove this chat from the allowlist entirely (one-way, no /ai on)",
+    "/incognito on|off — while on, no storage/media/wake for this chat at all, overrides wakelevel",
   ];
   const status = [
+    `incognito: ${isIncognito(jid) ? "on" : "off"}`,
     `wakelevel: ${isMentionOnly(jid) ? "mention-only" : "verbose"}`,
     `speaking: ${isVoiceOnly(jid) ? "voice-only" : "text-only"}`,
     `language: ${isEnglish(jid) ? "en" : "tr"}`,
@@ -808,7 +816,38 @@ async function handleIncoming(waMessage) {
       await getSocket()?.sendMessage(jid, { text: helpText(jid) + ATTRIBUTION });
       return;
     }
+    // "/ai off" removes this chat from the allowlist entirely -- a one-way door, deliberately.
+    // There's no "/ai on" (see removeFromAllowlist's comment in config.mjs): re-adding means
+    // hand-editing state/config.json, same as bringing in a brand new chat. The confirmation
+    // reply goes straight through the socket, not guardSend/wa_send -- by the time it'd send,
+    // allowedJid(jid) would already return false for this jid, refusing the very message
+    // confirming the change. `jid` was already validated at the top of this function while the
+    // chat was still allowlisted, so this one send is safe despite bypassing that gate.
+    if (COMMANDS.ai.exec(trimmed)) {
+      removeFromAllowlist(jid);
+      await getSocket()?.sendMessage(jid, {
+        text: `AI kapatıldı bu chat için — tekrar açmak için state/config.json'a elle eklemek gerekiyor.${ATTRIBUTION}`,
+      });
+      return;
+    }
+    // "/incognito on|off" -- unlike every other per-chat setting, this one is checked below,
+    // *outside* this fromMe block, before any storage/logging happens. That's what makes it
+    // override mention_only_jids/wakelevel entirely rather than stacking with them: while on,
+    // nothing about this chat's traffic reaches state/ at all, so there is nothing for a wake
+    // level to gate. The command itself still works while incognito is already on -- toggling it
+    // off has to be possible from inside the chat, so this branch runs before the early-return.
+    const incognitoCmd = COMMANDS.incognito.exec(trimmed);
+    if (incognitoCmd) {
+      setIncognito(jid, incognitoCmd[1].toLowerCase() === "on");
+      return;
+    }
   }
+  // Incognito: no row in state/messages.db, no state/media/ download, no contacts.json update,
+  // no state/inbox.log line -- so no wake, regardless of mention_only_jids. This chat's traffic
+  // leaves no trace anywhere until "/incognito off". Placed after the command block above so
+  // toggling it (from either state) still works; placed before everything else so nothing about
+  // an incognito message's content is ever touched beyond this point.
+  if (isIncognito(jid)) return;
   const quoted = extractQuoted(waMessage.message);
   // In a group `remoteJid` is the room, so the sender is only knowable from `participant`.
   // Omitted entirely for DMs, where `direction` already says who spoke.
@@ -928,7 +967,7 @@ server.registerTool(
   },
   async () => {
     const sock = getSocket();
-    const { allowlist, english_jids, verbosity_jids } = loadConfig();
+    const { allowlist, english_jids, verbosity_jids, incognito_jids } = loadConfig();
     const { live, lastError } = connectionState();
     const status = {
       connected: live,
@@ -948,6 +987,10 @@ server.registerTool(
       // other allowlisted chat is implicitly "low".
       verbosityJids: verbosity_jids,
       englishJids: english_jids,
+      // Chats currently leaving no trace at all (see "/incognito") -- deliberately surfaced here
+      // rather than silently invisible, since "why is nothing in wa_recent for this chat" would
+      // otherwise look like a bug rather than the intended effect.
+      incognitoJids: incognito_jids,
       ownJid: sock?.user?.id ?? null,
       allowlist,
       loggedMessages: Object.fromEntries(allowlist.map((jid) => [jid, messageCount(jid)])),

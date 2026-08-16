@@ -14,6 +14,7 @@ Dedicated tools for working with the meme video collection and video format conv
 Search the meme collection Gist for videos by keyword.
 
 **Usage**:
+
 ```bash
 scripts/search_gist_memes.py "keyword"
 scripts/search_gist_memes.py "keyword" --random  # Get random match
@@ -27,6 +28,7 @@ scripts/search_gist_memes.py "keyword" --limit 5  # Get top 5 matches
 Convert video files to MP4 format (WhatsApp compatible).
 
 **Usage**:
+
 ```bash
 scripts/convert_to_mp4.py input.webm
 scripts/convert_to_mp4.py input.webm -o output.mp4
@@ -42,9 +44,25 @@ passthrough flags. Use this instead of ever invoking raw `ffmpeg`/`ffprobe` dire
 allowlisted, on purpose — see the README's Security notes).
 
 **Usage**:
+
 ```bash
 scripts/probe_media.py path/to/video.mp4
 scripts/probe_media.py path/to/video.mp4 --json
+```
+
+### trim_video.py
+
+Trims a local video to a start/end (or start/duration) range and re-encodes to MP4 — fixed
+argument list, no passthrough flags. Use this whenever a downloaded clip is longer than wanted
+(the source is a whole scene but only a few seconds are the actual meme) instead of sending the
+full thing. `--start`/`--end`/`--duration` each accept seconds, `MM:SS`, or `HH:MM:SS`.
+
+**Usage**:
+
+```bash
+scripts/trim_video.py input.mp4 --start 12 --end 18 -o clip.mp4
+scripts/trim_video.py input.mp4 --start 0:05 --duration 8 -o clip.mp4
+scripts/trim_video.py input.mp4 --duration 10 -o clip.mp4   # first 10s, no --start needed
 ```
 
 ### fetch_and_send_meme.py
@@ -52,12 +70,14 @@ scripts/probe_media.py path/to/video.mp4 --json
 Complete workflow: search → download → convert → output path.
 
 **Usage**:
+
 ```bash
 scripts/fetch_and_send_meme.py "keyword"
 scripts/fetch_and_send_meme.py "keyword" --random
 ```
 
 **What it does**:
+
 1. Searches Gist for matching video
 2. Downloads to `state/memes` using yt-dlp
 3. Converts to MP4 if needed
@@ -66,6 +86,7 @@ scripts/fetch_and_send_meme.py "keyword" --random
 ## Workflow Examples
 
 ### 1. Search for a meme
+
 ```
 User: Find me a funny video about cats
 
@@ -74,6 +95,7 @@ User: Find me a funny video about cats
 ```
 
 ### 2. Convert a video
+
 ```
 User: Convert this WebM to MP4
 
@@ -82,6 +104,7 @@ User: Convert this WebM to MP4
 ```
 
 ### 3. Send random meme
+
 ```
 User: Send me a random meme
 
@@ -92,6 +115,7 @@ User: Send me a random meme
 ## Gist Integration
 
 All tools use the official meme collection Gist:
+
 ```
 https://gist.githubusercontent.com/jcahill/e42b20f91fd0f82fd7023ad7ddc6146c/raw/...
 ```
@@ -101,6 +125,7 @@ The Gist contains 100+ curated funny videos with YouTube links organized by inde
 ## Safety & Permissions
 
 All scripts:
+
 - ✅ Validate inputs (URLs, file paths, keywords)
 - ✅ Use safe subprocess calls (no shell injection)
 - ✅ Require files to be in `state/memes` (sendable directory)

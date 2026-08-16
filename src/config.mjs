@@ -148,6 +148,12 @@ function defaultConfig() {
     // back for Claude to self-regulate reply length/detail by. Defaults to "low" for any chat
     // absent from this map (a WhatsApp reply is a chat message, not a report).
     verbosity_jids: {},
+    // "/incognito on|off" per chat: while on, this chat leaves no trace at all -- no
+    // state/messages.db row, no state/media/ download, no contacts.json update, and no wake via
+    // state/inbox.log (overriding mention_only_jids/wakelevel entirely -- not even "@claude"
+    // wakes a session while incognito is on). See isIncognito()/setIncognito() below and the
+    // early-return in handleIncoming (server.mjs) that this gates.
+    incognito_jids: [],
   };
 }
 
@@ -219,6 +225,7 @@ export function loadConfig() {
     // A hand-edited or stale entry falls back to "low" per-jid rather than throwing, same
     // rationale as s2t_tier/t2s_tier above -- one bad value shouldn't break every chat's status.
     verbosity_jids: raw.verbosity_jids && typeof raw.verbosity_jids === "object" ? raw.verbosity_jids : {},
+    incognito_jids: Array.isArray(raw.incognito_jids) ? raw.incognito_jids : [],
   };
 }
 
@@ -227,6 +234,19 @@ export function loadConfig() {
 export function verbosity(jid) {
   const level = loadConfig().verbosity_jids[jid];
   return VERBOSITY_LEVELS.includes(level) ? level : "low";
+}
+
+// "/incognito on|off" per chat. While on: no message row, no media download, no contact update,
+// no wake -- see the comment on incognito_jids in defaultConfig() above for the full list, and
+// the early-return in handleIncoming (server.mjs) that actually enforces it.
+export function isIncognito(jid) {
+  return loadConfig().incognito_jids.includes(jid);
+}
+
+export function setIncognito(jid, on) {
+  const cfg = loadConfig();
+  cfg.incognito_jids = on ? [...new Set([...cfg.incognito_jids, jid])] : cfg.incognito_jids.filter((j) => j !== jid);
+  writeFileSync(CONFIG_PATH, JSON.stringify(cfg, null, 2), { mode: 0o600 });
 }
 
 export function setVerbosity(jid, level) {
@@ -321,6 +341,17 @@ export function setSpeakingRate(rate) {
 export function allowedJid(...jids) {
   const { allowlist } = loadConfig();
   return jids.find((jid) => jid && allowlist.includes(jid));
+}
+
+// "/ai off" removes a chat from the allowlist entirely -- unlike every other per-chat setting
+// above, there is deliberately no "/ai on" to re-add it (Burak, 2026-08-17: "/ai on will not
+// exists apparently, but thats is ok for now"). Re-adding means hand-editing state/config.json's
+// allowlist, same as bringing in a brand new chat -- see README's Setup section. This is a one-way
+// door on purpose: once a chat opts out, getting back in takes deliberate action outside the chat.
+export function removeFromAllowlist(jid) {
+  const cfg = loadConfig();
+  cfg.allowlist = cfg.allowlist.filter((j) => j !== jid);
+  writeFileSync(CONFIG_PATH, JSON.stringify(cfg, null, 2), { mode: 0o600 });
 }
 
 export function hasImageDisabled(jid) {

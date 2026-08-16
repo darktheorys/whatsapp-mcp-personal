@@ -227,6 +227,27 @@ never needs `wa_status` or reading `state/config.json` by hand. The command list
 function (`helpText` in `src/server.mjs`) rather than scattered across each command's handler, so
 it can't silently drift out of sync with what `COMMANDS` actually recognizes.
 
+## /ai off
+
+`/ai off` — removes this chat from the allowlist entirely, same `fromMe`-only rule as every other
+command. Unlike every other per-chat setting, this is a **one-way door on purpose**: there is no
+`/ai on`. Re-adding a chat means hand-editing `state/config.json`'s `allowlist` — same as bringing
+in a brand new chat (see Setup above). The confirmation message is sent directly through the
+socket rather than through `wa_send`/`guardSend`, since by the time it'd go out the chat is no
+longer allowlisted and `guardSend` would refuse its own confirmation.
+
+## /incognito
+
+`/incognito on|off` — while on, this chat leaves **no trace at all**: no row in
+`state/messages.db`, no download to `state/media/`, no `state/contacts.json` update, and no wake
+via `state/inbox.log`. That last part is the key difference from `/wakelevel mention-only`:
+incognito overrides wake level entirely rather than stacking with it — not even a message
+containing "@claude" wakes a session while it's on. The chat stays on the allowlist (unlike
+`/ai off`) and the command itself still works in both directions from inside the chat regardless
+of the current state, so turning it back off is always possible. `wa_status`'s `incognitoJids`
+surfaces which chats currently have it on, since "nothing shows up in `wa_recent` for this chat"
+would otherwise look like a bug rather than the intended effect.
+
 ## Multiple sessions
 
 WhatsApp/Baileys allows exactly one live socket per linked device. Each Claude Code
@@ -311,6 +332,8 @@ A dedicated skill (`.claude/skills/meme-tools/`) for safely working with a curat
 
 - `search_gist_memes.py "keyword"` — search the meme collection by keyword. Options: `--random` for a random match, `--limit N` for top N results, `--json` for structured output.
 - `convert_to_mp4.py input.webm -o output.mp4` — convert videos to MP4 format (WhatsApp-compatible). Quality: `low` (480p), `medium` (720p, default), `high` (1080p).
+- `trim_video.py input.mp4 --start 12 --end 18 -o clip.mp4` — cut a clip to a start/end (or start/duration) range and re-encode to MP4, for when a downloaded source is a whole scene but only a few seconds are the actual meme. Timestamps accept seconds, `MM:SS`, or `HH:MM:SS`.
+- `probe_media.py path/to/video.mp4` — duration/codec/resolution for a local file via `ffprobe`, fixed args only.
 - `fetch_and_send_meme.py "keyword"` — complete workflow: search → download via yt-dlp → convert to MP4 → output JSON with file path (Claude calls `wa_send_video` to send).
 
 **Example workflow**: User asks "send me a funny meme" → script searches Gist, downloads, converts, outputs path → Claude calls `wa_send_video` to send. No manual video juggling.
@@ -395,9 +418,9 @@ this with the local scripts (there is no MCP shortcut for this — see "YouTube 
   exception: it's run directly in a terminal, never through Claude Code, so `console.log` is fine
   there.)
 - In-chat commands (`/wakelevel`, `/speaking`, `/speaking-speed`, `/s2t-tier`, `/t2s-tier`,
-  `/language`, `/read-image`, `/read-audio`, `/verbosity`, `/help`) only fire on `key.fromMe` — a
-  message from anyone else in a group can never change these settings (or, for `/help`, see the
-  list of them), by design.
+  `/language`, `/read-image`, `/read-audio`, `/verbosity`, `/help`, `/ai off`, `/incognito`) only
+  fire on `key.fromMe` — a message from anyone else in a group can never change these settings (or,
+  for `/help`, see the list of them, or for `/ai off`, remove the chat from the allowlist), by design.
 - **A sender's display name proves nothing.** `pushName` is free text chosen by whoever sent the
   message, so an inbound one can claim to be you. Every `state/inbox.log` line is therefore
   prefixed `(self)` or `(them)` from `key.fromMe`, which is the only real signal, and an inbound
