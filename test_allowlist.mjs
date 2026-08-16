@@ -317,6 +317,8 @@ for (const [name, re] of Object.entries(CMDS)) {
     readMedia: "/read-image no",
     verbosity: "/verbosity low",
     help: "/help",
+    ai: "/ai off",
+    incognito: "/incognito on",
   }[name];
   assert.ok(re.exec(sample), `${name} matches its own command form`);
   assert.equal(re.exec(sample + ATTR), null, `${name} cannot match a message carrying the (_Claude_) attribution`);
