@@ -18,11 +18,7 @@
   },
   "permissions": {
     "allow": [
-      "mcp__whatsapp-personal__wa_*",
-      "Bash(yt-dlp *)",
-      "Bash(ffmpeg *)",
-      "Bash(ffprobe *)",
-      "Bash(./.claude/skills/yt-dlp/scripts/*.py *)"
+      "mcp__whatsapp-personal__wa_*"
     ],
     "deny": [
       "Read(~/.ssh/**)",
