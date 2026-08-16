@@ -22,7 +22,8 @@
       "Bash(/Users/USER/Desktop/repos/whatsapp-mcp-personal/.claude/skills/meme-tools/scripts/*.py *)",
       "Bash(/Users/USER/Desktop/repos/whatsapp-mcp-personal/.claude/skills/yt-dlp/scripts/*.py *)",
       "Bash(ffmpeg *)",
-      "Bash(ffprobe *)"
+      "Bash(ffprobe *)",
+      "Bash(yt-dlp *)"
     ],
     "deny": [
       "Read(~/.ssh/**)",
