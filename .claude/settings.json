@@ -18,7 +18,10 @@
   },
   "permissions": {
     "allow": [
-      "mcp__whatsapp-personal__wa_*"
+      "mcp__whatsapp-personal__wa_*",
+      "Bash(./.claude/skills/meme-tools/scripts/search_gist_memes.py *)",
+      "Bash(./.claude/skills/meme-tools/scripts/convert_to_mp4.py *)",
+      "Bash(./.claude/skills/meme-tools/scripts/fetch_and_send_meme.py *)"
     ],
     "deny": [
       "Read(~/.ssh/**)",
