@@ -31,6 +31,22 @@ Nothing is written to `~`, nothing reads from any other repo.
   **One live socket per linked device** — if two sessions both connect, the second kicks the first
   off; see "Multiple sessions" below.
 
+## Starting a session
+
+Every new Claude Code session working from this repo (any account, any machine) should, at the
+start of the session:
+
+1. Read `memory/MEMORY.md` — the index of everything learned about how to behave in these chats:
+   who's in them, tone/style, privacy rules, engagement judgment, and the technical gotchas
+   (single-session constraint, voice-mode quirks, etc.). `autoMemoryDirectory` in
+   `.claude/settings.json` already points auto-memory at `./memory`, so this is checked in and
+   travels with the repo — a fresh account picks it up automatically, nothing to reconfigure.
+2. Confirm the server connects (`wa_status`) and, if WhatsApp monitoring is wanted this session,
+   arm a `Monitor` tailing `state/inbox.log` — this is the event-driven wake described above, and
+   it only lives as long as the session, so it needs re-arming every time.
+3. Follow the memory files' guidance on when to engage a chat versus stay silent — the default
+   posture is watch, not reply-to-everything.
+
 ## Setup
 
 ```bash
@@ -84,8 +100,9 @@ Both directions run entirely offline, no API keys:
 
 - **Speaking** — `wa_send_voice` defaults to
   [Piper](https://github.com/rhasspy/piper) (`state/piper-venv`, an isolated `uv` venv — see
-  Setup below) with a Turkish neural voice (`state/piper-models/tr_TR-dfki-medium.onnx`, from
-  [huggingface.co/rhasspy/piper-voices](https://huggingface.co/rhasspy/piper-voices)) —
+  Setup below), using a Turkish or English neural voice depending on the chat's `/language`
+  setting (see below), from
+  [huggingface.co/rhasspy/piper-voices](https://huggingface.co/rhasspy/piper-voices) —
   noticeably better quality than the built-in macOS voices. Pass a `voice` name (any installed
   macOS `say` voice — check with `say -v '?'`) to fall back to `say` for other
   languages/genders; if you don't have one for your language yet, install it via **System
@@ -97,9 +114,10 @@ Both directions run entirely offline, no API keys:
   [`whisper.cpp`](https://github.com/ggerganov/whisper.cpp) (`brew install whisper-cpp`) using the
   model for the current `/s2t-tier` (see below; `ggml-small.bin` by default, from
   [huggingface.co/ggerganov/whisper.cpp](https://huggingface.co/ggerganov/whisper.cpp/tree/main)),
-  with `ffmpeg` converting the `.ogg`/opus voice note to 16kHz mono WAV first. The transcript
-  becomes that message's `text`, so it reads and searches like any other message. Transcription
-  failure never drops the message — it just falls back to logging `[voice]`.
+  run with `-l auto` so it detects the spoken language per clip rather than needing a per-chat
+  setting, with `ffmpeg` converting the `.ogg`/opus voice note to 16kHz mono WAV first. The
+  transcript becomes that message's `text`, so it reads and searches like any other message.
+  Transcription failure never drops the message — it just falls back to logging `[voice]`.
 
 **Per-chat voice mode**, set from inside the chat itself (only your own `fromMe` messages can
 trigger this — no one else can flip it for you):
@@ -108,6 +126,13 @@ trigger this — no one else can flip it for you):
   instead of text, transparently (`wa_send` checks the mode and routes itself; nothing else needs
   to know).
 - `/speaking text-only` — back to normal (the default for any chat not in the list).
+- `/language en` — this chat's outgoing voice notes use the English Piper voice instead of Turkish
+  (`en_US-hfc_male-medium` vs. `tr_TR-dfki-medium`). Opt-in, persisted as `english_jids` in
+  `state/config.json` — almost every allowlisted chat is Turkish, so the setting only needs to
+  name the exception. `/language tr` clears it. Incoming voice notes are unaffected: whisper's
+  `-l auto` already adapts per clip regardless of this setting. `wa_send_voice` also takes an
+  optional `language` argument to override the chat's default for one message — useful for
+  replying in a different language than usual without flipping the chat's setting.
 
 **Speaking speed**, global (not per-chat — there's no per-chat need the way there is for the
 above), same `fromMe`-only rule, persisted as `speaking_rate` in `state/config.json` (default
@@ -129,9 +154,17 @@ The model has to exist before the tier will switch: `bash scripts/setup-voice.sh
 (resumable, and staged through a `.part` file so an interrupted download can't leave a truncated
 model that looks valid). Switching tiers takes effect on the next voice note, no restart.
 
-There is deliberately no equivalent for TTS: Piper has exactly one Turkish voice
-(`tr_TR-dfki-medium`) at one quality, so there is nothing to tier between. A higher tier would mean
-a second engine rather than a second model file.
+**TTS voice tier**, global, same `fromMe`-only rule, persisted as `t2s_tier` in `state/config.json`
+(default `low`), decoupled from `s2t_tier` — wanting a fast transcript and a good-sounding reply
+are independent preferences. In practice it currently has nothing to bite on: both
+[`tr_TR-dfki-medium`](https://huggingface.co/rhasspy/piper-voices/tree/main/tr/tr_TR) and
+[`en_US-hfc_male-medium`](https://huggingface.co/rhasspy/piper-voices/tree/main/en/en_US/hfc_male)
+only ship one quality tier each on Hugging Face, so every `/t2s-tier` value maps to the same file
+per language — the setting exists so a future voice with real low/medium/high variants slots in
+without a config shape change. Same missing-model guard as `/language` (above): `/t2s-tier`
+refuses to switch to a voice that hasn't been downloaded yet rather than silently breaking TTS,
+and `bash scripts/setup-voice.sh <tier>` fetches both Piper voices unconditionally alongside the
+whisper model for that tier. Both take effect on the next voice note, no restart.
 
 **Per-chat media capture**, same `fromMe`-only rule, persisted as `no_image_jids` /
 `no_voice_jids` in `state/config.json`. Both are opt-_out_, so the commands read the friendly way
@@ -179,7 +212,7 @@ MCP server connected in only one session at a time.
 | `wa_contacts`   | jid → display name, derived only from logged messages for allowlisted chats.                                                               |
 | `wa_send`       | `{ to, text }` — sends only if `to` is on the allowlist. Auto-routes to a spoken voice note if the chat is in `/speaking voice-only` mode. |
 | `wa_send_image` | `{ to, path, caption? }` — sends a local image file, from a sendable directory only (see Security notes).                                  |
-| `wa_send_voice` | `{ to, text, voice? }` — speaks `text` (Piper by default, or a macOS `say` voice) and sends it as a voice note.                            |
+| `wa_send_voice` | `{ to, text, voice?, language?, rate? }` — speaks `text` (Piper by default, or a macOS `say` voice) and sends it as a voice note.           |
 | `wa_send_audio` | `{ to, path }` — sends an already-made audio file as a voice note.                                                                         |
 | `wa_react`      | `{ jid, messageId, emoji }` — reacts to a specific logged message; empty `emoji` removes a reaction.                                       |
 | `wa_edit`       | `{ jid, messageId, text }` — rewrites a message **Claude sent**; refuses anything else. WhatsApp allows ~15 min and marks it edited.       |

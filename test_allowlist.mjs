@@ -107,6 +107,38 @@ const { s2tTier } = await import("./src/config.mjs");
 assert.equal(s2tTier(), "low", "an unknown tier in config falls back to low");
 writeFileSync(cfg, JSON.stringify({ allowlist: [DM, GROUP] }));
 
+const T2S_TIER = COMMANDS.t2sTier;
+assert.equal(T2S_TIER.exec("/t2s-tier high")[1], "high", "t2s tier command parses");
+assert.equal(T2S_TIER.exec("/t2s-tier MID ")[1], "MID", "case and padding tolerated");
+assert.equal(T2S_TIER.exec("/t2s-tier huge"), null, "unknown tier rejected");
+assert.equal(T2S_TIER.exec("hey /t2s-tier low"), null, "embedded command must not match");
+
+const LANGUAGE = COMMANDS.language;
+assert.equal(LANGUAGE.exec("/language en")[1], "en", "language command parses");
+assert.equal(LANGUAGE.exec("/language TR ")[1], "TR", "case and padding tolerated");
+assert.equal(LANGUAGE.exec("/language fr"), null, "unsupported language rejected");
+assert.equal(LANGUAGE.exec("hey /language en"), null, "embedded command must not match");
+
+// PIPER_VOICES must cover both languages at every s2t/t2s tier name.
+const { PIPER_VOICES } = await import("./src/config.mjs");
+assert.deepEqual(Object.keys(PIPER_VOICES).sort(), ["en", "tr"], "language has exactly tr and en");
+for (const lang of Object.keys(PIPER_VOICES)) {
+  assert.deepEqual(Object.keys(PIPER_VOICES[lang]), ["low", "mid", "high"], `${lang} covers all tiers`);
+}
+
+// language is per-chat (opt-in english_jids), not global — same isEnabled/setEnabled shape as
+// voice_only_jids, and a hand-edited typo in t2s_tier must degrade to "low", not break TTS.
+const { isEnglish, setEnglish, t2sTier } = await import("./src/config.mjs");
+assert.equal(isEnglish(DM), false, "a chat not in english_jids defaults to Turkish");
+setEnglish(DM, true);
+assert.equal(isEnglish(DM), true, "/language en marks a chat english");
+assert.equal(isEnglish(GROUP), false, "...without affecting other chats");
+setEnglish(DM, false);
+assert.equal(isEnglish(DM), false, "/language tr clears it again");
+writeFileSync(cfg, JSON.stringify({ allowlist: [DM], t2s_tier: "enormous" }));
+assert.equal(t2sTier(), "low", "an unknown t2s tier in config falls back to low");
+writeFileSync(cfg, JSON.stringify({ allowlist: [DM, GROUP] }));
+
 const MEDIA_CMD = COMMANDS.readMedia;
 assert.deepEqual(MEDIA_CMD.exec("/read-image no").slice(1, 3), ["image", "no"], "image off parses");
 assert.deepEqual(
@@ -280,6 +312,8 @@ for (const [name, re] of Object.entries(CMDS)) {
     speaking: "/speaking text-only",
     speakingSpeed: "/speaking-speed 1.2",
     s2tTier: "/s2t-tier low",
+    t2sTier: "/t2s-tier low",
+    language: "/language en",
     readMedia: "/read-image no",
   }[name];
   assert.ok(re.exec(sample), `${name} matches its own command form`);

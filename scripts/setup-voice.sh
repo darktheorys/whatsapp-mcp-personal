@@ -23,7 +23,7 @@ brew install whisper-cpp ffmpeg uv || echo "setup-voice: brew install failed, vo
 mkdir -p "$STATE/whisper-models" "$STATE/piper-models"
 
 # Which whisper model to fetch. Defaults to the "low" tier so a plain `pnpm install` still costs
-# ~500MB rather than 1.6GB; pass a tier to get a better one: `bash scripts/setup-voice.sh high`.
+# ~500MB rather than 1.6GB+; pass a tier to get a better one: `bash scripts/setup-voice.sh high`.
 # The tier names match S2T_MODELS in src/config.mjs — keep the two in step.
 case "${1:-low}" in
   low)  WHISPER_MODEL=ggml-small.bin;           WHISPER_SIZE="~500MB" ;;
@@ -54,6 +54,19 @@ if [[ ! -f "$STATE/piper-models/tr_TR-dfki-medium.onnx" ]]; then
     || echo "setup-voice: Piper model download failed."
 else
   echo "setup-voice: Piper model already present, skipping."
+fi
+
+# English Piper voice ("hfc_male") — like the Turkish voice above, this only ships one quality
+# tier (medium), so it's an unconditional download rather than tier-gated.
+if [[ ! -f "$STATE/piper-models/en_US-hfc_male-medium.onnx" ]]; then
+  echo "setup-voice: downloading Piper English voice (~60MB)..."
+  curl -fL -o "$STATE/piper-models/en_US-hfc_male-medium.onnx" \
+    https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/hfc_male/medium/en_US-hfc_male-medium.onnx \
+    && curl -fL -o "$STATE/piper-models/en_US-hfc_male-medium.onnx.json" \
+    https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/hfc_male/medium/en_US-hfc_male-medium.onnx.json \
+    || echo "setup-voice: Piper English model download failed."
+else
+  echo "setup-voice: Piper English voice already present, skipping."
 fi
 
 if [[ ! -x "$STATE/piper-venv/bin/piper" ]]; then

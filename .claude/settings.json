@@ -1,5 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "autoMemoryEnabled": true,
+  "autoMemoryDirectory": "./memory",
   "hooks": {
     "PreToolUse": [
       {
@@ -44,7 +46,6 @@
       "Read(./state/messages.db)",
       "Read(./state/messages.db-wal)",
       "Read(./state/messages.db-shm)",
-      "Read(./state/inbox.log)",
       "Read(./state/contacts.json)",
       "Read(./state/poll-state.json)",
       "Read(./state/*.tgz)"
