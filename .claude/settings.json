@@ -18,8 +18,7 @@
   },
   "permissions": {
     "allow": [
-      "mcp__whatsapp-personal__wa_*",
-      "Bash(curl -s https://gist.githubusercontent.com/jcahill/e42b20f91fd0f82fd7023ad7ddc6146c/raw/*)"
+      "mcp__whatsapp-personal__wa_*"
     ],
     "deny": [
       "Read(~/.ssh/**)",
