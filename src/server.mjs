@@ -162,14 +162,6 @@ export function resolveSendable(path) {
   return { real };
 }
 
-// A text message ends in "(_Claude_)". A voice note has nowhere to put that — WhatsApp voice
-// notes carry no caption — so without a marker a synthesised message is indistinguishable from
-// one the owner recorded, in chats where people have already tried impersonation for fun.
-// A short tone rather than a spoken word: it reaches whoever is actually listening, and it does
-// not interrupt the message on every send the way "... Claude." would.
-const TONE_HZ = 880;
-const TONE_SECONDS = 0.15;
-
 // Writes `text` to `outWav`. Piper (no `voice`) is the default engine, using PIPER_VOICES[lang];
 // naming a macOS `say` voice falls back to it for other languages/genders instead (`lang` is
 // unused on that path — the voice name already picks the language). `rate` is a speed multiplier
@@ -204,35 +196,16 @@ function synthWav(text, voice, rate, lang, outWav) {
   rmSync(aiff, { force: true });
 }
 
-// Appends the marker tone to any audio file and encodes the result for WhatsApp. Every outbound
-// voice note goes through here — synthesised or pre-made — so none can leave unmarked by a call
-// site forgetting to add it. Both inputs are normalised to one format first: the concat filter
-// requires a matching sample rate and channel layout, and TTS output and an arbitrary file on
-// disk generally do not share either.
-function withMarkerTone(audioPath) {
-  const dir = mkdtempSync(join(tmpdir(), "wa-tone-"));
+// Encodes any audio file to the m4a WhatsApp voice notes need. Every outbound voice note goes
+// through here — synthesised or pre-made — so the format conversion can't be forgotten at a call
+// site. (This used to also append an audible marker tone distinguishing a synthesised message
+// from one the owner recorded, since a voice note has nowhere to put the "(_Claude_)" text
+// marker; removed at Burak's request as not worth it.)
+function encodeVoiceNote(audioPath) {
+  const dir = mkdtempSync(join(tmpdir(), "wa-encode-"));
   try {
     const m4a = join(dir, "out.m4a");
-    execFileSync(
-      "ffmpeg",
-      [
-        "-y",
-        "-i",
-        audioPath,
-        "-f",
-        "lavfi",
-        "-i",
-        `sine=frequency=${TONE_HZ}:duration=${TONE_SECONDS}`,
-        "-filter_complex",
-        "[0:a]aformat=sample_rates=48000:channel_layouts=mono[a0];" +
-          "[1:a]aformat=sample_rates=48000:channel_layouts=mono[a1];" +
-          "[a0][a1]concat=n=2:v=0:a=1",
-        "-c:a",
-        "aac",
-        m4a,
-      ],
-      { stdio: "ignore" },
-    );
+    execFileSync("ffmpeg", ["-y", "-i", audioPath, "-c:a", "aac", m4a], { stdio: "ignore" });
     return readFileSync(m4a);
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -248,7 +221,7 @@ function speakToBuffer(text, voice, rate = speakingRate(), lang = "tr") {
   try {
     const wav = join(dir, "out.wav");
     synthWav(text, voice, rate, lang, wav);
-    return withMarkerTone(wav);
+    return encodeVoiceNote(wav);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -853,7 +826,7 @@ server.registerTool(
       if (statSync(real).size > 15 * 1024 * 1024) {
         return { isError: true, content: [{ type: "text", text: "Refused: file exceeds 15 MB." }] };
       }
-      buffer = withMarkerTone(real);
+      buffer = encodeVoiceNote(real);
     } catch (err) {
       return { isError: true, content: [{ type: "text", text: `Could not read ${path}: ${err}` }] };
     }
@@ -1137,6 +1110,67 @@ server.registerTool(
     }
     const n = limit ?? 20;
     return { content: [{ type: "text", text: JSON.stringify(searchMessages([jid], query, n), null, 2) }] };
+  },
+);
+
+server.registerTool(
+  "wa_send_text_only",
+  {
+    title: "Send a WhatsApp text message (bypassing voice-only mode)",
+    description:
+      "Send plain text to a voice-only chat without converting it to a voice note. Useful for sharing " +
+      "structured information (URLs, metadata, transcripts) where text is clearer than spoken audio.",
+    inputSchema: {
+      to: z.string().describe("Recipient JID, e.g. 491701234567@s.whatsapp.net"),
+      text: z.string().min(1),
+    },
+  },
+  async ({ to, text }) => {
+    const refusal = guardSend(to, text);
+    if (refusal) return refusal;
+    const sock = getSocket();
+    const fullText = text.endsWith(ATTRIBUTION) ? text : text + ATTRIBUTION;
+    const sent = await sock.sendMessage(to, { text: fullText });
+    appendMessage(to, { direction: "out", by: "claude", text: fullText, ts: Date.now(), id: sent?.key?.id ?? null });
+    return { content: [{ type: "text", text: `Sent text to ${to} (bypassed voice-only).` }] };
+  },
+);
+
+server.registerTool(
+  "wa_send_video",
+  {
+    title: "Send a WhatsApp video",
+    description:
+      "Send a video file to an allowlisted WhatsApp JID, with an optional caption. " +
+      "Refuses anything not in state/config.json's allowlist.",
+    inputSchema: {
+      to: z.string().describe("Recipient JID, e.g. 491701234567@s.whatsapp.net"),
+      path: z.string().describe("Absolute local path to the video file (mp4/mkv/mov etc.)"),
+      caption: z.string().optional(),
+    },
+  },
+  async ({ to, path, caption }) => {
+    const refusal = guardSend(to, caption);
+    if (refusal) return refusal;
+    const sock = getSocket();
+    const { real, error: pathError } = resolveSendable(path);
+    if (pathError) {
+      return { isError: true, content: [{ type: "text", text: `Refused: ${pathError}.` }] };
+    }
+    let buffer;
+    try {
+      // 100 MB ceiling for videos (larger than images/audio, but still reasonable)
+      if (statSync(real).size > 100 * 1024 * 1024) {
+        return { isError: true, content: [{ type: "text", text: "Refused: file exceeds 100 MB." }] };
+      }
+      buffer = readFileSync(real);
+    } catch (err) {
+      return { isError: true, content: [{ type: "text", text: `Could not read ${path}: ${err}` }] };
+    }
+    const fullCaption = (caption ?? "") + ATTRIBUTION;
+    const sent = await sock.sendMessage(to, { video: buffer, caption: fullCaption });
+    appendMessage(to, { direction: "out", by: "claude", text: fullCaption, ts: Date.now(), id: sent?.key?.id ?? null });
+    return { content: [{ type: "text", text: `Sent video to ${to}.` }] };
   },
 );
 
