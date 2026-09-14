@@ -4,3 +4,4 @@ state/
 memory/
 .claude/settings.local.json
 __pycache__/
+.pnpm-store/

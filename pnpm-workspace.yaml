@@ -1,5 +1,5 @@
 allowBuilds:
-  '@whiskeysockets/baileys': false
+  "@whiskeysockets/baileys": false
   protobufjs: false
 
 # Nothing published in the last 30 days gets installed (43200 minutes — the unit is minutes, not
@@ -10,8 +10,23 @@ allowBuilds:
 # When this blocks an upgrade you genuinely need sooner, add the package to minimumReleaseAgeExclude
 # rather than lowering the number — an exception should be visible and per-package.
 minimumReleaseAge: 43200
+
+# Deliberate, visible exceptions to the 30-day wait (see the note above: exclude per-package
+# rather than lowering the global number, so the shield stays on for the ~190 other entries —
+# including transitive runtime deps, which is where a supply-chain attack actually lands).
+#
+# Bumped by hand on 2026-09-14 while these were 0-1 days old:
+#   zod 3 -> 4      runtime; breaking major, tested green against test_allowlist.mjs
+#   oxfmt, oxlint   dev-only (formatter/linter), never shipped
+# The @oxfmt/* and @oxlint/* entries are their per-platform native bindings, which are versioned
+# in lockstep and would otherwise fail the check one architecture at a time.
 minimumReleaseAgeExclude:
-  # Baileys reimplements a protocol Meta changes without notice, and this repo tracks a release
-  # candidate. An old version here does not mean "safer", it means "stops connecting" — which is
-  # exactly what happened the evening this was added. The one package where currency beats age.
-  - '@whiskeysockets/baileys'
+  - zod
+  - oxfmt
+  - oxlint
+  - "@oxfmt/*"
+  - "@oxlint/*"
+  # Transitive dep of oxfmt@0.68.0, pulled in by that bump. Dev-only and 22 days old at the time
+  # (not a 0-day release), so the risk profile is much milder than the entries above.
+  - tinypool
+
