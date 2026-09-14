@@ -133,6 +133,17 @@ Swap `tr_TR-dfki-medium` for any other voice from
 [huggingface.co/rhasspy/piper-voices](https://huggingface.co/rhasspy/piper-voices/tree/main) —
 just update `PIPER_MODEL` in `src/server.mjs` to match.
 
+### 6. Image and PDF text (optional)
+
+Also part of `pnpm install`, via `scripts/setup-text-extract.sh`: compiles
+`scripts/extract-text.swift` into `state/bin/extract-text` with `swiftc`. That binary reads text
+out of inbound images (Vision OCR) and PDFs (PDFKit) so a screenshot is searchable instead of
+being a row with no text in it. Re-run it directly with `pnpm setup:text`.
+
+macOS-only, and skipped without the Xcode command line tools (`xcode-select --install`) — as with
+voice, a skip costs the feature and nothing else. Nothing is sent anywhere: both frameworks ship
+with macOS and run on-device.
+
 ## Voice: speaking and listening
 
 Both directions run entirely offline, no API keys:
@@ -157,6 +168,30 @@ Both directions run entirely offline, no API keys:
   setting, with `ffmpeg` converting the `.ogg`/opus voice note to 16kHz mono WAV first. The
   transcript becomes that message's `text`, so it reads and searches like any other message.
   Transcription failure never drops the message — it just falls back to logging `[voice]`.
+- **Video** goes through the same transcriber. ffmpeg doesn't care that the container also holds
+  pictures, and what someone says in a video is as much the message as what they say in a voice
+  note. Video sits under the _image_ privacy gate (`no_image_jids`), not the voice one, because
+  transcribing it means downloading the pictures too — and the 25 MB media cap means long videos
+  are skipped and never transcribed.
+
+## Reading images and documents
+
+The same bargain as voice, for things that arrive as pictures instead of sound: an inbound image is
+run through macOS's Vision OCR and an inbound PDF through PDFKit, both on-device, via
+`state/bin/extract-text` (see Setup step 6). The words land on the message as
+
+```
+<the sender's caption, if any>
+[text in image]
+<what was read off it>
+```
+
+so a screenshot of a conversation, an error message or a receipt is searchable through `wa_search`
+instead of being a row with no text at all. The `[text in image]` marker is deliberate: OCR is
+wrong often enough that presenting it as the sender's own words would eventually put words in
+someone's mouth. A scanned PDF with no text layer yields nothing, which is a property of the file
+rather than a failure. If the binary was never built, extraction is skipped and everything else
+behaves exactly as before.
 
 **Per-chat voice mode**, set from inside the chat itself (only your own `fromMe` messages can
 trigger this — no one else can flip it for you):
@@ -310,7 +345,8 @@ MCP server connected in only one session at a time.
 | `wa_delete`         | `{ jid, messageId }` — delete-for-everyone on a message **Claude sent**; refuses anything else. Leaves WhatsApp's "deleted" placeholder.   |
 | `wa_connect`        | Reclaims the WhatsApp socket in this process without an `/mcp` reload — see "Multiple sessions".                                           |
 | `wa_recent`         | `{ jid?, limit?, all? }` — recent logged messages for one allowed chat. Omitting `jid` returns per-chat unread counts only, never text.    |
-| `wa_search`         | `{ jid, query, limit? }` — case-insensitive substring search over one chat's active + archived messages.                                   |
+| `wa_search`         | `{ jid, query, limit? }` — substring search over one chat's active + archived messages, case- and diacritic-insensitive (`seker` finds `şeker`). |
+| `wa_stats`          | `{ jid?, days?, unanswered?, unansweredHours? }` — volume, reply times, activity by hour/weekday, who starts conversations. Counts only, never text, so it is safe across all chats at once. |
 
 ## YouTube / video tools
 

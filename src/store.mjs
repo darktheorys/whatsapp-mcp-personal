@@ -32,6 +32,9 @@ function getDb() {
   // silently missed it — in chats that are entirely Turkish. JS toLowerCase is full Unicode, so
   // the comparison is done with the same function on both sides.
   db.function("unicode_lower", (s) => (typeof s === "string" ? s.toLowerCase() : s));
+  // Registered so the FTS backfill below can normalise inside SQL instead of pulling every row
+  // into JS and writing it back one statement at a time.
+  db.function("search_norm", (s) => normalizeForSearch(s));
   db.exec(`
     CREATE TABLE IF NOT EXISTS messages (
       rowid    INTEGER PRIMARY KEY,
@@ -83,6 +86,12 @@ function getDb() {
     to_id: "TEXT GENERATED ALWAYS AS (json_extract(json, '$.to')) VIRTUAL",
     reply_to_id: "TEXT GENERATED ALWAYS AS (json_extract(json, '$.replyToId')) VIRTUAL",
     view_once: "INTEGER GENERATED ALWAYS AS (json_extract(json, '$.viewOnce')) VIRTUAL",
+    // "in" | "out". Promoted for the stats queries, which slice almost everything by who spoke —
+    // reading it out of the blob per row made every one of them a full json_extract scan.
+    direction: "TEXT GENERATED ALWAYS AS (json_extract(json, '$.direction')) VIRTUAL",
+    // "reaction" | "edit" | "delete", NULL for an ordinary message. Stats count conversation, and
+    // a 👀 is not a turn in one — this is what lets them be excluded without parsing the blob.
+    kind: "TEXT GENERATED ALWAYS AS (json_extract(json, '$.kind')) VIRTUAL",
   };
   for (const [name, definition] of Object.entries(generated)) {
     try {
@@ -98,8 +107,57 @@ function getDb() {
     CREATE INDEX IF NOT EXISTS messages_reply_to ON messages (jid, reply_to_id) WHERE reply_to_id IS NOT NULL;
     CREATE INDEX IF NOT EXISTS messages_media ON messages (jid, media_kind) WHERE media_kind IS NOT NULL;
     CREATE INDEX IF NOT EXISTS messages_view_once ON messages (jid, ts) WHERE view_once IS NOT NULL;
+    -- Search index over normalised text (see normalizeForSearch). Trigram, not unicode61: the
+    -- default tokeniser is word-based, so it cannot match a fragment inside a word — searching
+    -- "eke" would stop finding "şeker", which is a regression against the LIKE search this
+    -- replaces. Trigram indexes every 3-character window, so substring behaviour is preserved.
+    --
+    -- A plain FTS5 table rather than an external-content one (content=messages): the indexed text
+    -- is not a column of the messages table at all, it is a normalised derivative of it, so there
+    -- is nothing for external content to point at. rowid is kept equal to the messages rowid,
+    -- which is what makes the join below work.
+    CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(norm, tokenize="trigram");
   `);
+  // Backfill: every message row with text that has no index row yet. Covers both the one-time
+  // migration of a database that predates this table and any gap a crash between the two inserts
+  // in appendMessage could open. Guarded by a count comparison so the NOT IN scan doesn't run on
+  // every startup — in the normal case the counts match and this costs two counts.
+  //
+  // Not a violation of the append-only rule: nothing in `messages` is read differently or written
+  // back, this only populates a derived index, the same category as the indexes above.
+  const { m, f } = db
+    .prepare(
+      "SELECT (SELECT count(*) FROM messages WHERE text IS NOT NULL) AS m, (SELECT count(*) FROM messages_fts) AS f",
+    )
+    .get();
+  if (m !== f) {
+    db.exec(`
+      INSERT INTO messages_fts (rowid, norm)
+      SELECT rowid, search_norm(text) FROM messages
+      WHERE text IS NOT NULL AND rowid NOT IN (SELECT rowid FROM messages_fts)
+    `);
+  }
   return db;
+}
+
+// Folds a string to a form where a query typed on an English keyboard finds Turkish text. Lowercase
+// (full Unicode, not SQLite's ASCII-only lower()), then NFD to split accented letters into base +
+// combining mark, then drop the marks: ş→s, ğ→g, ü→u, ö→o, ç→c, İ→i all fall out of that single
+// step. 'ı' (U+0131, dotless i) is the one that does not — it has no decomposition, so it is mapped
+// explicitly. ß is folded to ss because its uppercase form is SS and half the German in these chats
+// is typed either way.
+//
+// Measured, not assumed: FTS5's trigram tokeniser case-folds Turkish correctly on its own
+// (şeker↔ŞEKER) but does no diacritic folding at all, so "seker" found nothing without this. The
+// LIKE search this replaces had the identical gap.
+export function normalizeForSearch(s) {
+  if (typeof s !== "string") return s;
+  return s
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/\p{M}+/gu, "")
+    .replace(/ı/g, "i")
+    .replace(/ß/g, "ss");
 }
 
 // The links the generated columns exist for: what is attached to a message (reactions, edits,
@@ -217,22 +275,150 @@ function withStatus(jid, entries) {
   return entries.map((e) => (byId.has(e.id) ? { ...e, ...byId.get(e.id) } : e));
 }
 
-// LIKE with an escaped pattern rather than a caller-supplied regex: message text comes from
-// whoever is on the other end of the chat, and an attacker-controlled regex is a ReDoS footgun.
-// Case-folding uses the registered unicode_lower on both sides — SQLite's own lower() would leave
-// Ş/İ/Ğ untouched and silently miss half the words in these chats.
+// Trigram FTS5 needs at least 3 characters to match: the index stores 3-character windows, so a
+// shorter needle has no window to look up and the query returns nothing rather than erroring.
+// Below this, fall back to the LIKE scan, which has no such floor.
+const TRIGRAM_MIN = 3;
+
+// Never a caller-supplied regex: message text comes from whoever is on the other end of the chat,
+// and an attacker-controlled regex is a ReDoS footgun.
+//
+// Both paths search the normalised form (see normalizeForSearch) on both sides, so a query typed
+// without a Turkish keyboard still matches — "seker" finds "şeker". The LIKE path used to fold with
+// unicode_lower, which handled case but not diacritics.
 export function searchMessages(jids, query, limit) {
   if (jids.length === 0) return [];
   const placeholders = jids.map(() => "?").join(",");
-  const pattern = `%${query.toLowerCase().replace(/[\\%_]/g, "\\$&")}%`;
+  const needle = normalizeForSearch(query);
+
+  if (needle.length < TRIGRAM_MIN) {
+    const pattern = `%${needle.replace(/[\\%_]/g, "\\$&")}%`;
+    return getDb()
+      .prepare(
+        `SELECT json FROM messages
+         WHERE jid IN (${placeholders}) AND search_norm(text) LIKE ? ESCAPE '\\'
+         ORDER BY ts LIMIT ?`,
+      )
+      .all(...jids, pattern, limit)
+      .map(parse);
+  }
+
+  // Wrapped in double quotes so FTS5 reads the whole thing as one phrase — a bare MATCH argument is
+  // a query *expression*, where a stray `*`, `:`, `NEAR` or unbalanced paren is either a syntax
+  // error or a different search than the one asked for. Internal quotes are doubled, the escape
+  // FTS5's phrase syntax defines. With trigram, a phrase match is a substring match, which is the
+  // behaviour wa_search has always had.
+  const phrase = `"${needle.replace(/"/g, '""')}"`;
   return getDb()
     .prepare(
-      `SELECT json FROM messages
-       WHERE jid IN (${placeholders}) AND unicode_lower(text) LIKE ? ESCAPE '\\'
-       ORDER BY ts LIMIT ?`,
+      `SELECT m.json FROM messages_fts f
+       JOIN messages m ON m.rowid = f.rowid
+       WHERE f.norm MATCH ? AND m.jid IN (${placeholders})
+       ORDER BY m.ts LIMIT ?`,
     )
-    .all(...jids, pattern, limit)
+    .all(phrase, ...jids, limit)
     .map(parse);
+}
+
+// A gap this long between two messages ends one conversation and starts the next. Six hours is
+// long enough to sit across a working day or a night's sleep without splitting a single back-and-
+// forth in two, and short enough that "who opened this conversation" still means something.
+const CONVERSATION_GAP_MS = 6 * 60 * 60 * 1000;
+// Response times above this are treated as "never really replied" and left out of the median —
+// otherwise one message answered three days later drags the number somewhere that describes no
+// actual conversation.
+const MAX_RESPONSE_MS = 12 * 60 * 60 * 1000;
+
+const median = (xs) => {
+  if (xs.length === 0) return null;
+  const s = [...xs].sort((a, b) => a - b);
+  const mid = Math.floor(s.length / 2);
+  return s.length % 2 ? s[mid] : (s[mid - 1] + s[mid]) / 2;
+};
+
+// Aggregated in JS rather than SQL. The reply-time and conversation-start figures both need to walk
+// the messages in order and remember the previous one, which in SQL is a window-function query that
+// is considerably harder to read and to be sure of than the loop below — and at one person's chat
+// volume the whole history fits in memory comfortably. Revisit if that stops being true.
+//
+// Spans archived rows too, same as search: "who do I talk to most" is a question about all of it,
+// and the 30-day archive cutoff is a read-path detail, not a statement about relevance.
+export function chatStats(jid, sinceMs = null) {
+  const rows = getDb()
+    .prepare(
+      `SELECT ts, direction FROM messages
+       WHERE jid = ? AND kind IS NULL AND direction IS NOT NULL AND ts >= ?
+       ORDER BY ts, rowid`,
+    )
+    .all(jid, sinceMs ?? 0);
+  if (rows.length === 0) return { jid, total: 0 };
+
+  const byHour = Array(24).fill(0);
+  const byWeekday = Array(7).fill(0); // 0 = Sunday, matching Date#getDay
+  const replyMs = { in: [], out: [] };
+  const starts = { in: 0, out: 0 };
+  let inbound = 0;
+  let outbound = 0;
+  let prev = null;
+
+  for (const row of rows) {
+    const when = new Date(row.ts);
+    // Local time, deliberately: an activity heatmap is about the hours of someone's day, and UTC
+    // buckets would put a late-night chat in Istanbul into the following morning.
+    byHour[when.getHours()]++;
+    byWeekday[when.getDay()]++;
+    if (row.direction === "in") inbound++;
+    else outbound++;
+
+    const gap = prev ? row.ts - prev.ts : Infinity;
+    if (gap > CONVERSATION_GAP_MS) starts[row.direction === "in" ? "in" : "out"]++;
+    // Only a direction change is a reply; consecutive messages from the same side are one turn
+    // being typed in several bubbles, and counting the second as a 0-minute reply would make every
+    // median meaninglessly fast.
+    else if (prev && prev.direction !== row.direction && gap <= MAX_RESPONSE_MS) {
+      replyMs[row.direction === "out" ? "out" : "in"].push(gap);
+    }
+    prev = row;
+  }
+
+  const toMinutes = (ms) => (ms === null ? null : Math.round(ms / 60000));
+  return {
+    jid,
+    total: rows.length,
+    inbound,
+    outbound,
+    firstTs: rows[0].ts,
+    lastTs: rows[rows.length - 1].ts,
+    lastDirection: rows[rows.length - 1].direction,
+    // "out" = how long you take to answer them; "in" = how long they take to answer you.
+    medianReplyMinutes: { out: toMinutes(median(replyMs.out)), in: toMinutes(median(replyMs.in)) },
+    replySamples: { out: replyMs.out.length, in: replyMs.in.length },
+    conversationsStarted: { byThem: starts.in, byYou: starts.out },
+    byHour,
+    byWeekday,
+  };
+}
+
+// Chats whose last word was theirs, long enough ago that it reads as unanswered rather than as a
+// conversation still in progress. Deliberately not a judgement about whether a reply was *needed* —
+// plenty of messages rightly end a thread. It surfaces candidates; the reading is the caller's.
+export function unansweredChats(jids, olderThanMs) {
+  const cutoff = Date.now() - olderThanMs;
+  const db = getDb();
+  const out = [];
+  for (const jid of jids) {
+    const last = db
+      .prepare(
+        `SELECT ts, text, direction FROM messages
+         WHERE jid = ? AND kind IS NULL AND direction IS NOT NULL
+         ORDER BY ts DESC, rowid DESC LIMIT 1`,
+      )
+      .get(jid);
+    if (last && last.direction === "in" && last.ts < cutoff) {
+      out.push({ jid, lastTs: last.ts, waitingMinutes: Math.round((Date.now() - last.ts) / 60000), text: last.text });
+    }
+  }
+  return out.sort((a, b) => a.lastTs - b.lastTs);
 }
 
 export function findMessage(jid, id) {
@@ -265,9 +451,29 @@ export function updatePollState(jid, lastMessageId) {
 
 export function appendMessage(jid, entry) {
   const row = { jid, ...entry };
-  getDb()
+  const db = getDb();
+  const text = entry.text ?? null;
+  const info = db
     .prepare("INSERT INTO messages (jid, id, ts, text, archived, json) VALUES (?, ?, ?, ?, 0, ?)")
-    .run(jid, entry.id ?? null, entry.ts ?? Date.now(), entry.text ?? null, JSON.stringify(row));
+    .run(jid, entry.id ?? null, entry.ts ?? Date.now(), text, JSON.stringify(row));
+  // Second insert rather than a trigger: the normalisation is JS (see normalizeForSearch), and a
+  // trigger would have to call back into it through the registered SQL function for every write.
+  // Skipped for text-less rows (media with no caption, reactions) so the index holds only things
+  // that can actually match a search — and so the backfill's count check stays exact.
+  //
+  // If this throws, the message row is already committed: the row is the record and must survive,
+  // an index gap is recoverable (the backfill in getDb picks it up on next start). Losing the
+  // message to protect the index would be exactly backwards.
+  if (text !== null) {
+    try {
+      db.prepare("INSERT INTO messages_fts (rowid, norm) VALUES (?, ?)").run(
+        info.lastInsertRowid,
+        normalizeForSearch(text),
+      );
+    } catch (err) {
+      process.stderr.write(`search index write failed, message kept: ${err?.message ?? err}\n`);
+    }
+  }
 }
 
 export function readRecent(jid, limit) {

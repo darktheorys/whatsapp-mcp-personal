@@ -33,7 +33,17 @@ export function connectionState() {
 // takes the whole server down. Every dispatch goes through here.
 const safely = (fn, arg, what) => Promise.resolve(fn?.(arg)).catch((err) => logger.error(err, `${what} failed`));
 
-export async function startWhatsApp({ onMessage, onReaction, onPresence }) {
+// `onNotice(level, message, data)` is optional and lets the MCP layer forward connection events to
+// the client as protocol log notifications. This module deliberately knows nothing about MCP — it
+// gets a callback, not a server — so importing it stays free of protocol concerns.
+export async function startWhatsApp({ onMessage, onReaction, onPresence, onNotice }) {
+  const notice = (level, message, data) => {
+    try {
+      onNotice?.(level, message, data);
+    } catch {
+      // A broken notifier must never be the reason a reconnect doesn't happen.
+    }
+  };
   const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
   const { version } = await fetchLatestBaileysVersion();
 
@@ -43,6 +53,14 @@ export async function startWhatsApp({ onMessage, onReaction, onPresence }) {
     logger,
     printQRInTerminal: false,
     syncFullHistory: false,
+    // Baileys defaults this to true, which fires sendPresenceUpdate('available') on connect and
+    // announces this process as an active online device. WhatsApp then treats the account as
+    // "already reading somewhere" and stops pushing notifications to the phone — so simply having
+    // this server running silently swallowed the owner's own notifications. This server is a
+    // background logger, not a device anyone is sitting at; it must never claim otherwise.
+    // Notifications on the phone are the owner's signal that something needs dealing with, and
+    // nothing here is worth costing them that.
+    markOnlineOnConnect: false,
   });
   sock = thisSock;
 
@@ -57,7 +75,11 @@ export async function startWhatsApp({ onMessage, onReaction, onPresence }) {
     if (getSocket() !== thisSock) return;
     const { connection, lastDisconnect } = update;
     if (connection === "open") {
+      const wasDown = lastError;
       lastError = null;
+      // Only on recovery, not on the first connect: a notification every startup is noise, one
+      // saying the socket came back after an outage is the answer to "why did that send fail".
+      if (wasDown) notice("info", "WhatsApp connection restored", { after: wasDown });
       // Presence updates for a jid only arrive after subscribing to it (and only if that
       // contact's privacy settings allow sharing last-seen/composing status at all — if they
       // don't, this silently gets nothing, same as WhatsApp's own UI would show no indicator
@@ -76,25 +98,36 @@ export async function startWhatsApp({ onMessage, onReaction, onPresence }) {
         sock = null;
         lastError = "logged out by WhatsApp (401) — run `node src/pair.mjs <number>` to relink, then wa_connect";
         logger.error(lastError);
+        notice("error", lastError, { statusCode });
         return;
       }
       lastError = `disconnected (${statusCode ?? "unknown"}) — reconnecting`;
+      notice("warning", lastError, { statusCode });
       // WhatsApp allows one live connection per linked device. Reconnecting after another
       // instance took over just kicks it off again, and the two ping-pong forever.
       if (statusCode === DisconnectReason.connectionReplaced) {
         // Idling here would leave a dead process an MCP client could still be talking to,
         // producing a silent "Connection Closed" on every tool call until someone notices.
         // Exiting makes the failure visible immediately instead.
-        logger.error(
-          "Another instance took over this WhatsApp session — exiting so a stale process isn't left running.",
-        );
-        process.exit(1);
+        const message =
+          "Another instance took over this WhatsApp session — exiting so a stale process isn't left running.";
+        logger.error(message);
+        notice("critical", message, { statusCode });
+        // A beat before exiting so the notification above actually makes it onto the transport —
+        // process.exit() on the same tick drops anything still queued, which would make the one
+        // event most worth reporting the one event that never arrives.
+        setTimeout(() => process.exit(1), 100);
+        return;
       }
       // A short delay before retrying avoids a tight reconnect loop hammering WhatsApp's
       // servers if the connection keeps failing immediately (robotic-looking retries are
       // themselves one of the signals WhatsApp's abuse detection weighs).
       setTimeout(() => {
-        startWhatsApp({ onMessage, onReaction, onPresence }).catch((err) => logger.error(err, "reconnect failed"));
+        // onNotice included: dropping it here would silence connection reporting from the first
+        // reconnect onward, exactly when it starts being worth having.
+        startWhatsApp({ onMessage, onReaction, onPresence, onNotice }).catch((err) =>
+          logger.error(err, "reconnect failed"),
+        );
       }, 3000);
     }
   });
