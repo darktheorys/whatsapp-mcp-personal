@@ -6,7 +6,7 @@ import { promisify } from "node:util";
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { downloadMediaMessage, normalizeMessageContent } from "@whiskeysockets/baileys";
+import { downloadMediaMessage, jidNormalizedUser, normalizeMessageContent } from "@whiskeysockets/baileys";
 import { z } from "zod";
 
 import {
@@ -44,6 +44,7 @@ import {
 import {
   appendMessage,
   archiveOldMessages,
+  chatStats,
   findMessage,
   logCommand,
   logInbox,
@@ -53,6 +54,7 @@ import {
   readNewMessages,
   readRecent,
   searchMessages,
+  unansweredChats,
   updateContact,
   updatePollState,
 } from "./store.mjs";
@@ -60,13 +62,20 @@ import { connectionState, getSocket, logger, startWhatsApp } from "./whatsapp.mj
 
 const execFileAsync = promisify(execFile);
 
-// Media worth keeping a copy of. Video and voice notes are deliberately absent: they fall
-// through to null below and are dropped whole, same as every non-text message used to be.
+// Media worth keeping a copy of.
+//
+// Video is here so its speech can be transcribed like a voice note's — before that it fell through
+// to null and the whole message was dropped, text, caption and all. It sits under the *image*
+// privacy gate rather than the voice one (see wantsMedia below): transcribing a video means
+// downloading the pictures too, so a chat that opted out of images has opted out of this as well.
+// The 25 MB cap in saveMedia means most long videos are skipped and never transcribed, which is the
+// intended trade — the cap is about not hoarding, not about transcript coverage.
 const MEDIA_KINDS = {
   imageMessage: "image",
   documentMessage: "document",
   stickerMessage: "sticker",
   audioMessage: "voice",
+  videoMessage: "video",
 };
 // Resolved per call, not once at load: "/s2t-tier mid" has to take effect on the next voice note,
 // not on the next server restart.
@@ -83,12 +92,13 @@ function whisperModel() {
   const fallback = Object.values(S2T_MODELS)
     .map((f) => join(dir, f))
     .find((p) => existsSync(p));
-  logger.warn(
-    { wanted, fallback },
-    fallback
-      ? "configured s2t tier's model is missing — falling back to the one on disk (bash scripts/setup-voice.sh <tier> to fix)"
-      : "no whisper model on disk at all — voice notes will not be transcribed",
-  );
+  const message = fallback
+    ? "configured s2t tier's model is missing — falling back to the one on disk (bash scripts/setup-voice.sh <tier> to fix)"
+    : "no whisper model on disk at all — voice notes will not be transcribed";
+  logger.warn({ wanted, fallback }, message);
+  // Also to the client: silently transcribing at a worse tier than configured is exactly the kind
+  // of degradation that otherwise gets noticed weeks later, as "the transcripts got bad".
+  notify(fallback ? "warning" : "error", message, { wanted, fallback: fallback ?? null });
   return fallback ?? wanted;
 }
 const PIPER_BIN = join(STATE_DIR, "piper-venv", "bin", "piper");
@@ -108,12 +118,11 @@ function piperModel(lang) {
     .flatMap((tiers) => Object.values(tiers))
     .map((f) => join(dir, f))
     .find((p) => existsSync(p));
-  logger.warn(
-    { wanted, fallback },
-    fallback
-      ? "configured language/t2s tier's Piper voice is missing — falling back to the one on disk (bash scripts/setup-voice.sh <tier> to fix)"
-      : "no Piper voice on disk at all — voice notes will not synthesise",
-  );
+  const message = fallback
+    ? "configured language/t2s tier's Piper voice is missing — falling back to the one on disk (bash scripts/setup-voice.sh <tier> to fix)"
+    : "no Piper voice on disk at all — voice notes will not synthesise";
+  logger.warn({ wanted, fallback }, message);
+  notify(fallback ? "warning" : "error", message, { wanted, fallback: fallback ?? null });
   return fallback ?? wanted;
 }
 
@@ -395,6 +404,10 @@ export function guardSend(to, text) {
     const reason = scanOutbound(text);
     if (reason) {
       logger.warn({ to }, "outbound message refused by secret scan");
+      // Surfaced, not just returned to the caller: a refusal here means something assembled text
+      // that looked like a credential, which is worth seeing even when the calling tool swallows
+      // the error or the send was attempted by an automated path nobody was watching.
+      notify("warning", "outbound message refused by secret scan", { to, reason });
       return {
         isError: true,
         content: [{ type: "text", text: `Refused to send: ${reason}.` }],
@@ -479,10 +492,35 @@ export function guardOwnMessage(jid, messageId) {
   return { target };
 }
 
+// A shared location has no downloadable body, so it is rendered to text here rather than going
+// through MEDIA_KINDS — putting it there would send saveMedia off to download a message that has
+// nothing to download, and record the failure as if the media were lost.
+//
+// Coordinates only, no map URL: this text is stored and can end up quoted back into a chat, and
+// building a third-party maps link into every logged location is a decision for whoever reads it,
+// not a side effect of logging.
+// `isLive` is passed in rather than read off the node: the two proto shapes differ. A pinned
+// locationMessage has name/address (and its own isLive flag); a liveLocationMessage has neither —
+// it carries a free-text `caption` instead — so reading node.isLive would report every live
+// location as a static one.
+function locationText(node, isLive) {
+  const lat = node.degreesLatitude;
+  const lon = node.degreesLongitude;
+  const where = [node.name, node.address, node.caption].filter(Boolean).join(", ");
+  const coords = Number.isFinite(lat) && Number.isFinite(lon) ? `${lat}, ${lon}` : "coordinates missing";
+  const live = isLive || node.isLive ? " (live)" : "";
+  return `[location${live}] ${coords}${where ? ` — ${where}` : ""}`;
+}
+
 export function extractContent(m) {
   if (!m) return null;
   if (m.conversation) return { text: m.conversation };
   if (m.extendedTextMessage?.text) return { text: m.extendedTextMessage.text };
+  // Before the MEDIA_KINDS loop because these carry no media node at all. Without this a shared
+  // location matched nothing, fell through to null, and was dropped whole — no row, no inbox line,
+  // no wake — exactly the silent-drop failure the comment below describes for unknown wrappers.
+  if (m.locationMessage) return { text: locationText(m.locationMessage, false) };
+  if (m.liveLocationMessage) return { text: locationText(m.liveLocationMessage, true) };
   for (const [field, kind] of Object.entries(MEDIA_KINDS)) {
     // A caption is the whole point of keeping these: it survives even when the download fails.
     if (m[field]) return { text: m[field].caption ?? "", kind, node: m[field] };
@@ -587,6 +625,92 @@ async function transcribeVoice(path) {
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+}
+
+const EYES = "👀";
+
+// Standing instruction from the owner: a message in his own chat, and any message anywhere that
+// tags @claude, gets a 👀 as soon as it lands — visible proof it was seen, whether or not a reply
+// follows.
+//
+// Sent from here rather than from the session that the wake eventually reaches, because the wake is
+// deliberately debounced: it waits for ten seconds of no typing and can sit for a full five minutes
+// behind the ceiling timer. An acknowledgement that arrives five minutes after the message is not
+// an acknowledgement. This path runs on arrival, before the message is even queued for a wake.
+//
+// Never throws: this is a courtesy on the inbound path, and a failed reaction must not take down
+// the handling of the message it was reacting to.
+async function autoEyes(jid, key, text) {
+  const ownJid = jidNormalizedUser(getSocket()?.user?.id);
+  const isOwnChat = Boolean(ownJid) && jid === ownJid;
+  const taggedIn = /@claude/i.test(text ?? "");
+  if (!isOwnChat && !taggedIn) return;
+  // Messages this server sent itself come back through the same inbound handler, and reacting to
+  // its own attribution line would have it eyes-ing its own output — in the owner's own chat, on
+  // every single send. ATTRIBUTION is appended by the wa_send* tools and by nothing else.
+  if (typeof text === "string" && text.includes(ATTRIBUTION.trim())) return;
+  // Full guard, not just the allowlist: an emoji carries no secret, but a reaction is a send, and
+  // it has to respect the connection check and count against the flood limit like any other. The
+  // limit is the reason this is checked rather than assumed — a group where something is tagging
+  // @claude repeatedly must not be able to spend the whole send budget on reactions.
+  if (guardSend(jid)) return;
+  try {
+    await getSocket().sendMessage(jid, { react: { text: EYES, key } });
+    noteOwnReaction(jid, key.id, EYES);
+    appendMessage(jid, {
+      direction: "out",
+      by: "claude",
+      kind: "reaction",
+      text: EYES,
+      to: key.id,
+      ts: Date.now(),
+    });
+  } catch (err) {
+    logger.warn({ jid, err: String(err?.message ?? err) }, "auto-eyes reaction failed");
+  }
+}
+
+const EXTRACT_TEXT_BIN = join(STATE_DIR, "bin", "extract-text");
+const OCR_EXTENSIONS = new Set([".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tif", ".tiff", ".heic", ".webp", ".pdf"]);
+
+// Pulls the words out of an inbound image or PDF so they are searchable, the same bargain voice
+// notes already get: a screenshot of a conversation, an error message, a receipt or a scanned form
+// is otherwise a row with no text at all, invisible to wa_search and unreadable to anyone reading
+// the log later.
+//
+// Entirely on-device (Vision and PDFKit, via state/bin/extract-text). Nothing about the image
+// leaves the machine, which is the only reason this is acceptable to run automatically on
+// everything that arrives.
+//
+// Returns null on every failure, including the binary not being built at all — extraction is a
+// bonus on top of the message, never a precondition for logging it.
+async function extractText(path) {
+  if (!existsSync(EXTRACT_TEXT_BIN)) return null;
+  const ext = path.slice(path.lastIndexOf(".")).toLowerCase();
+  if (!OCR_EXTENSIONS.has(ext)) return null;
+  try {
+    // Time-limited for the same reason as transcribeVoice: this runs on the inbound path, and a
+    // pathological file must not be able to wedge message handling until a restart.
+    const { stdout } = await execFileAsync(EXTRACT_TEXT_BIN, [path], {
+      timeout: 60_000,
+      killSignal: "SIGKILL",
+      encoding: "utf8",
+      maxBuffer: 4 * 1024 * 1024,
+    });
+    return stdout.trim() || null;
+  } catch (err) {
+    logger.warn({ path, err: String(err?.message ?? err) }, "text extraction failed");
+    return null;
+  }
+}
+
+// Marked rather than merged silently: the caption is what the sender typed, the extracted block is
+// what a machine read off the picture. Anything reading this back — a person, or the model quoting
+// it into a reply — must be able to tell the difference, and OCR is wrong often enough that
+// presenting it as the sender's own words would eventually put words in someone's mouth.
+function withExtracted(caption, extracted) {
+  if (!extracted) return caption;
+  return caption ? `${caption}\n[text in image]\n${extracted}` : `[text in image]\n${extracted}`;
 }
 
 // Group senders usually arrive as an opaque LID (`22553074606205@lid`), which tells a reader
@@ -904,8 +1028,16 @@ async function handleIncoming(waMessage) {
   const media = content.kind && wantsMedia ? await saveMedia(waMessage, content, key.id) : null;
   // A caption already covers text for other media kinds; a voice note has none, so the
   // transcript IS its text — without this it would log as the unreadable "[voice]" placeholder.
-  const transcript = content.kind === "voice" && media?.path ? await transcribeVoice(media.path) : null;
-  const text = transcript ?? content.text;
+  // Video goes through the same transcriber as a voice note: ffmpeg is already extracting an audio
+  // track to 16 kHz mono in there, and it does not care whether the container also holds pictures.
+  // What someone says in a video is as much the content of the message as what they say in a voice
+  // note, and it used to be dropped entirely.
+  const transcript =
+    (content.kind === "voice" || content.kind === "video") && media?.path ? await transcribeVoice(media.path) : null;
+  // Images and PDFs: the caption stays the message's text and the read-out words are appended.
+  const extracted =
+    (content.kind === "image" || content.kind === "document") && media?.path ? await extractText(media.path) : null;
+  const text = transcript ?? withExtracted(content.text, extracted);
   appendMessage(jid, {
     direction: key.fromMe ? "out" : "in",
     text,
@@ -929,6 +1061,10 @@ async function handleIncoming(waMessage) {
         }
       : {}),
   });
+  // Deliberately not awaited: the reaction is a network round-trip, and the wake queueing below is
+  // what gets the message in front of a session. Nothing after this depends on the reaction having
+  // landed, and autoEyes swallows its own failures, so there is no rejection to strand.
+  void autoEyes(jid, key, text);
   // mention-only chats stay fully logged above for wa_recent/wa_search — only the wake is gated.
   // `text` already prefers a voice transcript, so saying "claude" in a voice note counts too.
   if (!isMentionOnly(jid) || /@claude/i.test(text ?? "")) {
@@ -996,10 +1132,36 @@ async function handleReaction({ key, reaction }) {
   });
 }
 
-const server = new McpServer({
-  name: "whatsapp-mcp-personal",
-  version: "0.1.0",
-});
+const server = new McpServer(
+  {
+    name: "whatsapp-mcp-personal",
+    version: "0.1.0",
+  },
+  // Without this declared, sendLoggingMessage is a silent no-op: the SDK checks
+  // `this._capabilities.logging` and returns without sending anything (server/index.js).
+  { capabilities: { logging: {} } },
+);
+
+// The operational signals that a driving session needs to know about, sent as MCP logging
+// notifications. These used to go only to state/baileys.log — which .claude/settings.json denies
+// Claude Code from reading — so "falling back to a worse whisper model" or "another process took
+// the socket" were invisible to the one reader who could act on them, and surfaced indirectly as a
+// puzzling failure much later.
+//
+// A JSON-RPC notification, not stdout: console.log here would corrupt the protocol stream, which is
+// the whole reason this file logs to a file in the first place. This is the sanctioned channel.
+//
+// Never throws and never awaits: it fires on paths (inbound messages, model fallback) that must not
+// fail or stall because a client is slow, disconnected, or not listening for logs at all.
+function notify(level, message, data = {}) {
+  try {
+    void server
+      .sendLoggingMessage({ level, logger: "whatsapp-mcp-personal", data: { message, ...data } })
+      .catch(() => {});
+  } catch {
+    // Not connected yet (startup) or the client never negotiated logging. The file log still has it.
+  }
+}
 
 server.registerTool(
   "wa_status",
@@ -1007,6 +1169,7 @@ server.registerTool(
     title: "WhatsApp connection status",
     description: "Connection state, linked own number, and the configured allowlist.",
     inputSchema: {},
+    annotations: { readOnlyHint: true, openWorldHint: false },
   },
   async () => {
     const sock = getSocket();
@@ -1057,6 +1220,7 @@ server.registerTool(
       jid: z.string().optional().describe("Restrict to one allowlisted JID; omit for every chat's commands"),
       limit: z.number().int().positive().max(200).optional(),
     },
+    annotations: { readOnlyHint: true, openWorldHint: false },
   },
   async ({ jid, limit }) => {
     if (jid && !allowedJid(jid)) {
@@ -1078,6 +1242,7 @@ server.registerTool(
     description:
       "List groups this number belongs to, with their JIDs. WhatsApp never shows a group JID in the app, so this is the only way to learn one for the allowlist.",
     inputSchema: {},
+    annotations: { readOnlyHint: true, openWorldHint: false },
   },
   async () => {
     const sock = getSocket();
@@ -1116,6 +1281,7 @@ server.registerTool(
       to: z.string().describe("Recipient JID, e.g. 491701234567@s.whatsapp.net"),
       text: z.string().min(1),
     },
+    annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
   },
   async ({ to, text }) => {
     const refusal = guardSend(to, text);
@@ -1179,6 +1345,7 @@ server.registerTool(
       to: z.string().describe("Recipient JID, e.g. 491701234567@s.whatsapp.net"),
       path: z.string().describe("Absolute local path to the audio file (m4a/ogg/mp3 etc.)"),
     },
+    annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
   },
   async ({ to, path }) => {
     const refusal = guardSend(to);
@@ -1236,6 +1403,7 @@ server.registerTool(
       path: z.string().describe("Absolute local path to the image file"),
       caption: z.string().optional(),
     },
+    annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
   },
   async ({ to, path, caption }) => {
     const refusal = guardSend(to, caption);
@@ -1309,6 +1477,7 @@ server.registerTool(
           "Speed multiplier: 1.0 is each engine's own native pace, >1 faster, <1 slower — omit for the default of 1.15 (a bit faster than native)",
         ),
     },
+    annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
   },
   async ({ to, text, voice, language: lang, rate }) => {
     const refusal = guardSend(to, text);
@@ -1352,6 +1521,7 @@ server.registerTool(
       messageId: z.string().describe("The message id to react to (id field from wa_recent/wa_search)"),
       emoji: z.string().describe("Emoji to react with, e.g. 👍. Empty string removes an existing reaction."),
     },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
   },
   async ({ jid, messageId, emoji }) => {
     // An emoji carries nothing worth scanning, but reactions still count against the rate limit:
@@ -1412,6 +1582,7 @@ server.registerTool(
       messageId: z.string().describe("The message id to edit (id field from wa_recent/wa_search)"),
       text: z.string().min(1).describe("The replacement text"),
     },
+    annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
   },
   async ({ jid, messageId, text }) => {
     // Ownership first: guardSend's rate limit consumes a slot, and a retry loop against a message
@@ -1454,6 +1625,7 @@ server.registerTool(
       jid: z.string().describe("Allowlisted chat JID the message belongs to"),
       messageId: z.string().describe("The message id to delete (id field from wa_recent/wa_search)"),
     },
+    annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
   },
   async ({ jid, messageId }) => {
     // Ownership before the rate limit, same reason as wa_edit.
@@ -1500,6 +1672,12 @@ server.registerTool(
         .optional()
         .describe("If true, fetch all recent messages; if false (default), fetch only new since last poll"),
     },
+    // Not readOnlyHint, despite reading nothing but the log: this advances the per-chat poll cursor,
+    // so a second call returns a different answer than the first and messages already handed over
+    // will not come back as new. Nothing leaves the machine and nothing on WhatsApp changes —
+    // hence destructiveHint: false — but calling it is not free of consequence, and a hint that
+    // said otherwise would be the one case where these annotations actively misled a caller.
+    annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
   },
   async ({ jid, limit, all = false }) => {
     const { allowlist } = loadConfig();
@@ -1545,6 +1723,7 @@ server.registerTool(
     description:
       "Display names seen for allowlisted chats, derived only from messages already logged. Never reads WhatsApp's full contact book.",
     inputSchema: {},
+    annotations: { readOnlyHint: true, openWorldHint: false },
   },
   async () => {
     const { allowlist } = loadConfig();
@@ -1570,6 +1749,7 @@ server.registerTool(
       query: z.string().min(1),
       limit: z.number().int().positive().max(200).optional(),
     },
+    annotations: { readOnlyHint: true, openWorldHint: false },
   },
   async ({ jid, query, limit }) => {
     if (!allowedJid(jid)) {
@@ -1591,6 +1771,59 @@ server.registerTool(
 );
 
 server.registerTool(
+  "wa_stats",
+  {
+    title: "WhatsApp conversation statistics",
+    description:
+      "Aggregate statistics over logged messages: volume, reply times, activity by hour and weekday, " +
+      "who starts conversations. Name a `jid` for one chat, or omit it for every allowlisted chat at " +
+      "once — this returns counts and timings only, never message text, so it is safe across chats in " +
+      "a way wa_recent deliberately is not. Set `unanswered` to list chats whose last message was " +
+      "theirs and is still sitting there.",
+    inputSchema: {
+      jid: z.string().optional().describe("One allowlisted JID; omit for all of them"),
+      days: z
+        .number()
+        .int()
+        .positive()
+        .max(3650)
+        .optional()
+        .describe("Only count the last N days (default: all history)"),
+      unanswered: z
+        .boolean()
+        .optional()
+        .describe("If true, also list chats whose last message was inbound and older than `unansweredHours`"),
+      unansweredHours: z.number().positive().max(8760).optional().describe("Threshold for `unanswered` (default 24)"),
+    },
+    annotations: { readOnlyHint: true, openWorldHint: false },
+  },
+  async ({ jid, days, unanswered = false, unansweredHours = 24 }) => {
+    const { allowlist } = loadConfig();
+    if (jid && !allowedJid(jid)) {
+      return {
+        isError: true,
+        content: [{ type: "text", text: `Refused: ${jid} is not on the allowlist.` }],
+      };
+    }
+    // Resolved through allowedJid rather than used raw: a chat can be addressed by either its phone
+    // jid or its @lid form, and stats keyed by the un-normalised one would silently come back empty.
+    const jids = jid ? [allowedJid(jid)] : allowlist;
+    const since = days ? Date.now() - days * 24 * 60 * 60 * 1000 : null;
+    const names = readContacts(jids);
+    const stats = jids.map((j) => ({ name: names[j] ?? null, ...chatStats(j, since) }));
+    const payload = {
+      window: days ? `last ${days} days` : "all history",
+      // Sorted busiest-first: "who do I talk to most" is the question this is usually asked for,
+      // and it should not need a second pass over the output to answer.
+      chats: stats.sort((a, b) => b.total - a.total),
+      ...(unanswered ? { unanswered: unansweredChats(jids, unansweredHours * 60 * 60 * 1000) } : {}),
+      hourLegend: "byHour[0..23] and byWeekday[0=Sunday..6] are in this machine's local timezone",
+    };
+    return { content: [{ type: "text", text: JSON.stringify(payload, null, 2) }] };
+  },
+);
+
+server.registerTool(
   "wa_send_text_only",
   {
     title: "Send a WhatsApp text message (bypassing voice-only mode)",
@@ -1601,6 +1834,7 @@ server.registerTool(
       to: z.string().describe("Recipient JID, e.g. 491701234567@s.whatsapp.net"),
       text: z.string().min(1),
     },
+    annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
   },
   async ({ to, text }) => {
     const refusal = guardSend(to, text);
@@ -1633,6 +1867,7 @@ server.registerTool(
       path: z.string().describe("Absolute local path to the video file (mp4/mkv/mov etc.)"),
       caption: z.string().optional(),
     },
+    annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
   },
   async ({ to, path, caption }) => {
     const refusal = guardSend(to, caption);
@@ -1686,6 +1921,7 @@ server.registerTool(
       "'Connection Closed' — another session's process took over the one allowed WhatsApp connection, " +
       "and this reclaims it without restarting the whole MCP server via /mcp.",
     inputSchema: {},
+    annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
   },
   async () => {
     try {
@@ -1693,6 +1929,7 @@ server.registerTool(
         onMessage: handleIncoming,
         onReaction: handleReaction,
         onPresence: handlePresenceUpdate,
+        onNotice: notify,
       });
       // startWhatsApp returns as soon as the socket object exists, which is well before WhatsApp
       // has accepted (or rejected) it. Reporting success there is how "Connected." came back for
@@ -1731,6 +1968,7 @@ if (!process.env.WA_NO_CONNECT) {
     onMessage: handleIncoming,
     onReaction: handleReaction,
     onPresence: handlePresenceUpdate,
+    onNotice: notify,
   }).catch((err) => {
     process.stderr.write(`whatsapp-mcp-personal: startup failed: ${err}\n`);
   });

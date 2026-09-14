@@ -53,7 +53,12 @@ Four files under `src/`, each importable independently and wired together in `se
   `speaking_rate`/`s2t_tier`). `allowedJid(...jids)` is the single gate every inbound/outbound path
   checks — it takes multiple candidate JIDs because WhatsApp addresses the same chat two ways (the
   phone-number JID and a privacy-preserving `@lid` form), and a message can arrive under either.
-- **`whatsapp.mjs`** — owns the one Baileys socket (`sock`) and reconnect logic. `connectionState()`
+- **`whatsapp.mjs`** — owns the one Baileys socket (`sock`) and reconnect logic. **`markOnlineOnConnect: false`
+  is load-bearing and must stay:** Baileys defaults it to `true`, which announces this process as an
+  active online device, and WhatsApp then stops pushing notifications to the owner's phone. Merely
+  running the server was enough to swallow them. For the same reason nothing here ever marks
+  messages read (`readMessages`/`chatModify({markRead})`) — read state is account-level and syncs to
+  the phone, so reading a chat for context would clear the owner's own unread badge. `connectionState()`
   is the authoritative "is this actually usable" check — it tracks `lastError` separately from the
   socket object because a logged-out socket keeps `.user` set and looks alive to a naive check.
   WhatsApp allows exactly one live socket per linked device; if another process takes over
@@ -64,14 +69,27 @@ Four files under `src/`, each importable independently and wired together in `se
   the README), not to persist anything.
 - **`store.mjs`** — SQLite (`node:sqlite`, no dependency) at `state/messages.db`. One `messages`
   table: a handful of real columns (`jid`, `id`, `ts`, `text`, `archived`) plus the entire original
-  entry as `json`, with a few fields (`media_kind`, `to_id`, `reply_to_id`, `view_once`) promoted to
-  indexed `GENERATED ALWAYS AS (json_extract(...))` virtual columns so new message shapes never need
-  a migration. Nothing is ever mutated: an edit or delete is its own row pointing at the original
+  entry as `json`, with a few fields (`media_kind`, `to_id`, `reply_to_id`, `view_once`,
+  `direction`, `kind`) promoted to indexed `GENERATED ALWAYS AS (json_extract(...))` virtual columns
+  so new message shapes never need a migration. Search goes through a second, plain FTS5 table
+  (`messages_fts`, `tokenize="trigram"`) holding a *normalised* copy of each message's text —
+  `normalizeForSearch` lowercases, strips diacritics via NFD, and maps dotless `ı`, so a query typed
+  on an English keyboard finds Turkish text (`seker` → `şeker`). Trigram specifically, because the
+  default `unicode61` tokeniser is word-based and would stop matching fragments inside words, which
+  the LIKE search it replaced always did. Queries under 3 characters fall back to LIKE, since a
+  trigram index has no window that short. The needle is wrapped as an FTS5 *phrase* — a bare MATCH
+  argument is a query expression where a stray `*` or `NEAR` is a syntax error or a different
+  search. Nothing is ever mutated: an edit or delete is its own row pointing at the original
   via `to_id`, and reads derive `edited`/`deleted` status at query time (`withStatus`) rather than
   rewriting the original row. `state/inbox.log` is a separate plain-text file (not in SQLite) — a
   `Monitor` tails it to wake a Claude session on new messages, and "tail a database" isn't a thing.
 - **`server.mjs`** — the MCP server: registers all `wa_*` tools, plus the inbound message/reaction
-  handlers (`handleIncoming`, `handleReaction`) passed into `startWhatsApp`. This is also where all
+  handlers (`handleIncoming`, `handleReaction`) passed into `startWhatsApp`. Every tool carries MCP
+  `annotations` (`readOnlyHint`/`destructiveHint`/`openWorldHint`) so a client's approval UI can
+  tell a read from a send — hints only, never a substitute for the guards below. Operational events
+  (whisper/Piper tier fallback, secret-scan refusals, connection loss and takeover) also go out as
+  MCP logging notifications via `notify()`, because `state/baileys.log` is denied to Claude Code's
+  own Read tool and was therefore invisible to the one reader who could act on it. This is also where all
   the send-side guardrails live (see Security below) and where in-chat slash commands
   (`/wakelevel`, `/speaking`, `/speaking-speed`, `/s2t-tier`, `/read-image`, `/read-audio`) are
   parsed and applied.

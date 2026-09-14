@@ -10,7 +10,8 @@
     "pair": "node src/pair.mjs",
     "start": "node src/server.mjs",
     "test": "node test_allowlist.mjs",
-    "postinstall": "bash scripts/setup-voice.sh",
+    "postinstall": "bash scripts/setup-voice.sh; bash scripts/setup-text-extract.sh",
+    "setup:text": "bash scripts/setup-text-extract.sh",
     "format": "oxfmt src/ scripts/ test_allowlist.mjs",
     "format:check": "oxfmt --check src/ scripts/ test_allowlist.mjs",
     "lint": "oxlint src/ scripts/ test_allowlist.mjs"

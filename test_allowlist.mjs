@@ -50,7 +50,30 @@ const { extractContent, mediaName } = await import("./src/server.mjs");
 assert.deepEqual(extractContent({ conversation: "hi" }), { text: "hi" }, "plain text");
 assert.equal(extractContent({ extendedTextMessage: { text: "quoted" } }).text, "quoted", "extended text");
 assert.equal(extractContent(null), null, "empty payload");
-assert.equal(extractContent({ videoMessage: {} }), null, "video stays out of scope");
+// Video used to be dropped whole. It is now carried so its audio can be transcribed like a voice
+// note's — the assertion is inverted deliberately, not relaxed.
+assert.equal(extractContent({ videoMessage: {} }).kind, "video", "video is carried, not dropped");
+assert.equal(
+  extractContent({ videoMessage: { caption: "bak" } }).text,
+  "bak",
+  "a video's caption survives even when the download later fails",
+);
+
+// A shared location has no downloadable body, so it must render to text rather than claim a media
+// kind — claiming one would send saveMedia off to download a message with nothing to download.
+const loc = extractContent({ locationMessage: { degreesLatitude: 41.0082, degreesLongitude: 28.9784, name: "Ev" } });
+assert.equal(loc.kind, undefined, "location is not a media kind");
+assert.match(loc.text, /^\[location\] 41\.0082, 28\.9784 — Ev$/, "location renders coordinates and name");
+assert.match(
+  extractContent({ liveLocationMessage: { degreesLatitude: 1, degreesLongitude: 2, caption: "yoldayım" } }).text,
+  /^\[location \(live\)\] 1, 2 — yoldayım$/,
+  "live location is marked live and uses its caption (it has no name/address field)",
+);
+assert.match(
+  extractContent({ locationMessage: {} }).text,
+  /coordinates missing/,
+  "a location without coordinates still logs rather than throwing",
+);
 
 // The caption is the part that has to survive even if the download later fails.
 const img = extractContent({ imageMessage: { caption: "look", mimetype: "image/jpeg" } });
@@ -220,8 +243,17 @@ try {
 // wa_edit/wa_delete must not touch Burak's own phone-typed messages, which are `direction: "out"`
 // exactly like Claude's — the `by` tag is the only thing separating them.
 const { guardOwnMessage } = await import("./src/server.mjs");
-const { appendMessage, readRecent, messageCount, searchMessages, archiveOldMessages, findMessage } =
-  await import("./src/store.mjs");
+const {
+  appendMessage,
+  readRecent,
+  messageCount,
+  searchMessages,
+  archiveOldMessages,
+  findMessage,
+  chatStats,
+  unansweredChats,
+  normalizeForSearch,
+} = await import("./src/store.mjs");
 const FAKE = "999999999999@s.whatsapp.net";
 appendMessage(FAKE, { direction: "out", by: "claude", text: "sent by claude", ts: 1000, id: "CLAUDE1" });
 appendMessage(FAKE, { direction: "out", text: "typed by burak on his phone", ts: 2000, id: "BURAK1" });
@@ -343,11 +375,72 @@ assert.equal(
 );
 assert.equal(searchMessages([FAKE], "İSTANBUL", 10).length, 1, "and the same in reverse");
 
+// Diacritic folding, which case folding alone never gave: a query typed on an English keyboard has
+// to find Turkish text. Measured behaviour, not assumption — FTS5's trigram tokeniser case-folds
+// Turkish correctly by itself but does no diacritic folding at all, so these all failed before
+// normalizeForSearch existed, under LIKE and under a naive FTS index alike.
+assert.equal(searchMessages([FAKE], "seker", 10).length, 1, "ASCII query finds Turkish text (ş)");
+assert.equal(searchMessages([FAKE], "istanbul", 10).length, 1, "ASCII query finds Turkish text (İ)");
+appendMessage(FAKE, { direction: "in", text: "ısırdı ve ĞIDI", ts: 9100, id: "TR2" });
+assert.equal(searchMessages([FAKE], "isirdi", 10).length, 1, "dotless ı folds to i");
+assert.equal(searchMessages([FAKE], "gidi", 10).length, 1, "ğ folds to g");
+assert.equal(normalizeForSearch("Straße"), "strasse", "ß folds to ss, matching its uppercase form");
+
+// Substring matching, which the trigram tokeniser preserves and a word-based one would not. This is
+// the assertion that fails if anyone ever switches the index to unicode61.
+assert.equal(searchMessages([FAKE], "eke", 10).length, 1, "a fragment inside a word still matches");
+
+// Below the trigram index's three-character floor the LIKE path takes over. Both paths must fold
+// identically, or a two-character query would behave differently from a three-character one.
+assert.ok(
+  searchMessages([FAKE], "se", 10).some((m) => m.id === "TR1"),
+  "short query falls back to LIKE and still folds ş→s",
+);
+
+// FTS5 MATCH takes a query expression, so an unescaped needle is a syntax error or a different
+// search than the one asked for. Message text is attacker-controlled, and so is anything the model
+// can be talked into searching for.
+for (const hostile of ['a" OR 1', "foo*", "NEAR(a b)", "((", "a:b", '""', "\\"]) {
+  assert.doesNotThrow(() => searchMessages([FAKE], hostile, 10), `hostile query must not throw: ${hostile}`);
+}
+
+// Stats. Reactions and edits are not turns in a conversation and must not be counted as messages.
+const STATS = "905000000000@s.whatsapp.net";
+const H = 60 * 60 * 1000;
+const base = Date.UTC(2026, 0, 5, 12, 0, 0); // a Monday, midday
+appendMessage(STATS, { direction: "in", text: "soru", ts: base, id: "S1" });
+appendMessage(STATS, { direction: "out", text: "cevap", ts: base + 10 * 60 * 1000, id: "S2" });
+appendMessage(STATS, { direction: "out", by: "claude", kind: "reaction", text: "👀", to: "S1", ts: base + 1000 });
+appendMessage(STATS, { direction: "in", text: "yeni konu", ts: base + 9 * H, id: "S3" });
+const st = chatStats(STATS);
+assert.equal(st.total, 3, "reactions are excluded from the message count");
+assert.equal(st.inbound, 2);
+assert.equal(st.outbound, 1);
+assert.equal(st.medianReplyMinutes.out, 10, "reply time measures a direction change, in minutes");
+assert.equal(st.replySamples.in, 0, "a 9-hour gap is a new conversation, not a slow reply");
+assert.equal(st.conversationsStarted.byThem, 2, "both the first message and the one after the gap");
+assert.equal(st.lastDirection, "in");
+assert.equal(
+  st.byHour.reduce((a, b) => a + b, 0),
+  3,
+  "every counted message lands in exactly one hour bucket",
+);
+assert.equal(chatStats("999@s.whatsapp.net").total, 0, "a chat with no messages reports zero, not a crash");
+
+// Unanswered: their message, last in the chat, older than the threshold.
+assert.deepEqual(
+  unansweredChats([STATS], 1 * H).map((c) => c.jid),
+  [STATS],
+  "a chat whose last message is theirs and stale is surfaced",
+);
+appendMessage(STATS, { direction: "out", text: "pardon geç gördüm", ts: Date.now(), id: "S4" });
+assert.deepEqual(unansweredChats([STATS], 1 * H), [], "answering it takes it off the list");
+
 // Runs last: it deliberately exhausts the window, so anything after it would see a full budget.
 let sent = 0;
 while (!overSendLimit()) sent++;
 assert.equal(sent, 20, "rate limit allows exactly 20 sends per minute, then refuses");
 
 console.log(
-  "ok — allowlist, media naming, command regexes, quotes, secret scan, edit/delete ownership guard, sendable-source guard, sqlite store and rate limit",
+  "ok — allowlist, media naming, command regexes, quotes, secret scan, edit/delete ownership guard, sendable-source guard, sqlite store, search folding, stats and rate limit",
 );
