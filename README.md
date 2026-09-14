@@ -49,18 +49,37 @@ start of the session:
 1. Read `memory/MEMORY.md` — the index of everything learned about how to behave in these chats:
    who's in them, tone/style, privacy rules, engagement judgment, and the technical gotchas
    (single-session constraint, voice-mode quirks, etc.). `autoMemoryDirectory` in
-   `.claude/settings.json` already points auto-memory at `./memory`, so this is checked in and
-   travels with the repo — a fresh account picks it up automatically, nothing to reconfigure.
+   `.claude/settings.json` points auto-memory at `./memory`, so it accumulates automatically as
+   you use it.
+
+   **`memory/` is gitignored and does not ship with the repo.** It holds notes about real people
+   and private conversations, so it stays local to your machine. On a fresh clone the directory
+   simply does not exist yet; it gets created the first time something is remembered, and there is
+   nothing to read on day one.
 2. Confirm the server connects (`wa_status`) and, if WhatsApp monitoring is wanted this session,
    arm a `Monitor` tailing `state/inbox.log` — this is the event-driven wake described above, and
    it only lives as long as the session, so it needs re-arming every time.
 3. Follow the memory files' guidance on when to engage a chat versus stay silent — the default
    posture is watch, not reply-to-everything.
 
+## Requirements
+
+- **Node 20+** and **pnpm**
+- A phone with WhatsApp — this links as a companion device, exactly like WhatsApp Web
+- **macOS + Homebrew only if you want voice** (local transcription and voice replies). Text,
+  images and everything else work fine without it.
+
 ## Setup
+
+### 1. Install dependencies
 
 ```bash
 pnpm install
+```
+
+### 2. Link your WhatsApp number
+
+```bash
 node src/pair.mjs <countrycode+number, digits only, no +>   # e.g. 4917012345678
 ```
 
@@ -68,7 +87,10 @@ A pairing code prints in the terminal. On your phone: **WhatsApp → Settings �
 Link a Device → Link with phone number instead** → enter the code. The script exits once linked;
 auth keys are saved to `state/auth/` (mode 700) and reconnects never need re-pairing.
 
-Edit `state/config.json` and add the JIDs you want to allow:
+### 3. Allowlist the chats you want
+
+`state/config.json` is created automatically with safe defaults the first time anything reads the
+config, so there is nothing to copy from a template. Open it and add the JIDs you want to allow:
 
 ```json
 { "allowlist": ["4917012345678@s.whatsapp.net"] }
@@ -84,14 +106,21 @@ second process using the same auth keys would just kick the server off its conne
 
 Anything not listed here is invisible to the model in both directions.
 
-Register the server with Claude Code (from whichever project you want to drive from WhatsApp):
+### 4. Register the server with Claude Code
+
+Run this from the repo root, in whichever project you want to drive WhatsApp from:
 
 ```bash
-claude mcp add whatsapp-personal -- node /Users/burak/Desktop/repos/whatsapp-mcp-personal/src/server.mjs
+claude mcp add whatsapp-personal -- node "$(pwd)/src/server.mjs"
 ```
+
+The MCP server needs an absolute path, which is what `$(pwd)` expands to. If you register from
+somewhere else, substitute the full path to this repo's `src/server.mjs`.
 
 New tools only take effect after an `/mcp` reconnect in Claude Code (the server process needs a
 restart to load new code) — this applies every time `src/*.mjs` changes.
+
+### 5. Voice (optional)
 
 Voice (optional — text/images work fine without any of this) sets itself up automatically as part
 of `pnpm install`, via the `postinstall` script `scripts/setup-voice.sh`: installs
@@ -358,7 +387,7 @@ this with the local scripts (there is no MCP shortcut for this — see "YouTube 
   by their own path (they're executable, with a shebang), never via `python3 <path>`.
 - **Default output goes to the repo root, not a state/ folder.** `download_video.py` writes to
   `os.getcwd()` unless you pass `-o`; always pass
-  `-o /Users/burak/Desktop/repos/whatsapp-mcp-personal/state/tmp` explicitly, or the file lands
+  `-o state/tmp` explicitly, or the file lands
   somewhere `wa_send_video` can't send from and clutters the repo root.
 - **A title containing a URL can break the output path entirely.** Some reposted/aggregator
   uploads title the video as its own source link (`"... | https://youtu.be/xyz"`). Since
@@ -373,6 +402,56 @@ this with the local scripts (there is no MCP shortcut for this — see "YouTube 
   per download alongside the raw video. Landing these in `state/tmp/` instead of `state/memes/`
   means there's nothing to clean up mid-task — just `rm -rf state/tmp/*` once the converted file
   is safely in `state/memes/`.
+
+## Instagram
+
+A skill (`.claude/skills/instagram/`) for watching public Instagram reels **anonymously** — no
+login, no credentials, no account, so there is nothing to get banned and nothing attributable to
+you. Backed by [Instaloader](https://instaloader.github.io/) in `state/instaloader-venv/`.
+
+Set up once per clone (`state/` is gitignored, so the venv does not ship with the repo):
+
+```bash
+python3 -m venv state/instaloader-venv
+state/instaloader-venv/bin/pip install instaloader
+```
+
+The scripts find that venv relative to their own location and re-exec into it, so there is nothing
+to activate and no path to edit.
+
+- `ig_watch.py <reel-url>` — the main entry point. Downloads the reel, samples frames, and
+  transcribes the audio with whisper, so the *content* can actually be reviewed instead of guessed
+  at from the caption. Emits JSON with `contact_sheet`, `first_frame`, `transcript`.
+- `ig_download.py <reel-url>` — fetch the media only. `--json` for structured output.
+
+The scripts import the Instaloader **library** rather than shelling out to its CLI, because that
+CLI exposes `--post-filter`, which evaluates arbitrary Python — allowlisting the raw binary would
+be a code-execution hole (the same lesson as yt-dlp's `--exec`).
+
+**What does not work, measured rather than assumed:** anonymous *profile* and *post-listing*
+queries return `401`, so `ig_profile.py` / `ig_posts.py` are present but blocked. Instagram
+exposes no anonymous feed endpoint over HTTP. A real browser does advance through reels, but only
+~6 deep before hitting a Sign-up/Log-in modal with no dismiss control. See the skill's `SKILL.md`
+for the full measurements.
+
+## Doomscroll
+
+A skill (`.claude/skills/doomscroll/`) for *discovering* content instead of waiting for someone to
+paste a link — public RSS/Atom feeds only, stdlib, no dependencies, no account.
+
+```bash
+.claude/skills/doomscroll/scripts/scroll.py kgbtr --limit 10
+.claude/skills/doomscroll/scripts/scroll.py kgbtr hn reddit:Turkiye
+.claude/skills/doomscroll/scripts/scroll.py yt:UCxxxxxxxx
+```
+
+Presets: `kgbtr`, `turkey`, `turkiye`, `hn`; plus `reddit:<sub>`, `yt:<channel_id>`, or any feed
+URL. Reddit's JSON endpoints return `403`, but its `.rss` endpoints work fine — that difference is
+the whole reason this skill uses feeds. Reddit rate-limits bursts with `429`, so the script sleeps
+between sources and backs off; don't remove those delays.
+
+Chains into the rest: `scroll.py` to find something → yt-dlp skill's `download_video.py` to fetch →
+`watch_video.py` to view it → `trim_video.py` → index into `state/memes/description.md`.
 
 ## Security notes
 

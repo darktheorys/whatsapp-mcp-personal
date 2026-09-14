@@ -250,16 +250,35 @@ function stripEmoji(text) {
 // apostrophe ("loopun", "contextte" -- both common in casual typing) since there's no word-char
 // boundary between "loop" and "un". Instead capture the loanword plus whatever letters follow,
 // respell only the head, and re-attach the suffix untouched -- "loopun" -> "lupun".
+const ESCAPE_REGEX_CHARS = /[.*+?^${}()|[\]\\]/g;
+function escapeRegex(s) {
+  return s.replace(ESCAPE_REGEX_CHARS, "\\$&");
+}
+
+// Word-shaped keys ("loop", "config") use \b + a suffix capture so Turkish agglutination
+// ("loopun") still respells. Symbol keys ("$", "€") aren't word characters, so \b can never
+// match on either side of them -- matched as plain (escaped) literals instead, no suffix logic.
 function respellLoanwords(text) {
   const dict = loanwordRespellings();
   const keys = Object.keys(dict);
   if (keys.length === 0) return text;
-  const pattern = new RegExp(`\\b(${keys.join("|")})([a-zçğıöşü]*)`, "giu");
-  return text.replace(pattern, (_match, base, suffix) => {
-    const respelling = dict[base.toLowerCase()];
-    const cased = base[0] === base[0].toUpperCase() ? respelling[0].toUpperCase() + respelling.slice(1) : respelling;
-    return cased + suffix;
-  });
+  const wordKeys = keys.filter((k) => /^[a-zçğıöşü]+$/iu.test(k));
+  const symbolKeys = keys.filter((k) => !wordKeys.includes(k));
+
+  let result = text;
+  if (wordKeys.length > 0) {
+    const pattern = new RegExp(`\\b(${wordKeys.map(escapeRegex).join("|")})([a-zçğıöşü]*)`, "giu");
+    result = result.replace(pattern, (_match, base, suffix) => {
+      const respelling = dict[base.toLowerCase()];
+      const cased = base[0] === base[0].toUpperCase() ? respelling[0].toUpperCase() + respelling.slice(1) : respelling;
+      return cased + suffix;
+    });
+  }
+  if (symbolKeys.length > 0) {
+    const symbolPattern = new RegExp(`(${symbolKeys.map(escapeRegex).join("|")})`, "g");
+    result = result.replace(symbolPattern, (match) => dict[match]);
+  }
+  return result;
 }
 
 // Shared by wa_send_voice and wa_send's voice-only auto-route, so both go through one TTS path.

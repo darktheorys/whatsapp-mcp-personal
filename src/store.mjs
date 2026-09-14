@@ -146,7 +146,8 @@ export function logInbox(jid, label, text) {
   mkdirSync(STATE_DIR, { recursive: true, mode: 0o700 });
   // jid up front and unambiguous: the same person's name shows up in both their own DM and any
   // group they're in, so name alone can't tell you which chat to reply in.
-  appendFileSync(INBOX_FILE, `[${jid}] ${label}: ${text}`.replace(/\n/g, " ") + "\n", { mode: 0o600 });
+  const ts = new Date().toISOString();
+  appendFileSync(INBOX_FILE, `[${ts}] [${jid}] ${label}: ${text}`.replace(/\n/g, " ") + "\n", { mode: 0o600 });
 }
 
 function getContacts() {

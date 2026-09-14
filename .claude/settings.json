@@ -40,8 +40,10 @@
   "permissions": {
     "allow": [
       "mcp__whatsapp-personal__wa_*",
-      "Bash(/Users/burak/Desktop/repos/whatsapp-mcp-personal/.claude/skills/meme-tools/scripts/*.py *)",
-      "Bash(/Users/burak/Desktop/repos/whatsapp-mcp-personal/.claude/skills/yt-dlp/scripts/*.py *)"
+      "Bash(.claude/skills/meme-tools/scripts/*.py *)",
+      "Bash(.claude/skills/yt-dlp/scripts/*.py *)",
+      "Bash(.claude/skills/instagram/scripts/*.py *)",
+      "Bash(.claude/skills/doomscroll/scripts/*.py *)"
     ],
     "deny": [
       "Read(~/.ssh/**)",

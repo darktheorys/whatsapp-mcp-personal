@@ -143,7 +143,7 @@ def main():
         print(f"No such file: {args.path}", file=sys.stderr)
         sys.exit(1)
 
-    out_dir = args.out_dir or tempfile.mkdtemp(prefix="wa-watch-")
+    out_dir = os.path.abspath(args.out_dir or tempfile.mkdtemp(prefix="wa-watch-"))
     os.makedirs(out_dir, exist_ok=True)
 
     frames = extract_frames(args.path, out_dir, args.fps)
