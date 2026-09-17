@@ -124,7 +124,11 @@ Four files under `src/`, each importable independently and wired together in `se
   Validating inside the connect path means the address approved is the address dialled, and it is
   why this uses `node:http(s)` at all: `fetch` offers no way to hook name resolution. Redirects are
   followed manually so every hop goes back through that same check. x.com goes through vxtwitter's JSON, which needs a *plain* user-agent: the
-  browser one gets a 403 Cloudflare challenge (measured, both ways).
+  browser one gets a 403 Cloudflare challenge (measured, both ways). `buildUrlInfo` reuses the same
+  fetcher to build the preview card for *outgoing* text: Baileys can generate one itself, but only
+  through the optional `link-preview-js` peer dependency and cheerio behind it — around twenty
+  packages for a cosmetic card. `sendMessage` uses a supplied `linkPreview` directly and only
+  generates one when absent, so handing it ours avoids the dependency entirely.
 
 - **`schedule.mjs`** — durable recurring tasks in `state/schedule.json`, fired by a timer inside the
   server process. This exists because the session-scoped alternative does not work: an in-memory

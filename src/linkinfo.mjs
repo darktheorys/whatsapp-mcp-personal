@@ -247,3 +247,28 @@ export async function enrichLinks(text) {
   const rendered = infos.map(renderLinkInfo).filter(Boolean);
   return rendered.length ? rendered.join("\n") : null;
 }
+
+// A link preview for an *outgoing* message, in the shape Baileys puts on the wire.
+//
+// Baileys can build these itself, but only via the optional `link-preview-js` peer dependency,
+// which brings cheerio and around twenty transitive packages with it — a lot of supply-chain
+// surface for a cosmetic card, in a repo whose dependency policy exists precisely because packages
+// are treated as risk. sendMessage uses `message.linkPreview` directly when it is supplied and only
+// generates one when it is absent (Utils/messages.js), so handing it ours skips the dependency and
+// reuses the fetcher above, guards and all.
+//
+// No jpegThumbnail: fetching and re-encoding an image is a different order of work, and a preview
+// card with a title and description is already the difference between a bare URL and something
+// readable. The field is optional and WhatsApp renders fine without it.
+export async function buildUrlInfo(text) {
+  const [url] = extractUrls(text);
+  if (!url) return null;
+  const info = await fetchLinkInfo(url);
+  if (!info?.title) return null;
+  return {
+    "canonical-url": url,
+    "matched-text": url,
+    title: info.title,
+    ...(info.description ? { description: info.description } : {}),
+  };
+}
