@@ -12,6 +12,7 @@ import { z } from "zod";
 import {
   allowedJid,
   hasImageDisabled,
+  hasLinkPreviewDisabled,
   hasVoiceDisabled,
   isEnglish,
   isIncognito,
@@ -58,6 +59,7 @@ import {
   updateContact,
   updatePollState,
 } from "./store.mjs";
+import { enrichLinks } from "./linkinfo.mjs";
 import { loadSchedule, removeTask, startScheduler, upsertTask } from "./schedule.mjs";
 import { connectionState, getSocket, logger, setDropNotifier, startWhatsApp } from "./whatsapp.mjs";
 
@@ -1132,7 +1134,17 @@ async function handleIncoming(waMessage) {
   // Images and PDFs: the caption stays the message's text and the read-out words are appended.
   const extracted =
     (content.kind === "image" || content.kind === "document") && media?.path ? await extractText(media.path) : null;
-  const text = transcript ?? withExtracted(content.text, extracted);
+  let text = transcript ?? withExtracted(content.text, extracted);
+  // Link titles, appended the same way OCR text is. Awaited rather than backgrounded because the
+  // row is written just below and an enrichment that lands afterwards would need a second write to
+  // a table nothing ever mutates. Bounded at ~6s per link, two links per message.
+  //
+  // The one thing in this file that reaches outside the machine on an inbound message, hence the
+  // per-chat opt-out: fetching a link tells that host the message arrived.
+  if (!hasLinkPreviewDisabled(jid)) {
+    const links = await enrichLinks(text);
+    if (links) text = text ? `${text}\n${links}` : links;
+  }
   appendMessage(jid, {
     direction: key.fromMe ? "out" : "in",
     text,

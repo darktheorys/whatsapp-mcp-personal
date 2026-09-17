@@ -112,6 +112,12 @@ function defaultConfig() {
     // caption/transcript logged, only the media file itself isn't downloaded/transcribed.
     no_image_jids: [],
     no_voice_jids: [],
+    // Chats where an inbound link is NOT fetched for its title. Unlike the two above this is about
+    // reaching outside the machine at all: fetching a link tells that server the message arrived,
+    // and from which IP, so a sender who controls the host learns their message landed even if it
+    // is never opened. Empty by default -- knowing what a link is beats that, for a chat whose
+    // members are already on the allowlist -- but it is the opt-out to reach for otherwise.
+    no_link_preview_jids: [],
     // "/wakelevel mention-only" chats: only a message containing "@claude" wakes the session via
     // state/inbox.log -- everything is still logged either way, only the wake trigger is gated.
     mention_only_jids: [],
@@ -365,6 +371,13 @@ export function hasImageDisabled(jid) {
 export function hasVoiceDisabled(jid) {
   const { no_voice_jids } = loadConfig();
   return no_voice_jids.includes(jid);
+}
+
+// See no_link_preview_jids in defaultConfig: the only per-chat setting that governs a request
+// leaving this machine, rather than what is stored on it.
+export function hasLinkPreviewDisabled(jid) {
+  const { no_link_preview_jids } = loadConfig();
+  return no_link_preview_jids.includes(jid);
 }
 
 // Both lists are opt-*out*, so the in-chat commands read the friendlier way round:

@@ -113,6 +113,15 @@ Four files under `src/`, each importable independently and wired together in `se
   `messageContextInfo` sidecar) is still dropped deliberately. When adding a new type, render it
   above the catch-all — don't extend `NON_CONTENT_TYPES` unless it really isn't a message.
 
+- **`linkinfo.mjs`** — fetches the title/site of URLs found in inbound messages and appends them to
+  the row, the same pattern as OCR. The only inbound path that makes an outbound request, hence
+  `no_link_preview_jids`: fetching tells that host the message arrived. A URL is untrusted input
+  from whoever is in the chat, so `assertPublic` rejects private/loopback/link-local/CGNAT addresses
+  and non-http(s) schemes, and **redirects are followed manually** — `fetch`'s own redirect handling
+  would re-resolve each hop without the check, so a public URL 302-ing to `169.254.169.254` would
+  walk straight past it. x.com goes through vxtwitter's JSON, which needs a *plain* user-agent: the
+  browser one gets a 403 Cloudflare challenge (measured, both ways).
+
 - **`schedule.mjs`** — durable recurring tasks in `state/schedule.json`, fired by a timer inside the
   server process. This exists because the session-scoped alternative does not work: an in-memory
   cron expires after 7 days and only fires while the REPL is idle, so a session waking every 30
