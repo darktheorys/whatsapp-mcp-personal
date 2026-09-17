@@ -16,7 +16,11 @@ import { isIP } from "node:net";
 
 const MAX_URLS_PER_MESSAGE = 2;
 const FETCH_TIMEOUT_MS = 6000;
-const MAX_BYTES = 256 * 1024; // enough for any <head>; a huge page is not worth reading to the end
+// Raised from 256KB after a real miss: YouTube's <head> is padded with so much inline config that
+// its <title> sits past 263KB, so the read was capped before ever reaching the metadata and the
+// link came back with nothing. The early stop below means a normal page still costs a fraction of
+// this — the cap is the ceiling, not the usual read.
+const MAX_BYTES = 768 * 1024;
 const MAX_REDIRECTS = 3;
 
 // Identifying as a normal browser is what gets a useful <head> back; many sites serve a stub or a
@@ -122,7 +126,12 @@ function httpGet(url, headers) {
         if (total <= MAX_BYTES) chunks.push(chunk);
         // Past the cap the rest of the page is of no interest, and a stream that never ends must
         // not be able to hold this open until the timeout.
-        else res.destroy();
+        else return res.destroy();
+        // Everything this reads for lives in <head>, so the body is dead weight — on a long article
+        // that is the difference between a few KB and the whole page. Checking the chunk rather
+        // than the accumulated buffer keeps this O(n): a tag split across a chunk boundary is
+        // simply missed, and then the read just continues to the cap as before.
+        if (chunk.includes("</head>") || chunk.includes("</HEAD>")) res.destroy();
       });
       const finish = () =>
         done(resolve, {
@@ -191,6 +200,25 @@ const meta = (html, property) => {
 // otherwise have to be done by hand every time a tweet is shared.
 const TWEET_RE = /^https?:\/\/(?:www\.)?(?:twitter|x)\.com\/([^/]+)\/status\/(\d+)/i;
 
+// YouTube publishes oEmbed, which returns the title and channel as a few hundred bytes of JSON.
+// Worth special-casing even with the cap raised: scraping a video page means pulling most of a
+// megabyte to find one tag, and the oEmbed answer is both smaller and more reliable.
+const YOUTUBE_RE = /^https?:\/\/(?:www\.|m\.)?(?:youtube\.com\/(?:watch\?|shorts\/|live\/)|youtu\.be\/)/i;
+
+// Exported for the test: the routing decision is the part that broke, and asserting it needs no
+// network.
+export const youtubeUrlForTest = (url) => YOUTUBE_RE.test(url);
+
+async function youtubeInfo(url) {
+  const { response } = await fetchChecked(
+    `https://www.youtube.com/oembed?url=${encodeURIComponent(url)}&format=json`,
+    API_HEADERS,
+  );
+  if (response.status !== 200) throw new Error(`oembed ${response.status}`);
+  const d = JSON.parse(response.body);
+  return { site: "youtube.com", title: d.title ?? "(untitled)", description: d.author_name ?? "" };
+}
+
 async function tweetInfo(match) {
   const [, user, id] = match;
   const { response } = await fetchChecked(`https://api.vxtwitter.com/${user}/status/${id}`, API_HEADERS);
@@ -211,6 +239,7 @@ export async function fetchLinkInfo(url) {
   try {
     const tweet = TWEET_RE.exec(url);
     if (tweet) return await tweetInfo(tweet);
+    if (YOUTUBE_RE.test(url)) return await youtubeInfo(url);
     const { response, finalUrl } = await fetchChecked(url);
     if (response.status !== 200) return null;
     const type = response.headers["content-type"] ?? "";

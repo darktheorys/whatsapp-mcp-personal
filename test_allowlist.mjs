@@ -752,6 +752,20 @@ assert.deepEqual(unansweredChats([STATS], 1 * H), [], "answering it takes it off
   assert.equal(await buildUrlInfo("no link in this message"), null, "nothing to preview is not an error");
   assert.equal(await buildUrlInfo("http://169.254.169.254/"), null, "a refused link yields no preview");
 
+  // Routed to oEmbed rather than scraped: YouTube pads its <head> past 260KB, so the page read hit
+  // the byte cap before ever reaching <title> and every YouTube link enriched to nothing. Caught in
+  // the wild — someone answered a message with a clip whose title *was* the joke, and it was lost.
+  const { youtubeUrlForTest } = await import("./src/linkinfo.mjs");
+  for (const yt of [
+    "https://www.youtube.com/watch?v=bzZ9LyAMdNY",
+    "https://youtu.be/bzZ9LyAMdNY",
+    "https://m.youtube.com/watch?v=x",
+    "https://www.youtube.com/shorts/abc",
+  ]) {
+    assert.ok(youtubeUrlForTest(yt), `${yt} must take the oEmbed path`);
+  }
+  assert.ok(!youtubeUrlForTest("https://youtube.example.com/watch?v=x"), "a lookalike host does not");
+
   assert.equal(renderLinkInfo(null), null, "a failed fetch renders nothing rather than an empty marker");
   assert.equal(renderLinkInfo({ site: "x.com", title: "@a", description: "" }), "[link: x.com] @a");
   assert.equal(

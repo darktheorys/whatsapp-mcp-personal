@@ -729,11 +729,13 @@ const EYES = "👀";
 //
 // Never throws: this is a courtesy on the inbound path, and a failed reaction must not take down
 // the handling of the message it was reacting to.
-async function autoEyes(jid, key, text) {
+async function autoEyes(jid, key, text, replyingToMe = false) {
   const ownJid = jidNormalizedUser(getSocket()?.user?.id);
   const isOwnChat = Boolean(ownJid) && jid === ownJid;
   const taggedIn = /@claude/i.test(text ?? "");
-  if (!isOwnChat && !taggedIn) return;
+  // A reply to something this server said is addressed to it as plainly as a tag is — people do not
+  // @-mention the thing they are visibly replying to.
+  if (!isOwnChat && !taggedIn && !replyingToMe) return;
   // Messages this server sent itself come back through the same inbound handler, and reacting to
   // its own attribution line would have it eyes-ing its own output — in the owner's own chat, on
   // every single send. ATTRIBUTION is appended by the wa_send* tools and by nothing else.
@@ -1173,10 +1175,17 @@ async function handleIncoming(waMessage) {
   // Deliberately not awaited: the reaction is a network round-trip, and the wake queueing below is
   // what gets the message in front of a session. Nothing after this depends on the reaction having
   // landed, and autoEyes swallows its own failures, so there is no rejection to strand.
-  void autoEyes(jid, key, text);
+  // `by: "claude"` is written at send time by the wa_send* tools and by nothing else, so this is the
+  // only non-inferred way to know a quoted message was ours. Burak's own phone-typed messages are
+  // `direction: "out"` too, and a reply to one of his is not a reply to us.
+  const replyingToMe = Boolean(quoted?.id) && findMessage(jid, quoted.id)?.by === "claude";
+  void autoEyes(jid, key, text, replyingToMe);
   // mention-only chats stay fully logged above for wa_recent/wa_search — only the wake is gated.
   // `text` already prefers a voice transcript, so saying "claude" in a voice note counts too.
-  if (!isMentionOnly(jid) || /@claude/i.test(text ?? "")) {
+  // `replyingToMe` joins the mention here for the same reason it triggers the reaction: in a
+  // mention-only chat, someone replying to this server's own message would otherwise never wake it,
+  // and their answer would sit unread in a chat that looks idle.
+  if (!isMentionOnly(jid) || /@claude/i.test(text ?? "") || replyingToMe) {
     // `pushName` is free text the sender picks, so an inbound one may well claim to be the owner.
     // Only `key.fromMe` actually proves authorship, so it — not the name — decides the prefix, and
     // an inbound name is never rendered through ownerName(). Anything reading this feed must treat
