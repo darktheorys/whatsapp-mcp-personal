@@ -9,9 +9,9 @@
 set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SRC="$ROOT/scripts/extract-text.swift"
 OUT_DIR="$ROOT/state/bin"
-OUT="$OUT_DIR/extract-text"
+# name:source pairs — both are small Swift CLIs over macOS frameworks, built the same way
+BUILDS="extract-text:$ROOT/scripts/extract-text.swift cutout:$ROOT/scripts/cutout.swift"
 
 if [ "$(uname -s)" != "Darwin" ]; then
   echo "setup-text-extract: not macOS — skipping (Vision/PDFKit are macOS frameworks)."
@@ -24,22 +24,29 @@ if ! command -v swiftc >/dev/null 2>&1; then
   exit 0
 fi
 
-# Skip the rebuild when the binary is already newer than its source. postinstall runs on every
-# `pnpm install`, and a Swift compile is slow enough to be worth not repeating for nothing.
-if [ -x "$OUT" ] && [ "$OUT" -nt "$SRC" ]; then
-  echo "setup-text-extract: $OUT is up to date."
-  exit 0
-fi
-
 mkdir -p "$OUT_DIR"
 chmod 700 "$OUT_DIR"
 
-echo "setup-text-extract: building extract-text…"
-if swiftc -O -o "$OUT" "$SRC" 2>&1; then
-  chmod 700 "$OUT"
-  echo "setup-text-extract: built $OUT"
-else
-  # Deliberately still exit 0: a failed optional build must not fail `pnpm install`.
-  echo "setup-text-extract: build failed — OCR and PDF text extraction will be unavailable."
-  exit 0
-fi
+for build in $BUILDS; do
+  name="${build%%:*}"
+  src="${build##*:}"
+  out="$OUT_DIR/$name"
+
+  # Skip the rebuild when the binary is already newer than its source. postinstall runs on every
+  # `pnpm install`, and a Swift compile is slow enough to be worth not repeating for nothing.
+  if [ -x "$out" ] && [ "$out" -nt "$src" ]; then
+    echo "setup-text-extract: $name is up to date."
+    continue
+  fi
+
+  echo "setup-text-extract: building $name…"
+  if swiftc -O -o "$out" "$src" 2>&1; then
+    chmod 700 "$out"
+    echo "setup-text-extract: built $out"
+  else
+    # Deliberately not fatal: a failed optional build must not fail `pnpm install`, and one binary
+    # failing must not stop the other being built.
+    echo "setup-text-extract: $name failed to build — that capability will be unavailable."
+  fi
+done
+exit 0
