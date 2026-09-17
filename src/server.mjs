@@ -59,7 +59,7 @@ import {
   updateContact,
   updatePollState,
 } from "./store.mjs";
-import { enrichLinks } from "./linkinfo.mjs";
+import { buildUrlInfo, enrichLinks } from "./linkinfo.mjs";
 import { loadSchedule, removeTask, startScheduler, upsertTask } from "./schedule.mjs";
 import { connectionState, getSocket, logger, setDropNotifier, startWhatsApp } from "./whatsapp.mjs";
 
@@ -1458,7 +1458,13 @@ server.registerTool(
       };
     }
     const fullText = text.endsWith(ATTRIBUTION) ? text : text + ATTRIBUTION;
-    const sent = await sock.sendMessage(to, { text: fullText });
+    // A preview card built here rather than by Baileys, which would need the optional
+    // link-preview-js peer dependency (and cheerio behind it) to do the same job. Best-effort:
+    // buildUrlInfo never throws, and a send must not fail because a link was slow or unreachable.
+    // Gated on the same per-chat setting as inbound enrichment, so "no link fetching for this chat"
+    // means one thing rather than two.
+    const linkPreview = hasLinkPreviewDisabled(to) ? null : await buildUrlInfo(fullText);
+    const sent = await sock.sendMessage(to, { text: fullText, ...(linkPreview ? { linkPreview } : {}) });
     appendMessage(to, {
       direction: "out",
       by: "claude",
@@ -2060,7 +2066,13 @@ server.registerTool(
     if (refusal) return refusal;
     const sock = getSocket();
     const fullText = text.endsWith(ATTRIBUTION) ? text : text + ATTRIBUTION;
-    const sent = await sock.sendMessage(to, { text: fullText });
+    // A preview card built here rather than by Baileys, which would need the optional
+    // link-preview-js peer dependency (and cheerio behind it) to do the same job. Best-effort:
+    // buildUrlInfo never throws, and a send must not fail because a link was slow or unreachable.
+    // Gated on the same per-chat setting as inbound enrichment, so "no link fetching for this chat"
+    // means one thing rather than two.
+    const linkPreview = hasLinkPreviewDisabled(to) ? null : await buildUrlInfo(fullText);
+    const sent = await sock.sendMessage(to, { text: fullText, ...(linkPreview ? { linkPreview } : {}) });
     appendMessage(to, {
       direction: "out",
       by: "claude",

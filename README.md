@@ -224,6 +224,11 @@ So a history full of opaque `x.com/.../status/2099…` strings becomes searchabl
 actually are. x.com is special-cased through vxtwitter's read-only JSON, since x.com itself serves
 nothing useful without authentication.
 
+Outgoing messages get a preview card built the same way, so a link you send shows a title and
+description instead of a bare URL. Baileys can do this itself, but only via an optional dependency
+that brings cheerio and ~20 packages with it — it accepts a preview we supply, so there's no
+dependency to add.
+
 **This is the one thing on the inbound path that reaches outside the machine**, and it's worth being
 clear about the cost: fetching a link tells that server the message arrived, and from which IP. A
 sender who controls the host learns their message landed even if you never open it. Add a chat to

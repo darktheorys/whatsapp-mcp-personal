@@ -644,6 +644,12 @@ assert.deepEqual(unansweredChats([STATS], 1 * H), [], "answering it takes it off
     assert.equal(await fetchLinkInfo(blocked), null, `must refuse ${blocked}`);
   }
 
+  // Outbound previews are built here rather than by Baileys, so the no-link and refused-link cases
+  // must come back null and let the send proceed without a preview, never throw into it.
+  const { buildUrlInfo } = await import("./src/linkinfo.mjs");
+  assert.equal(await buildUrlInfo("no link in this message"), null, "nothing to preview is not an error");
+  assert.equal(await buildUrlInfo("http://169.254.169.254/"), null, "a refused link yields no preview");
+
   assert.equal(renderLinkInfo(null), null, "a failed fetch renders nothing rather than an empty marker");
   assert.equal(renderLinkInfo({ site: "x.com", title: "@a", description: "" }), "[link: x.com] @a");
   assert.equal(
