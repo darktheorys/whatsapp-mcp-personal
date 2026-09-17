@@ -1931,10 +1931,14 @@ server.registerTool(
         .optional()
         .describe("If true, also list chats whose last message was inbound and older than `unansweredHours`"),
       unansweredHours: z.number().positive().max(8760).optional().describe("Threshold for `unanswered` (default 24)"),
+      compare: z
+        .boolean()
+        .optional()
+        .describe("With `days`, also measure the equally-long window before it and report the change. For trends."),
     },
     annotations: { readOnlyHint: true, openWorldHint: false },
   },
-  async ({ jid, days, unanswered = false, unansweredHours = 24 }) => {
+  async ({ jid, days, unanswered = false, unansweredHours = 24, compare = false }) => {
     const { allowlist } = loadConfig();
     if (jid && !allowedJid(jid)) {
       return {
@@ -1945,9 +1949,28 @@ server.registerTool(
     // Resolved through allowedJid rather than used raw: a chat can be addressed by either its phone
     // jid or its @lid form, and stats keyed by the un-normalised one would silently come back empty.
     const jids = jid ? [allowedJid(jid)] : allowlist;
-    const since = days ? Date.now() - days * 24 * 60 * 60 * 1000 : null;
+    const window = days ? days * 24 * 60 * 60 * 1000 : null;
+    const since = window ? Date.now() - window : null;
     const names = readContacts(jids);
-    const stats = jids.map((j) => ({ name: names[j] ?? null, ...chatStats(j, since) }));
+    // The comparison window is the equally-long stretch immediately before this one, so "last 7
+    // days" is measured against the 7 days before that rather than against all history.
+    const comparing = compare && window;
+    const stats = jids.map((j) => {
+      const current = { name: names[j] ?? null, ...chatStats(j, since) };
+      if (!comparing) return current;
+      const previous = chatStats(j, since - window, since);
+      // Absolute counts, not percentages: a chat going from 2 messages to 4 is not "+100% activity"
+      // in any sense worth reporting, and small denominators make percentages actively misleading.
+      return {
+        ...current,
+        previous: { total: previous.total, inbound: previous.inbound ?? 0, outbound: previous.outbound ?? 0 },
+        change: {
+          total: current.total - previous.total,
+          inbound: (current.inbound ?? 0) - (previous.inbound ?? 0),
+          outbound: (current.outbound ?? 0) - (previous.outbound ?? 0),
+        },
+      };
+    });
     const payload = {
       window: days ? `last ${days} days` : "all history",
       // Sorted busiest-first: "who do I talk to most" is the question this is usually asked for,

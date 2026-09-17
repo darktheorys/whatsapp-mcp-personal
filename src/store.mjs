@@ -343,14 +343,18 @@ const median = (xs) => {
 //
 // Spans archived rows too, same as search: "who do I talk to most" is a question about all of it,
 // and the 30-day archive cutoff is a read-path detail, not a statement about relevance.
-export function chatStats(jid, sinceMs = null) {
+// `untilMs` exists so the same function can produce the *previous* period as well as the current
+// one, which is what makes a weekly report say "you started 2 conversations, down from 7" instead
+// of just printing 2. Without an upper bound there is no way to ask for a window that has already
+// ended.
+export function chatStats(jid, sinceMs = null, untilMs = null) {
   const rows = getDb()
     .prepare(
       `SELECT ts, direction FROM messages
-       WHERE jid = ? AND kind IS NULL AND direction IS NOT NULL AND ts >= ?
+       WHERE jid = ? AND kind IS NULL AND direction IS NOT NULL AND ts >= ? AND ts < ?
        ORDER BY ts, rowid`,
     )
-    .all(jid, sinceMs ?? 0);
+    .all(jid, sinceMs ?? 0, untilMs ?? Number.MAX_SAFE_INTEGER);
   if (rows.length === 0) return { jid, total: 0 };
 
   const byHour = Array(24).fill(0);

@@ -515,6 +515,13 @@ assert.equal(
 );
 assert.equal(chatStats("999@s.whatsapp.net").total, 0, "a chat with no messages reports zero, not a crash");
 
+// The upper bound, which is what makes a weekly report able to say "down from 7" rather than just
+// printing a number. Without it there is no way to ask for a window that has already closed.
+assert.equal(chatStats(STATS, base, base + 5 * 60 * 1000).total, 1, "untilMs excludes the reply 10 minutes later");
+assert.equal(chatStats(STATS, base, base + 11 * 60 * 1000).total, 2, "widening the window includes it");
+assert.equal(chatStats(STATS, base + 9 * H).total, 1, "sinceMs still bounds the other end");
+assert.equal(chatStats(STATS, base, base).total, 0, "an empty window is empty, not everything");
+
 // Unanswered: their message, last in the chat, older than the threshold.
 assert.deepEqual(
   unansweredChats([STATS], 1 * H).map((c) => c.jid),
