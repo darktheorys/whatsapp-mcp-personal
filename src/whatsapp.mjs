@@ -7,9 +7,52 @@ import makeWASocket, {
 
 import { AUTH_DIR, LOG_PATH, ensureDirs, loadConfig } from "./config.mjs";
 
+// Baileys reports a message it could not decrypt or a notification batch it could not parse by
+// logging it and moving on. There is no event for it, and the message is simply gone: it never
+// reaches messages.upsert, so handleIncoming never runs and nothing is stored. That is invisible
+// silent loss — it ate two messages from a contact and was only noticed days later, by a human
+// looking at their phone.
+//
+// These are the substrings that mean "an inbound message was lost". `processing offline
+// notification` is the worst of them: offline notifications are the batch delivered after a gap,
+// so one parse failure can take several messages at once.
+const DROP_SIGNATURES = [
+  "failed to decrypt message",
+  "processing offline notification",
+  "handling notification",
+  "Bad MAC",
+];
+
+// Set by server.mjs so these can be surfaced as MCP notifications. Module-level because the logger
+// is built at import time, long before any caller passes a callback in.
+let onDrop = null;
+export function setDropNotifier(fn) {
+  onDrop = fn;
+}
+
 // MCP runs over stdio: stdout is the JSON-RPC channel. Baileys' logger must never touch it.
 ensureDirs();
-export const logger = pino({ level: "warn" }, pino.destination({ dest: LOG_PATH, mkdir: true }));
+const logFile = pino.destination({ dest: LOG_PATH, mkdir: true });
+// A custom write rather than a wrapped logger object: pino hands every record here as one NDJSON
+// line, which is a far smaller surface to get wrong than proxying a logger Baileys then relies on.
+// The file still receives every line unchanged; this only reads them on the way past.
+export const logger = pino(
+  { level: "warn" },
+  {
+    write(line) {
+      logFile.write(line);
+      if (!onDrop) return;
+      try {
+        const msg = JSON.parse(line)?.msg ?? "";
+        if (DROP_SIGNATURES.some((s) => msg.includes(s))) {
+          onDrop(msg);
+        }
+      } catch {
+        // A malformed line is not worth failing a log write over, and must never throw into pino.
+      }
+    },
+  },
+);
 
 let sock = null;
 // Why this is tracked separately from `sock`: a socket object outlives the connection it

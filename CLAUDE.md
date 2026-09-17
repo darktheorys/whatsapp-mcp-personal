@@ -53,7 +53,17 @@ Four files under `src/`, each importable independently and wired together in `se
   `speaking_rate`/`s2t_tier`). `allowedJid(...jids)` is the single gate every inbound/outbound path
   checks — it takes multiple candidate JIDs because WhatsApp addresses the same chat two ways (the
   phone-number JID and a privacy-preserving `@lid` form), and a message can arrive under either.
-- **`whatsapp.mjs`** — owns the one Baileys socket (`sock`) and reconnect logic. **`markOnlineOnConnect: false`
+- **`whatsapp.mjs`** — owns the one Baileys socket (`sock`) and reconnect logic. The pino logger is
+  built with a **custom `write`** that mirrors every line to `state/baileys.log` *and* scans it for
+  `DROP_SIGNATURES` (`failed to decrypt message`, `processing offline notification`, `Bad MAC`).
+  Those are how Baileys reports an inbound message it lost: it logs and carries on, with no event
+  and no throw, so the message never reaches `messages.upsert` and nothing is stored. Scanning the
+  log stream is the only place that is observable — and it must stay a custom `write` rather than a
+  wrapped logger object, because Baileys logs through `logger.child(...)` internally and child
+  loggers share the destination stream but not a proxy. `setDropNotifier` hands those to
+  `server.mjs`, which reports them to the client *and* writes an `inbox.log` line, since the message
+  is unrecoverable (Baileys only delivers to a live socket) and only the phone still has it.
+  **`markOnlineOnConnect: false`
   is load-bearing and must stay:** Baileys defaults it to `true`, which announces this process as an
   active online device, and WhatsApp then stops pushing notifications to the owner's phone. Merely
   running the server was enough to swallow them. For the same reason nothing here ever marks
@@ -93,6 +103,15 @@ Four files under `src/`, each importable independently and wired together in `se
   the send-side guardrails live (see Security below) and where in-chat slash commands
   (`/wakelevel`, `/speaking`, `/speaking-speed`, `/s2t-tier`, `/read-image`, `/read-audio`) are
   parsed and applied.
+
+  **`extractContent` ends in a catch-all, and that is load-bearing.** WhatsApp's proto defines
+  around sixty message types; this file renders a dozen. Every other one used to return `null`, and
+  a `null` there drops the whole message — no row, no inbox line, no wake, no error. An unrecognised
+  type now becomes `[unsupported: <typeName>]`, which is a searchable row and an MCP warning, so the
+  types actually being received can be counted rather than guessed at. Only genuine protocol
+  plumbing (`NON_CONTENT_TYPES`: key distribution, `protocolMessage`, reactions, poll votes, the
+  `messageContextInfo` sidecar) is still dropped deliberately. When adding a new type, render it
+  above the catch-all — don't extend `NON_CONTENT_TYPES` unless it really isn't a message.
 
 `pair.mjs` is a separate, one-time entry point run directly in a terminal (never through Claude
 Code) — it's the only file allowed to use `console.log`.
