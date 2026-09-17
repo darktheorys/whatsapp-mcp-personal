@@ -58,6 +58,7 @@ import {
   updateContact,
   updatePollState,
 } from "./store.mjs";
+import { loadSchedule, removeTask, startScheduler, upsertTask } from "./schedule.mjs";
 import { connectionState, getSocket, logger, setDropNotifier, startWhatsApp } from "./whatsapp.mjs";
 
 const execFileAsync = promisify(execFile);
@@ -1948,6 +1949,65 @@ server.registerTool(
 );
 
 server.registerTool(
+  "wa_schedule",
+  {
+    title: "Scheduled recurring work",
+    description:
+      "List, add, update or remove recurring tasks that the SERVER fires, not the session — they " +
+      "survive restarts, /mcp reconnects and having no session at all. A due task writes a line " +
+      "into state/inbox.log, which wakes whichever session is tailing it; the server cannot do the " +
+      "work itself, it only guarantees the reminder arrives. Use for a daily digest or a weekly " +
+      "report, and prefer it over CronCreate, which is session-scoped, expires after 7 days, and " +
+      "only fires while the session happens to be idle.",
+    inputSchema: {
+      action: z.enum(["list", "set", "remove"]).describe("What to do; 'list' takes no other arguments"),
+      id: z
+        .string()
+        .optional()
+        .describe("Task id, e.g. 'daily-digest'. Required for set/remove; set overwrites by id."),
+      at: z.string().optional().describe('Local 24-hour time, "HH:MM", e.g. "10:03". Required for set.'),
+      days: z
+        .array(z.number().int().min(0).max(6))
+        .optional()
+        .describe("Weekdays to run on, 0=Sunday..6=Saturday. Omit for every day."),
+      prompt: z.string().optional().describe("What the woken session should do. Required for set."),
+      enabled: z.boolean().optional().describe("Set false to pause without deleting"),
+      catchUpMinutes: z
+        .number()
+        .int()
+        .positive()
+        .max(1440)
+        .optional()
+        .describe("Still fire this long after the scheduled time if the server was down (default 120)"),
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+  },
+  async ({ action, id, at, days, prompt, enabled, catchUpMinutes }) => {
+    if (action === "list") {
+      return { content: [{ type: "text", text: JSON.stringify(loadSchedule(), null, 2) }] };
+    }
+    if (!id) {
+      return { isError: true, content: [{ type: "text", text: "Refused: id is required for set/remove." }] };
+    }
+    if (action === "remove") {
+      return {
+        content: [{ type: "text", text: removeTask(id) ? `Removed scheduled task ${id}.` : `No task with id ${id}.` }],
+      };
+    }
+    const { task, error } = upsertTask({
+      id,
+      at,
+      prompt,
+      ...(days ? { days } : {}),
+      ...(enabled === undefined ? {} : { enabled }),
+      ...(catchUpMinutes === undefined ? {} : { catchUpMinutes }),
+    });
+    if (error) return { isError: true, content: [{ type: "text", text: `Refused: ${error}.` }] };
+    return { content: [{ type: "text", text: `Scheduled ${id}:\n${JSON.stringify(task, null, 2)}` }] };
+  },
+);
+
+server.registerTool(
   "wa_send_text_only",
   {
     title: "Send a WhatsApp text message (bypassing voice-only mode)",
@@ -2087,6 +2147,18 @@ server.registerTool(
 // Importing this file otherwise connects to WhatsApp as a side effect, which would evict the
 // running server. The guard is what lets the test import the parsers above without doing that.
 if (!process.env.WA_NO_CONNECT) {
+  // Started here rather than next to the tool registrations so importing this file for tests does
+  // not start a timer, same reason the socket is behind this guard.
+  //
+  // The line goes to inbox.log, not queueWake: a scheduled task belongs to no chat, and it must not
+  // sit behind the presence debounce waiting for someone to stop typing.
+  startScheduler({
+    onDue: (task) => {
+      notify("info", `scheduled task due: ${task.id}`, { id: task.id, at: task.at });
+      logInbox("(scheduler)", `⏰ ${task.id}`, task.prompt);
+    },
+  });
+
   // Fire-and-forget: a slow or unreachable WhatsApp handshake must never block MCP tool availability.
   void startWhatsApp({
     onMessage: handleIncoming,

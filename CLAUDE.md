@@ -113,6 +113,18 @@ Four files under `src/`, each importable independently and wired together in `se
   `messageContextInfo` sidecar) is still dropped deliberately. When adding a new type, render it
   above the catch-all — don't extend `NON_CONTENT_TYPES` unless it really isn't a message.
 
+- **`schedule.mjs`** — durable recurring tasks in `state/schedule.json`, fired by a timer inside the
+  server process. This exists because the session-scoped alternative does not work: an in-memory
+  cron expires after 7 days and only fires while the REPL is idle, so a session waking every 30
+  minutes to re-arm a Monitor starves it and the daily digest goes out an hour late or not at all.
+  The server cannot *do* the work (composing a digest needs a model), so a due task writes a line to
+  `state/inbox.log` and whichever session is tailing it picks the work up — the schedule is durable,
+  the execution still needs a session. Deliberately not cron: `at` is `"HH:MM"` local plus an
+  optional `days` array, because a mis-parsed cron field fails silently and that is the exact
+  failure being fixed. `lastRun` stores the *occurrence* a task ran for, not the wall-clock time it
+  fired, which is what makes catch-up (run a missed 10:03 digest at 10:40) and the no-double-fire
+  guard the same mechanism. Managed through the `wa_schedule` tool.
+
 `pair.mjs` is a separate, one-time entry point run directly in a terminal (never through Claude
 Code) — it's the only file allowed to use `console.log`.
 

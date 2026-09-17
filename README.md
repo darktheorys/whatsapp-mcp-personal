@@ -174,6 +174,35 @@ Both directions run entirely offline, no API keys:
   transcribing it means downloading the pictures too — and the 25 MB media cap means long videos
   are skipped and never transcribed.
 
+## Scheduled work
+
+Recurring tasks (the daily digest, a weekly report) live in `state/schedule.json` and are fired by
+the **server process**, not by a session. That matters: a session-scoped scheduler only fires while
+the session is idle, so a session that wakes every 30 minutes to re-arm its Monitor starves it, and
+the digest arrives an hour late or not at all. The server is already running for the WhatsApp socket
+and doesn't care whether anyone is driving it.
+
+The server can't compose a digest itself, so a due task writes a line into `state/inbox.log` and
+whichever session is tailing that picks the work up. **The schedule is durable; the execution still
+needs a session to be running.**
+
+```jsonc
+[
+  {
+    "id": "daily-digest",
+    "at": "10:03",            // local 24-hour time
+    "days": [1, 2, 3, 4, 5],  // optional, 0=Sunday; omit for every day
+    "prompt": "Compile and send the daily AI digest to ...",
+    "catchUpMinutes": 240     // still fire if the machine was asleep at 10:03 (default 120)
+  }
+]
+```
+
+Manage it with `wa_schedule` (`action: "list" | "set" | "remove"`). `lastRun` records the
+*occurrence* a task ran for rather than the moment it fired, so a catch-up run at 10:40 still counts
+as "ran for 10:03" and can't fire again at 10:41 — and editing a task's prompt doesn't resend
+something that already went out today.
+
 ## Nothing arrives silently
 
 Two things used to make a message disappear with no trace at all, and both now leave one.
@@ -365,6 +394,7 @@ MCP server connected in only one session at a time.
 | `wa_recent`         | `{ jid?, limit?, all? }` — recent logged messages for one allowed chat. Omitting `jid` returns per-chat unread counts only, never text.    |
 | `wa_search`         | `{ jid, query, limit? }` — substring search over one chat's active + archived messages, case- and diacritic-insensitive (`seker` finds `şeker`). |
 | `wa_stats`          | `{ jid?, days?, unanswered?, unansweredHours? }` — volume, reply times, activity by hour/weekday, who starts conversations. Counts only, never text, so it is safe across all chats at once. |
+| `wa_schedule`       | `{ action, id?, at?, days?, prompt?, enabled?, catchUpMinutes? }` — recurring tasks the **server** fires, surviving restarts and sessions. See "Scheduled work" below. |
 
 ## YouTube / video tools
 

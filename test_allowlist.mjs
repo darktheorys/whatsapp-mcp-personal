@@ -43,6 +43,10 @@ assert.equal(allowedJid(undefined, null), undefined, "missing JIDs must not thro
 // A throwaway database, so the store tests never touch the real message history.
 process.env.WA_DB_PATH = join(mkdtempSync(join(tmpdir(), "wa-db-")), "test.db");
 
+// Same reason as WA_DB_PATH: schedule.mjs resolves its file at module load, and the tests must not
+// touch (or fire) the real schedule.
+process.env.WA_SCHEDULE_PATH = join(mkdtempSync(join(tmpdir(), "wa-sched-")), "schedule.json");
+
 // WA_NO_CONNECT keeps the import from opening a WhatsApp socket and evicting the live server.
 process.env.WA_NO_CONNECT = "1";
 const { extractContent, mediaName } = await import("./src/server.mjs");
@@ -541,11 +545,73 @@ assert.deepEqual(unansweredChats([STATS], 1 * H), [], "answering it takes it off
   );
 }
 
+// Server-side scheduling. `now` is injected rather than read from the clock so these assert real
+// behaviour instead of whatever time the suite happens to run at. Thursday 17 Sep 2026, local time,
+// because the weekday filter is one of the things that has to be right.
+{
+  const { dueTasks, validateTask, upsertTask, removeTask, loadSchedule, markRan } = await import("./src/schedule.mjs");
+  const at = (h, m) => new Date(2026, 8, 17, h, m, 0, 0).getTime();
+  const THURSDAY = 4;
+  assert.equal(new Date(at(12, 0)).getDay(), THURSDAY, "sanity: the fixture date really is a Thursday");
+
+  const digest = { id: "daily-digest", at: "10:03", prompt: "send the digest" };
+  assert.equal(dueTasks([digest], at(11, 0)).length, 1, "a task whose time has passed today is due");
+  assert.equal(dueTasks([digest], at(9, 0)).length, 0, "...but not before its time");
+  // The reason catch-up exists: the machine being asleep at 10:03 should not cost you the digest.
+  assert.equal(dueTasks([digest], at(12, 2)).length, 1, "still due 119 minutes late, inside the catch-up window");
+  assert.equal(dueTasks([digest], at(12, 4)).length, 0, "but not 121 minutes late, which is just confusing");
+  assert.equal(
+    dueTasks([{ ...digest, catchUpMinutes: 10 }], at(10, 30)).length,
+    0,
+    "catchUpMinutes narrows the window",
+  );
+
+  // The double-fire guard. lastRun holds the occurrence it ran for, so a check a minute later must
+  // not fire it again — this is what the session-scoped cron got wrong by firing on wall clock.
+  assert.equal(dueTasks([{ ...digest, lastRun: at(10, 3) }], at(11, 0)).length, 0, "already ran for this occurrence");
+  assert.equal(
+    dueTasks([{ ...digest, lastRun: at(10, 3) - 86_400_000 }], at(11, 0)).length,
+    1,
+    "yesterday's run does not satisfy today's",
+  );
+
+  assert.equal(
+    dueTasks([{ ...digest, days: [THURSDAY] }], at(11, 0)).length,
+    1,
+    "weekday filter lets Thursday through",
+  );
+  assert.equal(dueTasks([{ ...digest, days: [1, 2] }], at(11, 0)).length, 0, "and keeps other days out");
+  assert.equal(dueTasks([{ ...digest, enabled: false }], at(11, 0)).length, 0, "disabled tasks never fire");
+
+  // A malformed task must be inert, not an exception — one bad entry cannot be allowed to stop
+  // every other scheduled task from running.
+  assert.doesNotThrow(() => dueTasks([{ id: "bad", at: "25:00", prompt: "x" }], at(11, 0)));
+  assert.equal(dueTasks([{ id: "bad", at: "25:00", prompt: "x" }], at(11, 0)).length, 0, "invalid time never fires");
+  assert.match(validateTask({ id: "x", at: "9:00", prompt: "p" }), /HH:MM/, "single-digit hour is rejected");
+  assert.match(validateTask({ id: "x", at: "10:03", days: [7], prompt: "p" }), /0-6/, "weekday 7 is rejected");
+  assert.equal(validateTask({ id: "x", at: "10:03", prompt: "p" }), null, "a well-formed task validates");
+
+  // Persistence: the whole point is surviving a restart.
+  assert.ok(upsertTask(digest).task, "task is stored");
+  assert.equal(loadSchedule().length, 1);
+  assert.match(upsertTask({ id: "nope", at: "99:99", prompt: "p" }).error, /HH:MM/, "invalid tasks are refused");
+  assert.equal(loadSchedule().length, 1, "and not written");
+  markRan("daily-digest", at(10, 30));
+  assert.equal(loadSchedule()[0].lastRun, at(10, 3), "markRan records the occurrence, not the wall clock it fired at");
+  // Editing a task must not resurrect an occurrence that already ran, or a prompt tweak at 11:00
+  // would send a second digest.
+  upsertTask({ id: "daily-digest", at: "10:03", prompt: "reworded" });
+  assert.equal(loadSchedule()[0].lastRun, at(10, 3), "editing preserves lastRun");
+  assert.equal(dueTasks(loadSchedule(), at(11, 0)).length, 0, "so the edited task does not re-fire today");
+  assert.equal(removeTask("daily-digest"), true);
+  assert.equal(removeTask("daily-digest"), false, "removing a missing task reports it rather than throwing");
+}
+
 // Runs last: it deliberately exhausts the window, so anything after it would see a full budget.
 let sent = 0;
 while (!overSendLimit()) sent++;
 assert.equal(sent, 20, "rate limit allows exactly 20 sends per minute, then refuses");
 
 console.log(
-  "ok — allowlist, media naming, command regexes, quotes, secret scan, edit/delete ownership guard, sendable-source guard, sqlite store, search folding, stats and rate limit",
+  "ok — allowlist, media naming, command regexes, quotes, secret scan, edit/delete ownership guard, sendable-source guard, sqlite store, search folding, stats, message-type coverage, drop detection, scheduling and rate limit",
 );
