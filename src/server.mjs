@@ -50,6 +50,7 @@ import {
   logCommand,
   logInbox,
   messageCount,
+  participantStats,
   readCommandLog,
   readContacts,
   readNewMessages,
@@ -1972,10 +1973,14 @@ server.registerTool(
         .boolean()
         .optional()
         .describe("With `days`, also measure the equally-long window before it and report the change. For trends."),
+      participants: z
+        .boolean()
+        .optional()
+        .describe("For a group `jid`: break the chat down per sender instead of just you-vs-them. Ignored for DMs."),
     },
     annotations: { readOnlyHint: true, openWorldHint: false },
   },
-  async ({ jid, days, unanswered = false, unansweredHours = 24, compare = false }) => {
+  async ({ jid, days, unanswered = false, unansweredHours = 24, compare = false, participants = false }) => {
     const { allowlist } = loadConfig();
     if (jid && !allowedJid(jid)) {
       return {
@@ -2008,8 +2013,12 @@ server.registerTool(
         },
       };
     });
+    // Only meaningful for a group, and only when one chat was named: a per-sender breakdown across
+    // several chats at once would merge people who are in more than one of them.
+    const perSender = participants && jid?.endsWith("@g.us") ? participantStats(allowedJid(jid), since) : null;
     const payload = {
       window: days ? `last ${days} days` : "all history",
+      ...(perSender ? { participants: perSender } : {}),
       // Sorted busiest-first: "who do I talk to most" is the question this is usually asked for,
       // and it should not need a second pass over the output to answer.
       chats: stats.sort((a, b) => b.total - a.total),
