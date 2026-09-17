@@ -339,6 +339,7 @@ const {
   archiveOldMessages,
   findMessage,
   chatStats,
+  threadOf,
   unansweredChats,
   normalizeForSearch,
 } = await import("./src/store.mjs");
@@ -552,6 +553,37 @@ assert.deepEqual(unansweredChats([STATS], 1 * H), [], "answering it takes it off
   );
 }
 
+// Thread reconstruction. The shape under test is a branching chain, because a message can have
+// several replies and each of those its own — a walk that only followed one would look correct on a
+// straight-line conversation and silently lose half of a real one.
+{
+  const T = "905111111111@s.whatsapp.net";
+  //  A ── B ── D
+  //    └── C
+  //  Z is a separate message in the same chat, and must not be pulled in.
+  appendMessage(T, { direction: "in", text: "A", ts: 1000, id: "A" });
+  appendMessage(T, { direction: "out", text: "B", ts: 2000, id: "B", replyToId: "A" });
+  appendMessage(T, { direction: "in", text: "C", ts: 3000, id: "C", replyToId: "A" });
+  appendMessage(T, { direction: "out", text: "D", ts: 4000, id: "D", replyToId: "B" });
+  appendMessage(T, { direction: "in", text: "Z", ts: 5000, id: "Z" });
+
+  const ids = (id) => threadOf(T, id).map((m) => m.id);
+  assert.deepEqual(ids("A"), ["A", "B", "C", "D"], "from the root, every branch is followed forward");
+  assert.deepEqual(ids("D"), ["A", "B", "C", "D"], "from a leaf, it walks back up and then out again");
+  assert.deepEqual(ids("C"), ["A", "B", "C", "D"], "and from a sibling branch");
+  assert.ok(!ids("A").includes("Z"), "an unrelated message in the same chat stays out");
+  assert.deepEqual(ids("Z"), ["Z"], "a message with no replies is a thread of one");
+  assert.deepEqual(threadOf(T, "nonexistent"), [], "an unknown id is empty, not a crash");
+
+  // A reply pointing at a message this server never logged (sent before it was watching) must end
+  // the walk rather than looping or throwing.
+  appendMessage(T, { direction: "in", text: "orphan", ts: 6000, id: "ORPH", replyToId: "NEVER_SEEN" });
+  assert.deepEqual(ids("ORPH"), ["ORPH"], "a chain leaving the log stops cleanly");
+  // A message claiming to reply to itself would loop forever without the seen-set guard.
+  appendMessage(T, { direction: "in", text: "loop", ts: 7000, id: "LOOP", replyToId: "LOOP" });
+  assert.deepEqual(ids("LOOP"), ["LOOP"], "a self-referential reply terminates");
+}
+
 // Server-side scheduling. `now` is injected rather than read from the clock so these assert real
 // behaviour instead of whatever time the suite happens to run at. Thursday 17 Sep 2026, local time,
 // because the weekday filter is one of the things that has to be right.
@@ -665,5 +697,5 @@ while (!overSendLimit()) sent++;
 assert.equal(sent, 20, "rate limit allows exactly 20 sends per minute, then refuses");
 
 console.log(
-  "ok — allowlist, media naming, command regexes, quotes, secret scan, edit/delete ownership guard, sendable-source guard, sqlite store, search folding, stats, message-type coverage, drop detection, scheduling, link enrichment and rate limit",
+  "ok — allowlist, media naming, command regexes, quotes, secret scan, edit/delete ownership guard, sendable-source guard, sqlite store, search folding, stats, threads, message-type coverage, drop detection, scheduling, link enrichment and rate limit",
 );

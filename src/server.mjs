@@ -55,6 +55,7 @@ import {
   readNewMessages,
   readRecent,
   searchMessages,
+  threadOf,
   unansweredChats,
   updateContact,
   updatePollState,
@@ -1910,6 +1911,36 @@ server.registerTool(
         },
       ],
     };
+  },
+);
+
+server.registerTool(
+  "wa_thread",
+  {
+    title: "Reconstruct a reply thread",
+    description:
+      "Given one message id, returns the whole reply chain around it in time order: what it was " +
+      "replying to, all the way back, plus everything that replied to it and to those. Use when a " +
+      "message quotes something and the context matters — wa_recent shows a window of time, this " +
+      "shows a conversation. Spans archived messages, so an old thread reconstructs too.",
+    inputSchema: {
+      jid: z.string().describe("The allowlisted JID the message belongs to"),
+      messageId: z.string().describe("Any message id in the thread (id field from wa_recent/wa_search)"),
+    },
+    annotations: { readOnlyHint: true, openWorldHint: false },
+  },
+  async ({ jid, messageId }) => {
+    if (!allowedJid(jid)) {
+      return { isError: true, content: [{ type: "text", text: `Refused: ${jid} is not on the allowlist.` }] };
+    }
+    const thread = threadOf(allowedJid(jid), messageId);
+    if (thread.length === 0) {
+      return {
+        isError: true,
+        content: [{ type: "text", text: `Message ${messageId} not found in ${jid}'s log.` }],
+      };
+    }
+    return { content: [{ type: "text", text: JSON.stringify(thread, null, 2) }] };
   },
 );
 

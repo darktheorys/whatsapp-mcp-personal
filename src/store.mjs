@@ -425,6 +425,64 @@ export function unansweredChats(jids, olderThanMs) {
   return out.sort((a, b) => a.lastTs - b.lastTs);
 }
 
+// Walks a reply chain in both directions from one message: back through what it was replying to,
+// and forward through everything that replied to it (and to those, and so on). The indexes this
+// needs — messages_reply_to — have existed since replies were first logged; nothing ever used them
+// to reconstruct a conversation, so following a thread meant paging through wa_recent by hand and
+// matching quoted text by eye.
+//
+// Spans archived rows, same as search: a thread that started five weeks ago is exactly the kind
+// worth reconstructing, and the 30-day archive flag is a read-path detail rather than a statement
+// about relevance.
+const MAX_THREAD_NODES = 200;
+
+export function threadOf(jid, messageId) {
+  const db = getDb();
+  const byId = db.prepare("SELECT json FROM messages WHERE jid = ? AND id = ? LIMIT 1");
+  const repliesTo = db.prepare("SELECT json FROM messages WHERE jid = ? AND reply_to_id = ? ORDER BY ts, rowid");
+
+  const start = byId.get(jid, messageId);
+  if (!start) return [];
+
+  const collected = new Map();
+  const add = (entry) => {
+    if (entry?.id && !collected.has(entry.id)) collected.set(entry.id, entry);
+  };
+  add(parse(start));
+
+  // Backwards: each message names the one it replied to, so this is a straight walk up. Bounded by
+  // the node cap and by `seen`, because a malformed chain that points at itself would otherwise
+  // spin forever.
+  let cursor = parse(start);
+  const seen = new Set([messageId]);
+  while (cursor?.replyToId && collected.size < MAX_THREAD_NODES && !seen.has(cursor.replyToId)) {
+    seen.add(cursor.replyToId);
+    const row = byId.get(jid, cursor.replyToId);
+    if (!row) break; // the chain leaves the log — a reply to something logged before this server saw it
+    cursor = parse(row);
+    add(cursor);
+  }
+
+  // Forwards: breadth-first, since a message can have several replies and each of those can have
+  // its own. This is the half that actually needs the index.
+  const queue = [...collected.keys()];
+  while (queue.length && collected.size < MAX_THREAD_NODES) {
+    const id = queue.shift();
+    for (const row of repliesTo.all(jid, id)) {
+      const entry = parse(row);
+      if (entry.id && !collected.has(entry.id)) {
+        add(entry);
+        queue.push(entry.id);
+      }
+    }
+  }
+
+  // Chronological, not tree-shaped: these are chat messages, and a flat transcript in time order is
+  // how anyone actually reads one back. replyToId is on every entry for whoever wants the shape.
+  const ordered = [...collected.values()].sort((a, b) => (a.ts ?? 0) - (b.ts ?? 0));
+  return withStatus(jid, ordered);
+}
+
 export function findMessage(jid, id) {
   const row = getDb().prepare("SELECT json FROM messages WHERE jid = ? AND id = ? AND archived = 0").get(jid, id);
   return row ? withStatus(jid, [parse(row)])[0] : null;
