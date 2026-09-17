@@ -73,10 +73,44 @@ def scale_filter(pad):
     return f"scale={SIZE}:{SIZE}:force_original_aspect_ratio=increase,crop={SIZE}:{SIZE},format=rgba"
 
 
-def make_static(src, out, pad):
+CUTOUT_BIN = REPO / "state" / "bin" / "cutout"
+
+
+def lift_subject(src, work_dir):
+    """Die-cut the subject onto transparency using macOS subject lifting (state/bin/cutout).
+
+    This is the difference between a sticker and a small photo in a box. A padded screenshot keeps
+    its background and its black bars; a cutout is the subject alone with an alpha channel, which is
+    what every sticker anyone actually sends looks like.
+
+    Returns the cutout path, or None when there is nothing to lift -- a crowd scene, a landscape or
+    a flat caption card genuinely has no single foreground subject, and falling back to padding is
+    the right answer rather than an error.
+    """
+    if not CUTOUT_BIN.exists():
+        print(f"note: {CUTOUT_BIN} not built, keeping the background "
+              f"(run: bash scripts/setup-text-extract.sh)", file=sys.stderr)
+        return None
+    cut = work_dir / "cutout.png"
+    result = subprocess.run([str(CUTOUT_BIN), str(src), str(cut)], capture_output=True, text=True, timeout=120)
+    if result.returncode != 0 or not cut.exists():
+        print(f"note: no subject lifted ({result.stderr.strip()[:120]}), keeping the background",
+              file=sys.stderr)
+        return None
+    return cut
+
+
+def make_static(src, out, pad, cutout=False):
     with tempfile.TemporaryDirectory(prefix="sticker-") as tmp:
         frame = Path(tmp) / "frame.png"
-        run(["ffmpeg", "-y", "-i", str(src), "-vf", scale_filter(pad), "-frames:v", "1", str(frame)],
+        source = src
+        if cutout:
+            lifted = lift_subject(src, Path(tmp))
+            # Padding, not cropping, once the background is gone: the subject is already tight to
+            # its own edges, so cropping would cut into it rather than trim empty space.
+            if lifted is not None:
+                source, pad = lifted, True
+        run(["ffmpeg", "-y", "-i", str(source), "-vf", scale_filter(pad), "-frames:v", "1", str(frame)],
             "ffmpeg (scaling to 512x512)")
         # Walk the quality down until it fits. Starting high and stepping is simpler to reason about
         # than predicting a quality from the source, and a sticker is small enough that a few passes
@@ -135,6 +169,9 @@ def main():
     parser.add_argument("--duration", type=float, default=MAX_ANIMATED_SECONDS,
                         help=f"Seconds to use when animated (default/max {MAX_ANIMATED_SECONDS})")
     parser.add_argument("--no-pad", action="store_true", help="Crop to the square instead of padding with transparency")
+    parser.add_argument("--cutout", action="store_true",
+                        help="Die-cut the subject onto transparency first (macOS subject lifting). "
+                             "This is what makes it look like a sticker rather than a photo in a box.")
     args = parser.parse_args()
 
     if not NAME_RE.match(args.name):
@@ -157,9 +194,9 @@ def main():
         limit = MAX_ANIMATED_BYTES
         detail = f"{frames} frames at {args.fps}fps"
     else:
-        quality, size = make_static(src, out, not args.no_pad)
+        quality, size = make_static(src, out, not args.no_pad, args.cutout)
         limit = MAX_STATIC_BYTES
-        detail = "static"
+        detail = "static, cut out" if args.cutout else "static"
 
     ok = size <= limit
     print(f"{'✓' if ok else '⚠'} {out}")
