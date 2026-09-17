@@ -8,6 +8,10 @@ export const STATE_DIR = join(ROOT, "state");
 export const AUTH_DIR = join(STATE_DIR, "auth");
 export const MEDIA_DIR = join(STATE_DIR, "media");
 export const MEMES_DIR = join(STATE_DIR, "memes");
+// Sticker library: 512x512 WebP files built by the meme-tools make_sticker.py script. Separate from
+// memes/ because a sticker is a different artefact with hard format rules (WhatsApp rejects
+// anything that is not WebP at the right size), not just another file that happens to be sendable.
+export const STICKERS_DIR = join(STATE_DIR, "stickers");
 // Scratch space for raw yt-dlp/ffmpeg output (sidecars, intermediate formats, anything a
 // title-with-slashes trick might spray around) -- never a sendable source, never indexed. Keeps
 // that debris out of both the repo root and state/memes/ (the sendable, indexed directory).
@@ -23,6 +27,7 @@ export function ensureDirs() {
   // gitignored, so on a fresh clone every wa_send_image died on it before resolveSendable could
   // even judge the path.
   mkdirSync(MEMES_DIR, { recursive: true, mode: 0o700 });
+  mkdirSync(STICKERS_DIR, { recursive: true, mode: 0o700 });
   mkdirSync(TMP_DIR, { recursive: true, mode: 0o700 });
 }
 
