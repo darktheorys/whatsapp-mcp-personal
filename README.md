@@ -200,6 +200,10 @@ needs a session to be running.**
 ]
 ```
 
+Two tasks ship by default: the daily AI digest at 10:03, and a weekly review on Sunday evenings
+that calls `wa_stats` with `compare: true` and reports which chats went quiet or busy against the
+previous week, lopsided conversation-starter ratios, and anything left unanswered.
+
 Manage it with `wa_schedule` (`action: "list" | "set" | "remove"`). `lastRun` records the
 *occurrence* a task ran for rather than the moment it fired, so a catch-up run at 10:40 still counts
 as "ran for 10:03" and can't fire again at 10:41 — and editing a task's prompt doesn't resend
@@ -420,7 +424,7 @@ MCP server connected in only one session at a time.
 | `wa_connect`        | Reclaims the WhatsApp socket in this process without an `/mcp` reload — see "Multiple sessions".                                           |
 | `wa_recent`         | `{ jid?, limit?, all? }` — recent logged messages for one allowed chat. Omitting `jid` returns per-chat unread counts only, never text.    |
 | `wa_search`         | `{ jid, query, limit? }` — substring search over one chat's active + archived messages, case- and diacritic-insensitive (`seker` finds `şeker`). |
-| `wa_stats`          | `{ jid?, days?, unanswered?, unansweredHours? }` — volume, reply times, activity by hour/weekday, who starts conversations. Counts only, never text, so it is safe across all chats at once. |
+| `wa_stats`          | `{ jid?, days?, compare?, unanswered?, unansweredHours? }` — volume, reply times, activity by hour/weekday, who starts conversations. `compare` measures the equally-long window before `days` and reports the change. Counts only, never text, so it is safe across all chats at once. |
 | `wa_schedule`       | `{ action, id?, at?, days?, prompt?, enabled?, catchUpMinutes? }` — recurring tasks the **server** fires, surviving restarts and sessions. See "Scheduled work" below. |
 
 ## YouTube / video tools
