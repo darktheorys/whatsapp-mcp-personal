@@ -413,6 +413,19 @@ export function chatStats(jid, sinceMs = null, untilMs = null) {
 //
 // `name` is pushName — free text the sender chooses — so it is reported as a label and never used
 // as an identity. The jid is the identity.
+// WhatsApp addresses the same person differently per linked device: `491781596339@s.whatsapp.net`
+// and `491781596339:0@s.whatsapp.net` are one human, and counting them separately split a real
+// group member into a 212-message participant and a 1-message ghost.
+//
+// Done with a local replace rather than Baileys' jidNormalizedUser on purpose: this module has no
+// Baileys import and should not gain one — pulling the whole protocol library into the store to
+// strip a numeric suffix is a poor trade (the same reasoning keeps the pino logger out of here).
+//
+// Only the device suffix. A @lid address and a phone address for the same person are also the same
+// human, but resolving that needs Baileys' mapping table, and resolveSender already does it at
+// write time.
+const stripDevice = (jid) => (typeof jid === "string" ? jid.replace(/:\d+(?=@)/, "") : jid);
+
 export function participantStats(jid, sinceMs = null) {
   const rows = getDb()
     .prepare(
@@ -447,7 +460,7 @@ export function participantStats(jid, sinceMs = null) {
   for (const row of rows) {
     // An outbound row is the owner; an inbound one without `from` is a DM-shaped row in a group,
     // which should not happen but must not become a phantom participant if it does.
-    const key = row.direction === "out" ? "(you)" : (row.who ?? "(unknown)");
+    const key = row.direction === "out" ? "(you)" : (stripDevice(row.who) ?? "(unknown)");
     const p = get(key, row.name);
     p.messages++;
     p.byHour[new Date(row.ts).getHours()]++;

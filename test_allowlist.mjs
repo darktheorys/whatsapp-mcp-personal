@@ -606,6 +606,17 @@ assert.deepEqual(unansweredChats([STATS], 1 * H), [], "answering it takes it off
     "one row per sender, busiest first, own messages as their own bucket",
   );
   assert.equal(participants[0].name, "Ali", "pushName is carried as a label");
+
+  // The same person arriving from a second linked device carries a :N suffix. Counting that as a
+  // separate participant split a real group member into a 212-message person and a 1-message ghost.
+  const G2 = "120363000000000002@g.us";
+  appendMessage(G2, { direction: "in", text: "a", ts: t0, id: "H1", from: "111@s.whatsapp.net", name: "Ali" });
+  appendMessage(G2, { direction: "in", text: "b", ts: t0 + 1000, id: "H2", from: "111:0@s.whatsapp.net", name: "Ali" });
+  appendMessage(G2, { direction: "in", text: "c", ts: t0 + 2000, id: "H3", from: "111:18@s.whatsapp.net" });
+  const merged = participantStats(G2).participants;
+  assert.equal(merged.length, 1, "one human, not three, however many devices they message from");
+  assert.equal(merged[0].who, "111@s.whatsapp.net", "reported under the device-less jid");
+  assert.equal(merged[0].messages, 3, "and their messages are summed");
   assert.equal(participants[0].share, 50, "share is a percentage of the group total");
   assert.equal(participants[0].started, 1, "the first message after a gap counts as a conversation start");
   assert.equal(participants[1].started, 0, "a reply mid-conversation does not");
