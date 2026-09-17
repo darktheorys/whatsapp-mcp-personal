@@ -89,7 +89,11 @@ Four files under `src/`, each importable independently and wired together in `se
   the LIKE search it replaced always did. Queries under 3 characters fall back to LIKE, since a
   trigram index has no window that short. The needle is wrapped as an FTS5 *phrase* — a bare MATCH
   argument is a query expression where a stray `*` or `NEAR` is a syntax error or a different
-  search. Nothing is ever mutated: an edit or delete is its own row pointing at the original
+  search. `threadOf` walks the `reply_to_id` chain both ways (up to what a message replied to, and
+  breadth-first down through everything that replied to it) — the index for it existed from the
+  start and nothing used it, so following a thread meant matching quoted text by eye. Guarded
+  against a chain that leaves the log and against a message claiming to reply to itself.
+  Nothing is ever mutated: an edit or delete is its own row pointing at the original
   via `to_id`, and reads derive `edited`/`deleted` status at query time (`withStatus`) rather than
   rewriting the original row. `state/inbox.log` is a separate plain-text file (not in SQLite) — a
   `Monitor` tails it to wake a Claude session on new messages, and "tail a database" isn't a thing.
