@@ -117,9 +117,13 @@ Four files under `src/`, each importable independently and wired together in `se
   the row, the same pattern as OCR. The only inbound path that makes an outbound request, hence
   `no_link_preview_jids`: fetching tells that host the message arrived. A URL is untrusted input
   from whoever is in the chat, so `assertPublic` rejects private/loopback/link-local/CGNAT addresses
-  and non-http(s) schemes, and **redirects are followed manually** — `fetch`'s own redirect handling
-  would re-resolve each hop without the check, so a public URL 302-ing to `169.254.169.254` would
-  walk straight past it. x.com goes through vxtwitter's JSON, which needs a *plain* user-agent: the
+  and non-http(s) schemes. **The check lives in a `lookup` hook passed to `node:http(s)`, not in a
+  separate pre-flight** — an earlier version validated with `dns.lookup()` and then let `fetch()`
+  resolve the name again itself, which a hostile nameserver answering with a zero TTL can exploit by
+  returning a public address to the check and a private one to the connection (DNS rebinding).
+  Validating inside the connect path means the address approved is the address dialled, and it is
+  why this uses `node:http(s)` at all: `fetch` offers no way to hook name resolution. Redirects are
+  followed manually so every hop goes back through that same check. x.com goes through vxtwitter's JSON, which needs a *plain* user-agent: the
   browser one gets a 403 Cloudflare challenge (measured, both ways).
 
 - **`schedule.mjs`** — durable recurring tasks in `state/schedule.json`, fired by a timer inside the

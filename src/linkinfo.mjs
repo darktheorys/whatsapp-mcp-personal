@@ -1,4 +1,6 @@
-import { lookup } from "node:dns/promises";
+import { lookup as dnsLookup } from "node:dns";
+import http from "node:http";
+import https from "node:https";
 import { isIP } from "node:net";
 
 // Turns a bare URL in a message into something a reader (or a search) can act on: the title and
@@ -74,27 +76,80 @@ function isPrivateAddress(ip) {
   return false;
 }
 
-async function assertPublic(url) {
-  if (url.protocol !== "http:" && url.protocol !== "https:") throw new Error(`refusing ${url.protocol} link`);
-  const host = url.hostname.replace(/^\[|\]$/g, "");
-  // A literal IP needs no lookup, and passing one to dns.lookup would happily "resolve" it.
-  const addresses = isIP(host) ? [{ address: host }] : await lookup(host, { all: true });
-  if (addresses.some((a) => isPrivateAddress(a.address))) throw new Error(`refusing link to a private address`);
+// Called by the socket layer at connect time, which is the whole point: an earlier version checked
+// with dns.lookup() and then let fetch() resolve the name a second time on its own. Between those
+// two resolutions a hostile nameserver answering with a zero TTL can return a public address to the
+// check and a private one to the actual connection — DNS rebinding, and the guard never sees it.
+// Validating inside the connect path means the address approved here is the address dialled.
+function guardedLookup(hostname, options, callback) {
+  dnsLookup(hostname, { ...options, all: true }, (err, addresses) => {
+    if (err) return callback(err);
+    const list = Array.isArray(addresses) ? addresses : [addresses];
+    // Reject if *any* answer is private, not just the first: a name that resolves to both a public
+    // and a private address must not be reachable by retry or by happening to pick the other one.
+    const bad = list.find((a) => isPrivateAddress(a.address));
+    if (bad) return callback(new Error(`refusing link to private address ${bad.address}`));
+    if (!list.length) return callback(new Error("no addresses"));
+    return options.all ? callback(null, list) : callback(null, list[0].address, list[0].family);
+  });
 }
 
-// Redirects are followed by hand rather than by fetch, because fetch's own redirect handling would
-// re-resolve each hop without the check above — a public URL that 302s to 169.254.169.254 would
-// walk straight past the guard. Every hop is validated.
+// node:http(s) rather than fetch, purely because fetch offers no way to pin or hook name
+// resolution — `lookup` is the only place this check can live without a race.
+function httpGet(url, headers) {
+  if (url.protocol !== "http:" && url.protocol !== "https:") {
+    return Promise.reject(new Error(`refusing ${url.protocol} link`));
+  }
+  // A literal private IP never reaches guardedLookup (there is no name to resolve), so it is
+  // checked here instead.
+  const literal = url.hostname.replace(/^\[|\]$/g, "");
+  if (isIP(literal) && isPrivateAddress(literal)) {
+    return Promise.reject(new Error(`refusing link to private address ${literal}`));
+  }
+  return new Promise((resolve, reject) => {
+    const mod = url.protocol === "https:" ? https : http;
+    let settled = false;
+    const done = (fn, value) => {
+      if (settled) return;
+      settled = true;
+      fn(value);
+    };
+    const request = mod.request(url, { headers, lookup: guardedLookup, timeout: FETCH_TIMEOUT_MS }, (res) => {
+      const chunks = [];
+      let total = 0;
+      res.on("data", (chunk) => {
+        total += chunk.length;
+        if (total <= MAX_BYTES) chunks.push(chunk);
+        // Past the cap the rest of the page is of no interest, and a stream that never ends must
+        // not be able to hold this open until the timeout.
+        else res.destroy();
+      });
+      const finish = () =>
+        done(resolve, {
+          status: res.statusCode,
+          headers: res.headers,
+          body: Buffer.concat(chunks).toString("utf8"),
+        });
+      res.on("end", finish);
+      res.on("close", finish);
+      res.on("error", () => done(reject, new Error("response stream error")));
+    });
+    request.on("timeout", () => {
+      request.destroy(new Error("timed out"));
+    });
+    request.on("error", (err) => done(reject, err));
+    request.end();
+  });
+}
+
+// Redirects are followed by hand so every hop goes back through httpGet, and therefore back through
+// guardedLookup. Letting the http layer follow them would skip the check on every hop after the
+// first.
 async function fetchChecked(startUrl, headers = BROWSER_HEADERS) {
   let url = new URL(startUrl);
   for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
-    await assertPublic(url);
-    const response = await fetch(url, {
-      redirect: "manual",
-      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-      headers,
-    });
-    const location = response.headers.get("location");
+    const response = await httpGet(url, headers);
+    const location = response.headers.location;
     if (response.status >= 300 && response.status < 400 && location) {
       url = new URL(location, url);
       continue;
@@ -102,22 +157,6 @@ async function fetchChecked(startUrl, headers = BROWSER_HEADERS) {
     return { response, finalUrl: url };
   }
   throw new Error("too many redirects");
-}
-
-async function readCapped(response) {
-  const reader = response.body?.getReader();
-  if (!reader) return "";
-  const chunks = [];
-  let total = 0;
-  while (total < MAX_BYTES) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    chunks.push(value);
-    total += value.length;
-  }
-  // Release the socket rather than waiting for the rest of a page that is already past the cap.
-  await reader.cancel().catch(() => {});
-  return new TextDecoder("utf-8", { fatal: false }).decode(Buffer.concat(chunks.map(Buffer.from)));
 }
 
 const decodeEntities = (s) =>
@@ -155,8 +194,8 @@ const TWEET_RE = /^https?:\/\/(?:www\.)?(?:twitter|x)\.com\/([^/]+)\/status\/(\d
 async function tweetInfo(match) {
   const [, user, id] = match;
   const { response } = await fetchChecked(`https://api.vxtwitter.com/${user}/status/${id}`, API_HEADERS);
-  if (!response.ok) throw new Error(`vxtwitter ${response.status}`);
-  const d = JSON.parse(await readCapped(response));
+  if (response.status !== 200) throw new Error(`vxtwitter ${response.status}`);
+  const d = JSON.parse(response.body);
   const media = (d.media_extended ?? []).map((m) => m.type);
   const kinds = media.length ? ` [${[...new Set(media)].join(", ")}]` : "";
   return {
@@ -173,13 +212,13 @@ export async function fetchLinkInfo(url) {
     const tweet = TWEET_RE.exec(url);
     if (tweet) return await tweetInfo(tweet);
     const { response, finalUrl } = await fetchChecked(url);
-    if (!response.ok) return null;
-    const type = response.headers.get("content-type") ?? "";
+    if (response.status !== 200) return null;
+    const type = response.headers["content-type"] ?? "";
     if (!type.includes("html") && !type.includes("xml")) {
       // A direct file (PDF, image, video). The type is more informative than an absent title.
       return { site: finalUrl.hostname, title: `${type.split(";")[0] || "file"}`, description: "" };
     }
-    const html = await readCapped(response);
+    const html = response.body;
     const title =
       meta(html, "og:title") ?? meta(html, "twitter:title") ?? /<title[^>]*>([\s\S]*?)<\/title>/i.exec(html)?.[1];
     if (!title) return null;
