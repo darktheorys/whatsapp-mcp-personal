@@ -58,7 +58,7 @@ import {
   updateContact,
   updatePollState,
 } from "./store.mjs";
-import { connectionState, getSocket, logger, startWhatsApp } from "./whatsapp.mjs";
+import { connectionState, getSocket, logger, setDropNotifier, startWhatsApp } from "./whatsapp.mjs";
 
 const execFileAsync = promisify(execFile);
 
@@ -76,6 +76,10 @@ const MEDIA_KINDS = {
   stickerMessage: "sticker",
   audioMessage: "voice",
   videoMessage: "video",
+  // The round "video note". It carries the same body as a videoMessage (the proto reuses
+  // IVideoMessage for it), so it downloads and transcribes through exactly the same path — and
+  // before it was listed here it matched nothing and the whole message was dropped.
+  ptvMessage: "video",
 };
 // Resolved per call, not once at load: "/s2t-tier mid" has to take effect on the next voice note,
 // not on the next server restart.
@@ -512,20 +516,100 @@ function locationText(node, isLive) {
   return `[location${live}] ${coords}${where ? ` — ${where}` : ""}`;
 }
 
+// A shared contact. The display name is the useful part; the phone number is pulled out of the
+// vCard because "who sent me that number" is exactly the question this makes searchable. The rest
+// of the vCard (addresses, emails, photos) is deliberately left out — it would put a pile of a
+// third party's personal data into a searchable text column to no benefit.
+function contactText(node) {
+  const tel = /TEL[^:\n]*:([+\d\s()-]{5,})/i.exec(node.vcard ?? "")?.[1]?.trim();
+  return `[contact] ${node.displayName || "(unnamed)"}${tel ? ` ${tel}` : ""}`;
+}
+
+// WhatsApp has shipped five poll versions, all with the same {name, options[]} shape. Rendering
+// the question and the options means the poll is readable later even though this server cannot
+// decrypt the votes (that needs the messageSecret retained at send time).
+function pollText(node) {
+  const options = (node.options ?? []).map((o) => o.optionName).filter(Boolean);
+  return `[poll] ${node.name || "(no question)"}${options.length ? ` — ${options.join(" / ")}` : ""}`;
+}
+
+function eventText(node) {
+  const when = node.startTime
+    ? new Date(Number(node.startTime) * 1000).toISOString().slice(0, 16).replace("T", " ")
+    : null;
+  const parts = [node.name || "(unnamed event)", when, node.location?.name, node.description].filter(Boolean);
+  return `[event${node.isCanceled ? " cancelled" : ""}] ${parts.join(" — ")}`;
+}
+
+// Protocol plumbing rather than something a person sent, so these are legitimately not rows:
+// key distribution, receipts, the edit/delete envelope (handled by its own branch in
+// handleIncoming), poll votes (unreadable without the poll's retained messageSecret), and the
+// context sidecar that rides along with real content. Everything NOT in here that this function
+// does not render is reported as unsupported below rather than silently discarded.
+const NON_CONTENT_TYPES = new Set([
+  "protocolMessage",
+  "senderKeyDistributionMessage",
+  "fastRatchetKeySenderKeyDistributionMessage",
+  "messageContextInfo",
+  "reactionMessage",
+  "encReactionMessage",
+  "pollUpdateMessage",
+  "encEventResponseMessage",
+  "encCommentMessage",
+  "keepInChatMessage",
+  "placeholderMessage",
+  "botInvokeMessage",
+  "botTaskMessage",
+]);
+
 export function extractContent(m) {
   if (!m) return null;
   if (m.conversation) return { text: m.conversation };
   if (m.extendedTextMessage?.text) return { text: m.extendedTextMessage.text };
-  // Before the MEDIA_KINDS loop because these carry no media node at all. Without this a shared
-  // location matched nothing, fell through to null, and was dropped whole — no row, no inbox line,
-  // no wake — exactly the silent-drop failure the comment below describes for unknown wrappers.
+  // Sent from another of the owner's own linked devices. normalizeMessageContent does not unwrap
+  // this one, so without the recursion the real message inside it is invisible.
+  if (m.deviceSentMessage?.message) return extractContent(unwrapped(m.deviceSentMessage.message));
+  // These carry no downloadable body, so they are rendered to text here rather than going through
+  // MEDIA_KINDS — putting them there would send saveMedia off to download a message that has
+  // nothing to download and record the failure as if media had been lost.
   if (m.locationMessage) return { text: locationText(m.locationMessage, false) };
   if (m.liveLocationMessage) return { text: locationText(m.liveLocationMessage, true) };
+  if (m.contactMessage) return { text: contactText(m.contactMessage) };
+  if (m.contactsArrayMessage) {
+    const list = (m.contactsArrayMessage.contacts ?? []).map((c) => c.displayName).filter(Boolean);
+    return { text: `[contacts] ${list.length ? list.join(", ") : m.contactsArrayMessage.displayName || "(empty)"}` };
+  }
+  const poll =
+    m.pollCreationMessage ??
+    m.pollCreationMessageV2 ??
+    m.pollCreationMessageV3 ??
+    m.pollCreationMessageV4 ??
+    m.pollCreationMessageV5;
+  if (poll) return { text: pollText(poll) };
+  if (m.eventMessage) return { text: eventText(m.eventMessage) };
+  if (m.groupInviteMessage) {
+    const g = m.groupInviteMessage;
+    return { text: `[group invite] ${g.groupName || "(unnamed group)"}${g.caption ? ` — ${g.caption}` : ""}` };
+  }
+  if (m.albumMessage) {
+    const a = m.albumMessage;
+    return { text: `[album] ${a.expectedImageCount ?? 0} image(s), ${a.expectedVideoCount ?? 0} video(s)` };
+  }
   for (const [field, kind] of Object.entries(MEDIA_KINDS)) {
     // A caption is the whole point of keeping these: it survives even when the download fails.
     if (m[field]) return { text: m[field].caption ?? "", kind, node: m[field] };
   }
-  return null;
+  // The catch-all, and the reason it exists: WhatsApp's proto defines around sixty message types
+  // and this function renders a dozen. For most of this file's life every other one returned null
+  // here and the message was dropped whole — no row, no inbox line, no wake, no error — so the
+  // only way to find out was someone noticing on their phone that something never arrived. That
+  // is silent data loss, and it is worse than an ugly placeholder.
+  //
+  // Naming the type makes it queryable: searching "[unsupported:" shows which types are actually
+  // being received, and that is what should decide whether one is worth rendering properly, rather
+  // than guessing from the sixty in the proto.
+  const unknown = Object.keys(m).find((k) => m[k] && !NON_CONTENT_TYPES.has(k));
+  return unknown ? { text: `[unsupported: ${unknown}]`, unsupported: unknown } : null;
 }
 
 // contextInfo (and with it, the quoted message) can live on any message-type node, not just
@@ -866,6 +950,16 @@ async function handleIncoming(waMessage) {
   const viewOnce = isViewOnce(waMessage.message);
   const content = extractContent(unwrapped(waMessage.message));
   if (!content) return;
+  // Reported, not just stored: a placeholder row tells you afterwards that something arrived in a
+  // shape this server cannot read, but only a notification tells you while there is still a person
+  // around to go and look at the actual message on their phone.
+  if (content.unsupported) {
+    logger.warn({ jid, type: content.unsupported }, "logged a message type this server cannot render");
+    notify("warning", `received an unsupported message type: ${content.unsupported}`, {
+      jid,
+      type: content.unsupported,
+    });
+  }
   // Only Burak's own device can flip wake level for a chat — a group member typing this shouldn't
   // be able to silence or unsilence the bot for everyone else.
   if (key.fromMe) {
@@ -1162,6 +1256,36 @@ function notify(level, message, data = {}) {
     // Not connected yet (startup) or the client never negotiated logging. The file log still has it.
   }
 }
+
+// Baileys losing an inbound message is the one failure worth interrupting someone for: the message
+// is gone, this server cannot ask for it again (Baileys only delivers to a live socket), and the
+// only remaining copy is on the owner's phone. So this goes to the wake feed as well as the
+// protocol log — a notification nobody is listening for is how the last one went unnoticed for days.
+//
+// Throttled: a bad batch produces a burst of these, and sixty wake lines about one incident is
+// worse than one. First in a window wins, the rest are counted into the next.
+const DROP_REPORT_WINDOW_MS = 60_000;
+let lastDropReport = 0;
+let suppressedDrops = 0;
+setDropNotifier((message) => {
+  const now = Date.now();
+  if (now - lastDropReport < DROP_REPORT_WINDOW_MS) {
+    suppressedDrops++;
+    return;
+  }
+  const alsoSuppressed = suppressedDrops;
+  lastDropReport = now;
+  suppressedDrops = 0;
+  const suffix = alsoSuppressed ? ` (+${alsoSuppressed} more in the last minute)` : "";
+  notify("error", `WhatsApp dropped an inbound message: ${message}${suffix}`, { reason: message, alsoSuppressed });
+  // Deliberately not queueWake: this is not tied to a chat, and it must not wait behind the
+  // presence debounce. Straight to the file the Monitor tails.
+  logInbox(
+    "(server)",
+    "⚠️ inbound message lost",
+    `${message}${suffix} — only the phone has it now; this server cannot recover it`,
+  );
+});
 
 server.registerTool(
   "wa_status",

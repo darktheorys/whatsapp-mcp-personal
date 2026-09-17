@@ -75,6 +75,90 @@ assert.match(
   "a location without coordinates still logs rather than throwing",
 );
 
+// The round video note reuses IVideoMessage, so it must reach the same download+transcribe path.
+assert.equal(extractContent({ ptvMessage: {} }).kind, "video", "a video note is carried as video");
+
+// Types that carry no downloadable body and so must render to text rather than claim a media kind.
+assert.match(
+  extractContent({
+    contactMessage: { displayName: "Ali", vcard: "BEGIN:VCARD\nTEL;type=CELL:+90 532 111 22 33\nEND:VCARD" },
+  }).text,
+  /^\[contact\] Ali \+90 532 111 22 33$/,
+  "a shared contact renders name and number out of the vCard",
+);
+assert.equal(
+  extractContent({ contactMessage: { displayName: "Ali" } }).text,
+  "[contact] Ali",
+  "a vCard with no TEL line still renders, without a trailing separator",
+);
+assert.match(
+  extractContent({ contactsArrayMessage: { contacts: [{ displayName: "Ali" }, { displayName: "Veli" }] } }).text,
+  /^\[contacts\] Ali, Veli$/,
+  "a contacts array lists the names",
+);
+assert.match(
+  extractContent({
+    pollCreationMessageV3: { name: "Nereye?", options: [{ optionName: "Lidl" }, { optionName: "Rossmann" }] },
+  }).text,
+  /^\[poll\] Nereye\? — Lidl \/ Rossmann$/,
+  "polls render question and options, on any of the five versions",
+);
+assert.match(
+  extractContent({ groupInviteMessage: { groupName: "Kahve" } }).text,
+  /^\[group invite\] Kahve$/,
+  "a group invite names the group",
+);
+assert.match(
+  extractContent({ eventMessage: { name: "Toplantı", isCanceled: true } }).text,
+  /^\[event cancelled\] Toplantı$/,
+  "a cancelled event says so",
+);
+assert.match(
+  extractContent({ albumMessage: { expectedImageCount: 3 } }).text,
+  /3 image/,
+  "an album reports its counts",
+);
+
+// A message from another of the owner's own linked devices wraps the real one; without unwrapping
+// it the inner message is invisible.
+assert.equal(
+  extractContent({ deviceSentMessage: { message: { conversation: "from my laptop" } } }).text,
+  "from my laptop",
+  "deviceSentMessage is unwrapped to the message inside it",
+);
+
+// The catch-all. This is the regression guard for the whole silent-drop class: an unrecognised
+// type must produce a named, searchable row, never null.
+const unknown = extractContent({ someFutureMessageTypeWhatsAppInvents: { x: 1 } });
+assert.equal(
+  unknown.text,
+  "[unsupported: someFutureMessageTypeWhatsAppInvents]",
+  "unknown types are named, not dropped",
+);
+assert.equal(unknown.unsupported, "someFutureMessageTypeWhatsAppInvents", "and flagged so the server can report them");
+
+// ...but protocol plumbing must still be dropped, or every key-exchange and receipt becomes a row.
+for (const noise of [
+  "protocolMessage",
+  "senderKeyDistributionMessage",
+  "messageContextInfo",
+  "reactionMessage",
+  "pollUpdateMessage",
+]) {
+  assert.equal(extractContent({ [noise]: {} }), null, `${noise} is protocol plumbing, not a message`);
+}
+// A sidecar riding along with real content must not mask the content or trigger the catch-all.
+assert.equal(
+  extractContent({ messageContextInfo: { deviceListMetadata: {} }, conversation: "hi" }).text,
+  "hi",
+  "messageContextInfo alongside real text does not shadow it",
+);
+assert.equal(
+  extractContent({ protocolMessage: {}, imageMessage: { caption: "bak" } }).kind,
+  "image",
+  "nor does it mask media",
+);
+
 // The caption is the part that has to survive even if the download later fails.
 const img = extractContent({ imageMessage: { caption: "look", mimetype: "image/jpeg" } });
 assert.equal(img.kind, "image");
@@ -435,6 +519,27 @@ assert.deepEqual(
 );
 appendMessage(STATS, { direction: "out", text: "pardon geç gördüm", ts: Date.now(), id: "S4" });
 assert.deepEqual(unansweredChats([STATS], 1 * H), [], "answering it takes it off the list");
+
+// Baileys reports a lost inbound message by logging it and carrying on — no event, no throw, and
+// the message never reaches messages.upsert. The log stream is therefore the only place a drop is
+// observable, so this asserts the detector reads it. Setting the notifier here also replaces the
+// one server.mjs installed, which keeps these synthetic lines out of the real inbox feed.
+//
+// Child loggers are asserted deliberately: Baileys logs through `logger.child(...)` internally, and
+// a detector that only saw the parent would miss every real drop while passing a naive test.
+{
+  const { logger: waLogger, setDropNotifier } = await import("./src/whatsapp.mjs");
+  const seen = [];
+  setDropNotifier((msg) => seen.push(msg));
+  waLogger.error({}, "failed to decrypt message");
+  waLogger.child({ class: "baileys" }).error({}, "unexpected error in 'processing offline notification'");
+  waLogger.warn({}, "an ordinary warning that is not a dropped message");
+  assert.equal(seen.length, 2, "only drop signatures are reported, not every warning");
+  assert.ok(
+    seen.some((m) => m.includes("processing offline notification")),
+    "a drop logged through a child logger is still caught",
+  );
+}
 
 // Runs last: it deliberately exhausts the window, so anything after it would see a full budget.
 let sent = 0;

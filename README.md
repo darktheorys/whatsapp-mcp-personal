@@ -174,6 +174,24 @@ Both directions run entirely offline, no API keys:
   transcribing it means downloading the pictures too — and the 25 MB media cap means long videos
   are skipped and never transcribed.
 
+## Nothing arrives silently
+
+Two things used to make a message disappear with no trace at all, and both now leave one.
+
+**Unreadable message types.** WhatsApp has around sixty message types and this server renders a
+dozen of them properly (text, image, video, video note, voice, document, sticker, location, contact,
+poll, event, group invite, album). Anything else is logged as `[unsupported: <typeName>]` instead of
+being discarded, so it shows up in `wa_recent`/`wa_search` and as a warning. Search for
+`[unsupported:` to see which types you're actually being sent, which is the only sensible basis for
+deciding whether one is worth rendering properly.
+
+**Messages Baileys loses.** When WhatsApp delivers a batch Baileys can't decrypt or parse, it logs
+the failure and moves on — the message never reaches this server at all. That's unrecoverable
+(Baileys only delivers to a live socket, so a reconnect won't backfill it) and the only copy left is
+on your phone. The server now watches its own log stream for those failures and writes a
+`⚠️ inbound message lost` line into `state/inbox.log`, so a session wakes and tells you at the time
+instead of you discovering it days later. Bursts are throttled to one report a minute with a count.
+
 ## Reading images and documents
 
 The same bargain as voice, for things that arrive as pictures instead of sound: an inbound image is
