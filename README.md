@@ -9,10 +9,12 @@ Nothing is written to `~`, nothing reads from any other repo.
 
 ## What it does, and does not, do
 
-- DMs and groups, both allowlisted the same way. Text, images, documents, stickers, and voice
-  notes. Images/documents/stickers download to `state/media/`. Voice notes download too, then get
-  transcribed locally (see Voice below) so they show up as readable text, not a `[voice]` blob.
-  Video is still dropped.
+- DMs and groups, both allowlisted the same way. Text, images, documents, stickers, voice notes,
+  video and video notes, locations, contacts, polls, events, group invites and albums.
+  Images/documents/stickers/video download to `state/media/`. Voice notes and video get transcribed
+  locally (see Voice below) so they show up as readable text, not a `[voice]` blob; images and PDFs
+  get their text read out on-device. Anything WhatsApp invents next is logged as
+  `[unsupported: <type>]` rather than dropped — see "Nothing arrives silently".
 - Reactions are logged too, with a `to` field naming the message they are attached to. Taking a
   reaction back arrives as an empty emoji and is recorded as `removed: true`.
 - A caption is logged even when its download fails or the file exceeds the cap, so the words
@@ -202,6 +204,31 @@ Manage it with `wa_schedule` (`action: "list" | "set" | "remove"`). `lastRun` re
 *occurrence* a task ran for rather than the moment it fired, so a catch-up run at 10:40 still counts
 as "ran for 10:03" and can't fire again at 10:41 — and editing a task's prompt doesn't resend
 something that already went out today.
+
+## Links get their titles
+
+An inbound message containing a URL has the page's title and site appended to it, the same way OCR
+text is appended to an image:
+
+```
+dayı şuna bak https://x.com/sleimmm/status/2099988085198970951?s=48
+[link: x.com] @sleimmm
+Napolyon itüye gelemiyor [video]
+```
+
+So a history full of opaque `x.com/.../status/2099…` strings becomes searchable by what the links
+actually are. x.com is special-cased through vxtwitter's read-only JSON, since x.com itself serves
+nothing useful without authentication.
+
+**This is the one thing on the inbound path that reaches outside the machine**, and it's worth being
+clear about the cost: fetching a link tells that server the message arrived, and from which IP. A
+sender who controls the host learns their message landed even if you never open it. Add a chat to
+`no_link_preview_jids` in `state/config.json` to turn it off there.
+
+Links from chat members are untrusted input, so the fetcher refuses anything resolving to a private,
+loopback, link-local or carrier-NAT address (cloud metadata endpoints included), allows only
+http/https, and re-checks every redirect hop by hand rather than letting `fetch` follow them past
+the check. Capped at two links per message, 6s and 256KB each.
 
 ## Nothing arrives silently
 

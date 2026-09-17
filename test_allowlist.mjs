@@ -607,11 +607,50 @@ assert.deepEqual(unansweredChats([STATS], 1 * H), [], "answering it takes it off
   assert.equal(removeTask("daily-digest"), false, "removing a missing task reports it rather than throwing");
 }
 
+// Link enrichment. Deliberately no network here: a unit suite that reaches the internet is a suite
+// that fails on a train. The SSRF cases below use literal IPs, which are rejected before any
+// lookup, so they assert the guard rather than the absence of a connection.
+{
+  const { extractUrls, fetchLinkInfo, renderLinkInfo } = await import("./src/linkinfo.mjs");
+
+  assert.deepEqual(extractUrls("bak https://x.com/a/status/123?s=48 buna"), ["https://x.com/a/status/123?s=48"]);
+  assert.deepEqual(extractUrls("no links here"), [], "text without a url yields nothing to fetch");
+  assert.deepEqual(extractUrls(null), [], "a media row with null text must not throw");
+  // Trailing punctuation is far likelier to end a sentence than a URL.
+  assert.deepEqual(extractUrls("see https://a.com/x."), ["https://a.com/x"], "trailing period is trimmed");
+  assert.deepEqual(extractUrls("(https://a.com/x)"), ["https://a.com/x"], "a wrapping paren is trimmed");
+  assert.equal(extractUrls("https://a.com/1 https://b.com/2 https://c.com/3").length, 2, "capped per message");
+  assert.deepEqual(extractUrls("https://a.com/x and https://a.com/x again"), ["https://a.com/x"], "deduplicated");
+
+  // A link is untrusted input from whoever is in the chat, so it is an instruction to make this
+  // server issue a request. These must never leave the machine.
+  for (const blocked of [
+    "http://169.254.169.254/latest/meta-data/", // cloud metadata, the classic target
+    "http://127.0.0.1:8080/",
+    "http://10.0.0.5/",
+    "http://192.168.1.1/",
+    "http://172.16.0.1/",
+    "http://[::1]/",
+    "file:///etc/passwd",
+    "ftp://example.com/x",
+  ]) {
+    assert.equal(await fetchLinkInfo(blocked), null, `must refuse ${blocked}`);
+  }
+
+  assert.equal(renderLinkInfo(null), null, "a failed fetch renders nothing rather than an empty marker");
+  assert.equal(renderLinkInfo({ site: "x.com", title: "@a", description: "" }), "[link: x.com] @a");
+  assert.equal(
+    renderLinkInfo({ site: "x.com", title: "@a", description: "hi" }),
+    "[link: x.com] @a\nhi",
+    "description goes on its own line, and the marker names the source like [text in image] does",
+  );
+}
+
 // Runs last: it deliberately exhausts the window, so anything after it would see a full budget.
 let sent = 0;
 while (!overSendLimit()) sent++;
 assert.equal(sent, 20, "rate limit allows exactly 20 sends per minute, then refuses");
 
 console.log(
-  "ok — allowlist, media naming, command regexes, quotes, secret scan, edit/delete ownership guard, sendable-source guard, sqlite store, search folding, stats, message-type coverage, drop detection, scheduling and rate limit",
+  "ok — allowlist, media naming, command regexes, quotes, secret scan, edit/delete ownership guard, sendable-source guard, sqlite store, search folding, stats, message-type coverage, drop detection, scheduling, link enrichment and rate limit",
 );
