@@ -22,6 +22,7 @@ import {
   loanwordRespellings,
   MEDIA_DIR,
   MEMES_DIR,
+  STICKERS_DIR,
   ownerName,
   PIPER_VOICES,
   removeFromAllowlist,
@@ -154,7 +155,7 @@ const SENTENCE_SILENCE = "0.35"; // seconds of gap after each sentence (Piper de
 // machine shares — browser downloads, other tools' scratch files — which is far wider than
 // "produced during this run", while *excluding* the one directory Claude Code actually writes to.
 // `/private/tmp/claude-<uid>` is that directory (see .claude/deny-outside-repo.sh).
-const SENDABLE_DIRS = [MEMES_DIR, `/private/tmp/claude-${process.getuid()}`];
+const SENDABLE_DIRS = [MEMES_DIR, STICKERS_DIR, `/private/tmp/claude-${process.getuid()}`];
 
 // Resolves symlinks first: a link inside a sendable dir pointing at ~/.ssh would otherwise pass a
 // plain string-prefix test.
@@ -2132,6 +2133,58 @@ server.registerTool(
     return {
       content: [{ type: "text", text: `Sent text to ${to} (bypassed voice-only).` }],
     };
+  },
+);
+
+server.registerTool(
+  "wa_send_sticker",
+  {
+    title: "Send a WhatsApp sticker",
+    description:
+      "Send a sticker from the library in state/stickers/. Stickers must be 512x512 WebP — build " +
+      "one from any image or clip with the meme-tools make_sticker.py script, which handles the " +
+      "format and WhatsApp's size limits. A sticker carries no caption by design; send text " +
+      "separately if something needs saying. Prefer a sticker over a meme video when the joke is " +
+      "one beat rather than a scene.",
+    inputSchema: {
+      to: z.string().describe("Recipient JID, e.g. 491701234567@s.whatsapp.net"),
+      path: z.string().describe("Path to the .webp sticker, normally state/stickers/<name>.webp"),
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+  },
+  async ({ to, path }) => {
+    const refusal = guardSend(to);
+    if (refusal) return refusal;
+    const { real, error: pathError } = resolveSendable(path);
+    if (pathError) {
+      return { isError: true, content: [{ type: "text", text: `Refused: ${pathError}.` }] };
+    }
+    // Checked rather than assumed: WhatsApp rejects a non-WebP sticker outright instead of
+    // converting it, and the failure surfaces as a silent no-show in the chat rather than an error
+    // here — far easier to catch at the door.
+    if (!real.toLowerCase().endsWith(".webp")) {
+      return {
+        isError: true,
+        content: [{ type: "text", text: "Refused: a sticker must be a .webp file (build one with make_sticker.py)." }],
+      };
+    }
+    let buffer;
+    try {
+      buffer = readFileSync(real);
+    } catch (err) {
+      return { isError: true, content: [{ type: "text", text: `Could not read ${path}: ${err}` }] };
+    }
+    const sent = await getSocket().sendMessage(to, { sticker: buffer });
+    appendMessage(to, {
+      direction: "out",
+      by: "claude",
+      // No ATTRIBUTION: a sticker has no caption field to put it in. The `by` tag above is what
+      // marks this as Claude's for wa_edit/wa_delete and for the reply-detection in handleIncoming.
+      text: `[sticker] ${basename(real)}`,
+      ts: Date.now(),
+      id: sent?.key?.id ?? null,
+    });
+    return { content: [{ type: "text", text: `Sent sticker ${basename(real)} to ${to}.` }] };
   },
 );
 
