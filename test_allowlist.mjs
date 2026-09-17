@@ -28,6 +28,20 @@ assert.equal(hasImageDisabled(GROUP), false, "unlisted jid keeps images enabled"
 assert.equal(isMentionOnly(GROUP), true, "mention_only_jids gates a listed jid");
 assert.equal(isMentionOnly(DM), false, "unlisted jid stays verbose");
 
+// Every key defaultConfig() declares must survive loadConfig(), which whitelists them one by one
+// rather than merging. This has now broken twice: the first time a missing key silently read as
+// undefined so a gate never gated, the second time a gate called .includes() on undefined and threw
+// inside handleIncoming — which safely() caught, so messages were dropped with only a log line.
+// Adding a setting in two places and forgetting the third is evidently easy, so assert it instead.
+{
+  const { loadConfig, defaultConfigForTest } = await import("./src/config.mjs");
+  writeFileSync(cfg, JSON.stringify({ allowlist: [DM] })); // a config predating every later setting
+  const loaded = loadConfig();
+  for (const key of Object.keys(defaultConfigForTest())) {
+    assert.notEqual(loaded[key], undefined, `loadConfig drops ${key}, which defaultConfig declares`);
+  }
+}
+
 // Restore the plain allowlist-only config for the rest of the allowedJid assertions below.
 writeFileSync(cfg, JSON.stringify({ allowlist: [DM, GROUP] }));
 

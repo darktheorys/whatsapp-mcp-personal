@@ -198,6 +198,10 @@ export const PIPER_VOICES = {
   },
 };
 
+// Exported for the test that asserts loadConfig() below carries every key this declares. The two
+// have drifted twice; a bare `export` on defaultConfig would invite callers to use it as config.
+export { defaultConfig as defaultConfigForTest };
+
 export function loadConfig() {
   ensureDirs();
   if (!existsSync(CONFIG_PATH)) {
@@ -210,6 +214,7 @@ export function loadConfig() {
     allowlist: Array.isArray(raw.allowlist) ? raw.allowlist : [],
     no_image_jids: Array.isArray(raw.no_image_jids) ? raw.no_image_jids : [],
     no_voice_jids: Array.isArray(raw.no_voice_jids) ? raw.no_voice_jids : [],
+    no_link_preview_jids: Array.isArray(raw.no_link_preview_jids) ? raw.no_link_preview_jids : [],
     mention_only_jids: Array.isArray(raw.mention_only_jids) ? raw.mention_only_jids : [],
     voice_only_jids: Array.isArray(raw.voice_only_jids) ? raw.voice_only_jids : [],
     owner_name: typeof raw.owner_name === "string" ? raw.owner_name : "Me",
