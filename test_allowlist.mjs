@@ -353,6 +353,7 @@ const {
   archiveOldMessages,
   findMessage,
   chatStats,
+  participantStats,
   threadOf,
   unansweredChats,
   normalizeForSearch,
@@ -565,6 +566,50 @@ assert.deepEqual(unansweredChats([STATS], 1 * H), [], "answering it takes it off
     seen.some((m) => m.includes("processing offline notification")),
     "a drop logged through a child logger is still caught",
   );
+}
+
+// Per-sender breakdown of a group. chatStats splits a chat into you-and-everyone-else, which is
+// right for a DM and useless for a group of five.
+{
+  const G = "120363000000000001@g.us";
+  const t0 = Date.UTC(2026, 0, 5, 12, 0, 0);
+  appendMessage(G, { direction: "in", text: "a", ts: t0, id: "G1", from: "111@s.whatsapp.net", name: "Ali" });
+  appendMessage(G, { direction: "in", text: "b", ts: t0 + 60_000, id: "G2", from: "111@s.whatsapp.net", name: "Ali" });
+  appendMessage(G, {
+    direction: "in",
+    text: "c",
+    ts: t0 + 120_000,
+    id: "G3",
+    from: "222@s.whatsapp.net",
+    name: "Veli",
+  });
+  appendMessage(G, { direction: "out", text: "d", ts: t0 + 180_000, id: "G4" });
+  // Reactions are not turns in a conversation and must not inflate anyone's count.
+  appendMessage(G, {
+    direction: "in",
+    kind: "reaction",
+    text: "👀",
+    to: "G1",
+    ts: t0 + 5000,
+    from: "222@s.whatsapp.net",
+  });
+
+  const { participants, total } = participantStats(G);
+  assert.equal(total, 4, "reactions excluded from the group total");
+  assert.deepEqual(
+    participants.map((p) => [p.who, p.messages]),
+    [
+      ["111@s.whatsapp.net", 2],
+      ["222@s.whatsapp.net", 1],
+      ["(you)", 1],
+    ],
+    "one row per sender, busiest first, own messages as their own bucket",
+  );
+  assert.equal(participants[0].name, "Ali", "pushName is carried as a label");
+  assert.equal(participants[0].share, 50, "share is a percentage of the group total");
+  assert.equal(participants[0].started, 1, "the first message after a gap counts as a conversation start");
+  assert.equal(participants[1].started, 0, "a reply mid-conversation does not");
+  assert.deepEqual(participantStats("120363000000000009@g.us"), { total: 0, participants: [] }, "empty group is empty");
 }
 
 // Thread reconstruction. The shape under test is a branching chain, because a message can have

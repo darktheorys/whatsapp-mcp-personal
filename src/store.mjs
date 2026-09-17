@@ -403,6 +403,67 @@ export function chatStats(jid, sinceMs = null, untilMs = null) {
   };
 }
 
+// Who actually talks in a group. chatStats treats a chat as two sides — you and everyone else —
+// which is the right shape for a DM and useless for a group of five. This splits the "them" half by
+// sender.
+//
+// `from` is the resolved participant written by handleIncoming (a group message's sender is only
+// knowable from key.participant, and arrives as an opaque @lid until resolveSender maps it). Own
+// messages have no `from`, so they are counted separately rather than lumped into an "unknown".
+//
+// `name` is pushName — free text the sender chooses — so it is reported as a label and never used
+// as an identity. The jid is the identity.
+export function participantStats(jid, sinceMs = null) {
+  const rows = getDb()
+    .prepare(
+      `SELECT ts, direction, json_extract(json, '$.from') AS who, json_extract(json, '$.name') AS name
+       FROM messages
+       WHERE jid = ? AND kind IS NULL AND direction IS NOT NULL AND ts >= ?
+       ORDER BY ts, rowid`,
+    )
+    .all(jid, sinceMs ?? 0);
+  if (rows.length === 0) return { total: 0, participants: [] };
+
+  const people = new Map();
+  const get = (key, name) => {
+    if (!people.has(key)) {
+      people.set(key, {
+        who: key,
+        name: name ?? null,
+        messages: 0,
+        started: 0,
+        firstTs: null,
+        lastTs: null,
+        byHour: Array(24).fill(0),
+      });
+    }
+    const p = people.get(key);
+    // Last non-null pushName wins: people change them, and the recent one is the useful label.
+    if (name) p.name = name;
+    return p;
+  };
+
+  let prev = null;
+  for (const row of rows) {
+    // An outbound row is the owner; an inbound one without `from` is a DM-shaped row in a group,
+    // which should not happen but must not become a phantom participant if it does.
+    const key = row.direction === "out" ? "(you)" : (row.who ?? "(unknown)");
+    const p = get(key, row.name);
+    p.messages++;
+    p.byHour[new Date(row.ts).getHours()]++;
+    p.firstTs ??= row.ts;
+    p.lastTs = row.ts;
+    if (!prev || row.ts - prev.ts > CONVERSATION_GAP_MS) p.started++;
+    prev = row;
+  }
+
+  const total = rows.length;
+  const participants = [...people.values()]
+    .map((p) => ({ ...p, share: Math.round((p.messages / total) * 1000) / 10 }))
+    .sort((a, b) => b.messages - a.messages);
+  return { total, firstTs: rows[0].ts, lastTs: rows[rows.length - 1].ts, participants };
+}
+
 // Chats whose last word was theirs, long enough ago that it reads as unanswered rather than as a
 // conversation still in progress. Deliberately not a judgement about whether a reply was *needed* —
 // plenty of messages rightly end a thread. It surfaces candidates; the reading is the caller's.
