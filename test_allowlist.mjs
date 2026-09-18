@@ -61,6 +61,10 @@ process.env.WA_DB_PATH = join(mkdtempSync(join(tmpdir(), "wa-db-")), "test.db");
 // touch (or fire) the real schedule.
 process.env.WA_SCHEDULE_PATH = join(mkdtempSync(join(tmpdir(), "wa-sched-")), "schedule.json");
 
+// Same again: polls.mjs holds poll secrets, and a test writing to the real file would put fake
+// secrets alongside real ones this server might still need to decrypt live votes with.
+process.env.WA_POLLS_PATH = join(mkdtempSync(join(tmpdir(), "wa-polls-")), "polls.json");
+
 // WA_NO_CONNECT keeps the import from opening a WhatsApp socket and evicting the live server.
 process.env.WA_NO_CONNECT = "1";
 const { extractContent, mediaName } = await import("./src/server.mjs");
@@ -623,6 +627,53 @@ assert.deepEqual(unansweredChats([STATS], 1 * H), [], "answering it takes it off
   assert.deepEqual(participantStats("120363000000000009@g.us"), { total: 0, participants: [] }, "empty group is empty");
 }
 
+// Poll persistence. What is under test here is our own bookkeeping (the secret survives, the
+// reconstructed message is the shape Baileys' decrypt functions need, an unknown poll no-ops) — not
+// the vote decryption itself, which is Baileys' own crypto and not something worth re-testing here.
+{
+  const { savePoll, getPoll, pollCreationMessageFor, saveTally, renderTally } = await import("./src/polls.mjs");
+  const secret = Buffer.from("0".repeat(64), "hex"); // 32 bytes, fixed so the round-trip is exact
+
+  savePoll("999@s.whatsapp.net", "P1", {
+    name: "Hangi renk?",
+    values: ["kırmızı", "mavi"],
+    selectableCount: 1,
+    secret,
+  });
+  const entry = getPoll("P1");
+  assert.equal(entry.name, "Hangi renk?");
+  assert.deepEqual(entry.values, ["kırmızı", "mavi"]);
+  assert.equal(entry.tally, null, "no votes yet");
+  assert.equal(getPoll("nonexistent"), null, "an unknown poll id is null, not a throw");
+
+  // The exact shape Baileys' getAggregateVotesInPollMessage/decryptPollVote need back: options as
+  // {optionName}, and the secret as a real Buffer (not the base64 string it is persisted as) inside
+  // messageContextInfo, which is where Baileys itself puts it on a message it sends.
+  const reconstructed = pollCreationMessageFor(entry);
+  assert.deepEqual(reconstructed.pollCreationMessage.options, [{ optionName: "kırmızı" }, { optionName: "mavi" }]);
+  assert.ok(Buffer.isBuffer(reconstructed.messageContextInfo.messageSecret), "secret round-trips as a Buffer");
+  assert.ok(
+    reconstructed.messageContextInfo.messageSecret.equals(secret),
+    "and the exact bytes survive base64 round-trip",
+  );
+
+  assert.equal(renderTally(entry), "[poll] Hangi renk? — no votes yet");
+  saveTally("P1", [
+    { name: "kırmızı", voters: ["a@s.whatsapp.net"] },
+    { name: "mavi", voters: [] },
+  ]);
+  assert.equal(
+    renderTally(getPoll("P1")),
+    "[poll] Hangi renk? — kırmızı: 1, mavi: 0",
+    "tally renders per-option vote counts",
+  );
+
+  // A vote update for a poll this server never created (or created before this feature existed)
+  // must be a silent no-op, not an attempt to write into an entry that doesn't exist.
+  saveTally("never-created", [{ name: "x", voters: ["a"] }]);
+  assert.equal(getPoll("never-created"), null, "tallying an unknown poll id creates nothing");
+}
+
 // Thread reconstruction. The shape under test is a branching chain, because a message can have
 // several replies and each of those its own — a walk that only followed one would look correct on a
 // straight-line conversation and silently lose half of a real one.
@@ -781,5 +832,5 @@ while (!overSendLimit()) sent++;
 assert.equal(sent, 20, "rate limit allows exactly 20 sends per minute, then refuses");
 
 console.log(
-  "ok — allowlist, media naming, command regexes, quotes, secret scan, edit/delete ownership guard, sendable-source guard, sqlite store, search folding, stats, threads, message-type coverage, drop detection, scheduling, link enrichment and rate limit",
+  "ok — allowlist, media naming, command regexes, quotes, secret scan, edit/delete ownership guard, sendable-source guard, sqlite store, search folding, stats, threads, polls, message-type coverage, drop detection, scheduling, link enrichment and rate limit",
 );

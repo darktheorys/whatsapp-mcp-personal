@@ -79,7 +79,7 @@ const safely = (fn, arg, what) => Promise.resolve(fn?.(arg)).catch((err) => logg
 // `onNotice(level, message, data)` is optional and lets the MCP layer forward connection events to
 // the client as protocol log notifications. This module deliberately knows nothing about MCP — it
 // gets a callback, not a server — so importing it stays free of protocol concerns.
-export async function startWhatsApp({ onMessage, onReaction, onPresence, onNotice }) {
+export async function startWhatsApp({ onMessage, onReaction, onPresence, onNotice, onPollUpdate, getMessage }) {
   const notice = (level, message, data) => {
     try {
       onNotice?.(level, message, data);
@@ -104,6 +104,11 @@ export async function startWhatsApp({ onMessage, onReaction, onPresence, onNotic
     // Notifications on the phone are the owner's signal that something needs dealing with, and
     // nothing here is worth costing them that.
     markOnlineOnConnect: false,
+    // Only wired up for polls this server sent: decrypting a vote update needs the *original*
+    // poll message back (name, options, messageSecret), by key. Optional -- when omitted Baileys
+    // simply cannot decrypt anything needing history, which is the same as today for everything
+    // that is not a poll.
+    getMessage: getMessage ?? undefined,
   });
   sock = thisSock;
 
@@ -168,7 +173,7 @@ export async function startWhatsApp({ onMessage, onReaction, onPresence, onNotic
       setTimeout(() => {
         // onNotice included: dropping it here would silence connection reporting from the first
         // reconnect onward, exactly when it starts being worth having.
-        startWhatsApp({ onMessage, onReaction, onPresence, onNotice }).catch((err) =>
+        startWhatsApp({ onMessage, onReaction, onPresence, onNotice, onPollUpdate, getMessage }).catch((err) =>
           logger.error(err, "reconnect failed"),
         );
       }, 3000);
@@ -193,6 +198,17 @@ export async function startWhatsApp({ onMessage, onReaction, onPresence, onNotic
     thisSock.ev.on("presence.update", (update) => {
       if (getSocket() !== thisSock) return;
       safely(onPresence, update, "onPresence");
+    });
+  }
+
+  // Vote updates (and edits/deletes, which arrive the same way) land here, not in messages.upsert.
+  // Baileys has already attempted decryption by this point using the getMessage callback above, so
+  // by the time this fires update.update.pollUpdates either holds real votes or is absent entirely
+  // -- there is nothing further to decrypt at this layer, only to aggregate.
+  if (onPollUpdate) {
+    thisSock.ev.on("messages.update", (updates) => {
+      if (getSocket() !== thisSock) return;
+      for (const u of updates) safely(onPollUpdate, u, "onPollUpdate");
     });
   }
 

@@ -430,6 +430,8 @@ MCP server connected in only one session at a time.
 | `wa_recent`         | `{ jid?, limit?, all? }` — recent logged messages for one allowed chat. Omitting `jid` returns per-chat unread counts only, never text.    |
 | `wa_search`         | `{ jid, query, limit? }` — substring search over one chat's active + archived messages, case- and diacritic-insensitive (`seker` finds `şeker`). |
 | `wa_stats`          | `{ jid?, days?, compare?, unanswered?, unansweredHours? }` — volume, reply times, activity by hour/weekday, who starts conversations. `compare` measures the equally-long window before `days` and reports the change. Counts only, never text, so it is safe across all chats at once. |
+| `wa_send_poll`      | `{ to, name, values, selectableCount? }` — creates a poll. Returns a message id; votes can only be read back for polls sent this way (see below). |
+| `wa_poll_results`   | `{ jid, messageId }` — current vote tally for a poll `wa_send_poll` created. |
 | `wa_thread`         | `{ jid, messageId }` — the whole reply chain around a message, in time order: what it replied to, and everything that replied to it. Spans archived messages. |
 | `wa_schedule`       | `{ action, id?, at?, days?, prompt?, enabled?, catchUpMinutes? }` — recurring tasks the **server** fires, surviving restarts and sessions. See "Scheduled work" below. |
 
