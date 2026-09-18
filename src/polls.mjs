@@ -13,6 +13,9 @@ import { STATE_DIR } from "./config.mjs";
 // the same shape as schedule.json/poll-state.json, not a growing log of rows.
 const POLLS_FILE = process.env.WA_POLLS_PATH ?? join(STATE_DIR, "polls.json");
 
+// Lenient: used by every *read* path (getPoll, pollCreationMessageFor's caller, the getMessage
+// callback Baileys calls mid-decrypt). A corrupt file degrading one read to "not found" is the
+// accepted failure mode the comment below describes — a vote fails to decrypt this one time.
 function readAll() {
   if (!existsSync(POLLS_FILE)) return {};
   try {
@@ -26,6 +29,25 @@ function readAll() {
   }
 }
 
+// Strict: used only by every *write* path (savePoll, saveTally). The distinction from readAll above
+// is load-bearing, not stylistic. A write is read-modify-write — read the whole file, patch one
+// entry, write the whole file back — and readAll's {} fallback on a parse failure is safe for a
+// read (one vote fails to decrypt) but catastrophic for a write: the empty object doesn't stay
+// empty, it gets one new entry added and is then written back as the *entire* file, permanently
+// erasing every other poll's secret that was sitting in the part that failed to parse. A poll's
+// secret cannot be regenerated once the poll is out — WhatsApp already has it with the original
+// secret baked in — so this is not a bug that degrades gracefully, it is silent, unrecoverable data
+// loss of the one thing this module exists to prevent losing. Throwing here instead means a corrupt
+// file blocks the one write that would have destroyed it, rather than completing the destruction.
+function readAllForWrite() {
+  if (!existsSync(POLLS_FILE)) return {};
+  try {
+    return JSON.parse(readFileSync(POLLS_FILE, "utf8"));
+  } catch (err) {
+    throw new Error(`refusing to write polls.json over an unparseable file: ${err?.message ?? err}`);
+  }
+}
+
 function writeAll(all) {
   mkdirSync(STATE_DIR, { recursive: true, mode: 0o700 });
   writeFileSync(POLLS_FILE, JSON.stringify(all, null, 2), { mode: 0o600 });
@@ -34,7 +56,7 @@ function writeAll(all) {
 // Called right after sendMessage for a poll. `secret` is the same Uint8Array passed as
 // `messageSecret` when creating it — stored base64, since JSON has no byte-array type.
 export function savePoll(jid, messageId, { name, values, selectableCount, secret }) {
-  const all = readAll();
+  const all = readAllForWrite();
   all[messageId] = {
     jid,
     name,
@@ -72,7 +94,7 @@ export function pollCreationMessageFor(entry) {
 // over (getAggregateVotesInPollMessage aggregates from the full pollUpdates list each time, not a
 // delta), so the newest tally already supersedes the last one saved.
 export function saveTally(messageId, tally) {
-  const all = readAll();
+  const all = readAllForWrite();
   if (!all[messageId]) return; // a poll this process didn't create and has no secret for
   all[messageId].tally = tally;
   all[messageId].tallyUpdatedAt = Date.now();

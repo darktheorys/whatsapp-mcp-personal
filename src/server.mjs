@@ -384,6 +384,20 @@ export function scanOutbound(text) {
   return null;
 }
 
+// For a send whose outbound content isn't one string — a poll's question plus its options, all
+// individually sent to WhatsApp and stored the same as any other outbound text. guardSend only
+// ever scans the one string it is given; a tool with more than one outbound field must call this
+// for the rest itself; scanning only the first is the same gap as not scanning at all for whatever
+// wasn't checked. Returns `{ text, reason }` for the first offending string, or null when all are
+// safe — the caller decides how to phrase the refusal.
+export function scanOutboundAll(texts) {
+  for (const text of texts) {
+    const reason = scanOutbound(text);
+    if (reason) return { text, reason };
+  }
+  return null;
+}
+
 // A loop, or a message that talks the model into flooding a chat, should cost a handful of
 // messages rather than an account. WhatsApp bans numbers for exactly this pattern, and this is
 // an unofficial client, so the cap is deliberately far below anything a human would hit.
@@ -2008,6 +2022,20 @@ server.registerTool(
   async ({ to, name, values, selectableCount }) => {
     const refusal = guardSend(to, name);
     if (refusal) return refusal;
+    // guardSend only ever saw `name` — the poll question — but every option in `values` is sent
+    // to WhatsApp (and stored) exactly the same as the question is. Without this, a secret placed
+    // in an option string instead of the question would sail straight past the scanner: the exact
+    // invariant CLAUDE.md documents ("this holds regardless of why the model assembled the text")
+    // held for the question and silently didn't for the options sitting right next to it.
+    const badOption = scanOutboundAll(values);
+    if (badOption) {
+      logger.warn({ to }, "outbound poll option refused by secret scan");
+      notify("warning", "outbound poll option refused by secret scan", { to, reason: badOption.reason });
+      return {
+        isError: true,
+        content: [{ type: "text", text: `Refused to send: option "${badOption.text}" ${badOption.reason}.` }],
+      };
+    }
     // WhatsApp's own ceiling on a poll's option count is the same regardless of what a caller
     // asks for, and selectableCount above the number of options offered is simply meaningless.
     if (selectableCount && selectableCount > values.length) {
@@ -2025,9 +2053,30 @@ server.registerTool(
     const sock = getSocket();
     const sent = await sock.sendMessage(to, { poll: { name, values, selectableCount, messageSecret: secret } });
     const messageId = sent?.key?.id ?? null;
-    // Saved before anything else touches this poll: if a vote arrives before the row below is
-    // written, getStoredPollMessage still has the secret to answer with.
-    if (messageId) savePoll(to, messageId, { name, values, selectableCount, secret });
+    // Saved before anything else touches this poll: if a vote arrives before this line runs,
+    // getStoredPollMessage still has the secret to answer with.
+    //
+    // The send above has already happened by this point, so a failure here is not a refusal —
+    // it is a poll that exists on WhatsApp with votes nobody can ever read, and the caller has to
+    // be told that plainly rather than shown a generic error that implies nothing went out.
+    if (messageId) {
+      try {
+        savePoll(to, messageId, { name, values, selectableCount, secret });
+      } catch (err) {
+        logger.error({ to, messageId, err: String(err?.message ?? err) }, "poll secret failed to save");
+        return {
+          isError: true,
+          content: [
+            {
+              type: "text",
+              text:
+                `Sent, but could not save its secret (${err?.message ?? err}) — votes on this poll ` +
+                `cannot be read back. state/polls.json may be corrupt and needs a look.`,
+            },
+          ],
+        };
+      }
+    }
     appendMessage(to, {
       direction: "out",
       by: "claude",

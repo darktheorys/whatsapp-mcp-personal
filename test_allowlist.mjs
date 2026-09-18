@@ -2,7 +2,7 @@
 // Covers the one piece of logic here that can fail silently: which incoming messages the
 // allowlist lets through, and which JID a chat gets stored under once it does.
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -298,7 +298,7 @@ assert.equal(extractQuoted(null), null, "empty payload must not throw");
 
 // The send-side backstop: this is what still holds if the model is talked into assembling a
 // message out of something it shouldn't have. A miss here is silent, so each shape gets a case.
-const { scanOutbound, overSendLimit } = await import("./src/server.mjs");
+const { scanOutbound, scanOutboundAll, overSendLimit } = await import("./src/server.mjs");
 
 assert.equal(scanOutbound("selam dayı, normal bir mesaj"), null, "ordinary text sends");
 assert.equal(scanOutbound("look at state/media/x.jpg"), null, "a path mention is not a secret");
@@ -311,6 +311,18 @@ assert.match(
   /JWT/,
   "JWT blocked",
 );
+
+// wa_send_poll's own scan, over the array a poll actually sends (question is scanned by guardSend
+// already; this covers the options guardSend never sees). The regression this guards is a secret
+// sitting in an option rather than the question — scanning only element 0 would have caught the
+// case above and missed exactly this one.
+assert.equal(scanOutboundAll(["kırmızı", "mavi"]), null, "ordinary options send");
+assert.equal(
+  scanOutboundAll(["evet", "hayır", "AKIAIOSFODNN7EXAMPLE"])?.text,
+  "AKIAIOSFODNN7EXAMPLE",
+  "a secret in the THIRD option is still caught, not just the first",
+);
+assert.match(scanOutboundAll(["fine", `token ghp_${"a".repeat(36)}`]).reason, /GitHub/);
 
 // A reaction sent by wa_react used to be logged twice: once on send, once when WhatsApp echoed it
 // back as an event. The echo is suppressed exactly once, and only for a matching own reaction.
@@ -672,6 +684,28 @@ assert.deepEqual(unansweredChats([STATS], 1 * H), [], "answering it takes it off
   // must be a silent no-op, not an attempt to write into an entry that doesn't exist.
   saveTally("never-created", [{ name: "x", voters: ["a"] }]);
   assert.equal(getPoll("never-created"), null, "tallying an unknown poll id creates nothing");
+
+  // The regression this module exists to prevent: readAll's {} fallback on a parse failure is safe
+  // for a read, but savePoll/saveTally do read-modify-write, and writing that {} back with one new
+  // entry added would silently erase every other poll's secret sitting in the part that failed to
+  // parse — permanent, since a poll's secret cannot be regenerated once WhatsApp already has it.
+  const pollsFile = process.env.WA_POLLS_PATH;
+  const corrupt = "{ this is not valid json";
+  writeFileSync(pollsFile, corrupt);
+  assert.throws(
+    () => savePoll("999@s.whatsapp.net", "P2", { name: "x", values: ["a", "b"], secret }),
+    /unparseable/,
+    "savePoll refuses to write over a corrupt file rather than silently replacing it",
+  );
+  assert.equal(
+    readFileSync(pollsFile, "utf8"),
+    corrupt,
+    "the file on disk is untouched — this is the actual regression: P1's secret must not have been erased",
+  );
+  assert.throws(() => saveTally("P1", [{ name: "x", voters: [] }]), /unparseable/, "saveTally refuses the same way");
+  // Reads, unlike writes, are allowed to degrade — a corrupt file makes a read look like "not
+  // found" rather than blocking every poll-related call until someone fixes the file by hand.
+  assert.equal(getPoll("P1"), null, "a read against a corrupt file returns null, not a throw");
 }
 
 // Thread reconstruction. The shape under test is a branching chain, because a message can have
