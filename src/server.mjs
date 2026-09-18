@@ -1,4 +1,5 @@
 import { execFile, execFileSync } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join, sep } from "node:path";
@@ -6,7 +7,12 @@ import { promisify } from "node:util";
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { downloadMediaMessage, jidNormalizedUser, normalizeMessageContent } from "@whiskeysockets/baileys";
+import {
+  downloadMediaMessage,
+  getAggregateVotesInPollMessage,
+  jidNormalizedUser,
+  normalizeMessageContent,
+} from "@whiskeysockets/baileys";
 import { z } from "zod";
 
 import {
@@ -63,6 +69,7 @@ import {
   updatePollState,
 } from "./store.mjs";
 import { buildUrlInfo, enrichLinks } from "./linkinfo.mjs";
+import { getPoll, pollCreationMessageFor, renderTally, savePoll, saveTally } from "./polls.mjs";
 import { loadSchedule, removeTask, startScheduler, upsertTask } from "./schedule.mjs";
 import { connectionState, getSocket, logger, setDropNotifier, startWhatsApp } from "./whatsapp.mjs";
 
@@ -1251,6 +1258,32 @@ async function handleReaction({ key, reaction }) {
   });
 }
 
+// Passed to Baileys as the socket's `getMessage` option. Baileys calls this by itself, mid-decrypt,
+// whenever a vote update arrives and it needs the original poll back to re-derive the encryption
+// key — this server never calls it directly. Only ever answers for polls this server itself sent
+// (the only ones whose secret was ever saved); returning undefined for anything else is correct,
+// not a gap, since a poll we did not create is not one we can decrypt votes for regardless.
+async function getStoredPollMessage(key) {
+  const entry = getPoll(key.id);
+  return entry ? pollCreationMessageFor(entry) : undefined;
+}
+
+// One WAMessageUpdate at a time, straight from Baileys' messages.update event. `update.pollUpdates`
+// is only present once Baileys has already decrypted whatever votes it could using the poll message
+// getStoredPollMessage handed back above — there is nothing left to decrypt here, only to tally and
+// persist, since the vote itself is not retained anywhere and this is the only durable record of it.
+async function handlePollUpdate({ key, update }) {
+  if (!update?.pollUpdates?.length) return;
+  const entry = getPoll(key.id);
+  if (!entry) return; // a poll from before this feature existed, or one this server did not send
+  const ownJid = jidNormalizedUser(getSocket()?.user?.id);
+  const tally = getAggregateVotesInPollMessage(
+    { message: pollCreationMessageFor(entry), pollUpdates: update.pollUpdates },
+    ownJid,
+  );
+  saveTally(key.id, tally);
+}
+
 const server = new McpServer(
   {
     name: "whatsapp-mcp-personal",
@@ -1956,6 +1989,105 @@ server.registerTool(
 );
 
 server.registerTool(
+  "wa_send_poll",
+  {
+    title: "Send a WhatsApp poll",
+    description:
+      "Create a poll in an allowlisted chat. Votes come back encrypted and this server can only " +
+      "decrypt them for polls it created itself, so a poll made by anyone else — including one " +
+      "made from your own phone — can be read as a message but never as tallied votes. Check " +
+      "results later with wa_poll_results, using the message id this returns.",
+    inputSchema: {
+      to: z.string().describe("Recipient JID, e.g. 491701234567@s.whatsapp.net"),
+      name: z.string().min(1).describe("The poll question"),
+      values: z.array(z.string().min(1)).min(2).max(12).describe("2-12 options"),
+      selectableCount: z.number().int().min(1).optional().describe("How many options one voter may pick (default 1)"),
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+  },
+  async ({ to, name, values, selectableCount }) => {
+    const refusal = guardSend(to, name);
+    if (refusal) return refusal;
+    // WhatsApp's own ceiling on a poll's option count is the same regardless of what a caller
+    // asks for, and selectableCount above the number of options offered is simply meaningless.
+    if (selectableCount && selectableCount > values.length) {
+      return {
+        isError: true,
+        content: [
+          {
+            type: "text",
+            text: `Refused: selectableCount (${selectableCount}) exceeds the number of options (${values.length}).`,
+          },
+        ],
+      };
+    }
+    const secret = randomBytes(32);
+    const sock = getSocket();
+    const sent = await sock.sendMessage(to, { poll: { name, values, selectableCount, messageSecret: secret } });
+    const messageId = sent?.key?.id ?? null;
+    // Saved before anything else touches this poll: if a vote arrives before the row below is
+    // written, getStoredPollMessage still has the secret to answer with.
+    if (messageId) savePoll(to, messageId, { name, values, selectableCount, secret });
+    appendMessage(to, {
+      direction: "out",
+      by: "claude",
+      text: `[poll] ${name} — ${values.join(" / ")}`,
+      ts: Date.now(),
+      id: messageId,
+    });
+    return {
+      content: [
+        {
+          type: "text",
+          text: `Sent poll "${name}" to ${to}. messageId: ${messageId} — use this with wa_poll_results.`,
+        },
+      ],
+    };
+  },
+);
+
+server.registerTool(
+  "wa_poll_results",
+  {
+    title: "Read a poll's votes",
+    description:
+      "Current tally for a poll this server sent (see wa_send_poll). Only ever current as of the " +
+      "last vote update WhatsApp has delivered — there is no way to ask WhatsApp to resend older " +
+      "votes on demand, so a poll checked right after voters answer may lag by a few seconds.",
+    inputSchema: {
+      jid: z.string().describe("The allowlisted JID the poll was sent to"),
+      messageId: z.string().describe("The poll's message id, from wa_send_poll's reply"),
+    },
+    annotations: { readOnlyHint: true, openWorldHint: false },
+  },
+  async ({ jid, messageId }) => {
+    if (!allowedJid(jid)) {
+      return { isError: true, content: [{ type: "text", text: `Refused: ${jid} is not on the allowlist.` }] };
+    }
+    const entry = getPoll(messageId);
+    if (!entry) {
+      return {
+        isError: true,
+        content: [
+          {
+            type: "text",
+            text: `No poll with id ${messageId} — either it was not sent by this server, or was sent before wa_send_poll existed.`,
+          },
+        ],
+      };
+    }
+    return {
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify({ ...entry, secretB64: undefined, rendered: renderTally(entry) }, null, 2),
+        },
+      ],
+    };
+  },
+);
+
+server.registerTool(
   "wa_stats",
   {
     title: "WhatsApp conversation statistics",
@@ -2263,6 +2395,8 @@ server.registerTool(
         onReaction: handleReaction,
         onPresence: handlePresenceUpdate,
         onNotice: notify,
+        onPollUpdate: handlePollUpdate,
+        getMessage: getStoredPollMessage,
       });
       // startWhatsApp returns as soon as the socket object exists, which is well before WhatsApp
       // has accepted (or rejected) it. Reporting success there is how "Connected." came back for
@@ -2314,6 +2448,8 @@ if (!process.env.WA_NO_CONNECT) {
     onReaction: handleReaction,
     onPresence: handlePresenceUpdate,
     onNotice: notify,
+    onPollUpdate: handlePollUpdate,
+    getMessage: getStoredPollMessage,
   }).catch((err) => {
     process.stderr.write(`whatsapp-mcp-personal: startup failed: ${err}\n`);
   });

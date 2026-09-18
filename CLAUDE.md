@@ -134,6 +134,16 @@ Four files under `src/`, each importable independently and wired together in `se
   packages for a cosmetic card. `sendMessage` uses a supplied `linkPreview` directly and only
   generates one when absent, so handing it ours avoids the dependency entirely.
 
+- **`polls.mjs`** — durable secrets for polls this server sends, in `state/polls.json`. A poll's
+  votes arrive encrypted, decryptable only with the same 32-byte `messageSecret` the poll was
+  created with — lose that and the votes are unreadable forever, so it is written to disk *before*
+  the send even completes. `pollCreationMessageFor` rebuilds the shape Baileys' own
+  `getAggregateVotesInPollMessage`/`decryptPollVote` need back (the poll's `name`/`options` plus the
+  secret) — wired into the socket as its `getMessage` option (`server.mjs`'s `getStoredPollMessage`),
+  which Baileys calls on its own whenever a vote update needs the original poll to re-derive the key.
+  Only ever answers for polls this server itself created; a poll from your own phone or anyone else
+  is readable as a message but never as tallied votes, since its secret was never ours to keep.
+
 - **`schedule.mjs`** — durable recurring tasks in `state/schedule.json`, fired by a timer inside the
   server process. This exists because the session-scoped alternative does not work: an in-memory
   cron expires after 7 days and only fires while the REPL is idle, so a session waking every 30
