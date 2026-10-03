@@ -573,15 +573,39 @@ assert.deepEqual(unansweredChats([STATS], 1 * H), [], "answering it takes it off
 {
   const { logger: waLogger, setDropNotifier } = await import("./src/whatsapp.mjs");
   const seen = [];
-  setDropNotifier((msg) => seen.push(msg));
-  waLogger.error({}, "failed to decrypt message");
+  setDropNotifier((msg, jids) => seen.push([msg, jids]));
+  waLogger.error({ key: { remoteJid: "1@lid", remoteJidAlt: "2@s.whatsapp.net" } }, "failed to decrypt message");
   waLogger.child({ class: "baileys" }).error({}, "unexpected error in 'processing offline notification'");
   waLogger.warn({}, "an ordinary warning that is not a dropped message");
   assert.equal(seen.length, 2, "only drop signatures are reported, not every warning");
   assert.ok(
-    seen.some((m) => m.includes("processing offline notification")),
+    seen.some(([m]) => m.includes("processing offline notification")),
     "a drop logged through a child logger is still caught",
   );
+  // server.mjs's setDropNotifier callback decides relevance from these -- whatsapp.mjs's own job
+  // ends at handing up whatever candidates the log line actually carried, in the order found.
+  const [, decryptJids] = seen.find(([m]) => m.includes("failed to decrypt")) ?? [];
+  assert.deepEqual(
+    decryptJids,
+    ["1@lid", "2@s.whatsapp.net"],
+    "a per-message drop hands up both the @lid and phone-number form of its key",
+  );
+  const [, batchJids] = seen.find(([m]) => m.includes("processing offline notification")) ?? [];
+  assert.deepEqual(batchJids, [], "a batch-level drop (no single message's key) hands up no candidates, not a guess");
+
+  // The rc14 group leave/remove stub bug: a SyntaxError out of process-message.js's JSON.parse,
+  // logged under the same "handling notification" text as a real loss. It must not alert, but the
+  // same text with any other cause must, or the filter would hide genuine drops.
+  seen.length = 0;
+  const stubErr = new SyntaxError("Unexpected non-whitespace character after JSON at position 14");
+  stubErr.stack =
+    "SyntaxError: Unexpected non-whitespace character after JSON at position 14\n    at JSON.parse (<anonymous>)\n    at file:///x/baileys/lib/Utils/process-message.js:510:78";
+  waLogger.child({ class: "baileys" }).error(stubErr, "unexpected error in 'handling notification'");
+  assert.equal(seen.length, 0, "the group-stub JSON.parse bug is not reported as a lost message");
+  const otherErr = new Error("boom");
+  otherErr.stack = "Error: boom\n    at handleNotification (file:///x/baileys/lib/Socket/messages-recv.js:1:1)";
+  waLogger.child({ class: "baileys" }).error(otherErr, "unexpected error in 'handling notification'");
+  assert.equal(seen.length, 1, "the same log text from any other cause is still a reported drop");
 }
 
 // Per-sender breakdown of a group. chatStats splits a chat into you-and-everyone-else, which is
@@ -680,10 +704,115 @@ assert.deepEqual(unansweredChats([STATS], 1 * H), [], "answering it takes it off
     "tally renders per-option vote counts",
   );
 
+  // The wake line a vote writes to inbox.log: only options holding votes are named, and an empty
+  // tally reads as a withdrawn vote rather than as an answer.
+  const { voteWakeLine } = await import("./src/polls.mjs");
+  assert.equal(
+    voteWakeLine(getPoll("P1"), getPoll("P1").tally),
+    "Hangi renk? → kırmızı",
+    "a vote names the chosen option, not every option",
+  );
+  assert.equal(
+    voteWakeLine(getPoll("P1"), [
+      { name: "kırmızı", voters: [] },
+      { name: "mavi", voters: [] },
+    ]),
+    "Hangi renk? → vote withdrawn",
+    "a tally with no voters reads as a withdrawn vote",
+  );
+
   // A vote update for a poll this server never created (or created before this feature existed)
   // must be a silent no-op, not an attempt to write into an entry that doesn't exist.
   saveTally("never-created", [{ name: "x", voters: ["a"] }]);
   assert.equal(getPoll("never-created"), null, "tallying an unknown poll id creates nothing");
+
+  // Vote decryption, done here because Baileys rc14 stopped doing it. A vote is built exactly the way
+  // WhatsApp builds one (HKDF-style key from the secret plus creator and voter JIDs, AES-GCM with the
+  // poll id and voter as AAD), encrypted under the @lid form of the voter, and must still decrypt:
+  // the phone may use either identity form and nothing in the message says which.
+  {
+    const { decryptVote, saveVote } = await import("./src/polls.mjs");
+    const { aesEncryptGCM, hmacSign, proto } = await import("@whiskeysockets/baileys");
+    const { createHash, randomBytes } = await import("node:crypto");
+    const sha = (t) => createHash("sha256").update(Buffer.from(t)).digest();
+    const me = "999@s.whatsapp.net";
+    const meLid = "888@lid";
+    const encryptVote = (creatorJid, voterJid, names) => {
+      const encIv = randomBytes(12);
+      const sign = Buffer.concat([
+        Buffer.from("P1"),
+        Buffer.from(creatorJid),
+        Buffer.from(voterJid),
+        Buffer.from("Poll Vote"),
+        new Uint8Array([1]),
+      ]);
+      const decKey = hmacSign(sign, hmacSign(secret, new Uint8Array(32), "sha256"), "sha256");
+      const plain = proto.Message.PollVoteMessage.encode({ selectedOptions: names.map(sha) }).finish();
+      return { encIv, encPayload: aesEncryptGCM(plain, decKey, encIv, Buffer.from(`P1\u0000${voterJid}`)) };
+    };
+    const creationKey = { id: "P1", fromMe: true, remoteJid: me };
+    const voteKey = { fromMe: true, remoteJid: me };
+
+    const viaPn = decryptVote(getPoll("P1"), {
+      creationKey,
+      voteKey,
+      vote: encryptVote(me, me, ["mavi"]),
+      meIds: [me, meLid],
+    });
+    assert.deepEqual(viaPn?.hashes, [sha("mavi").toString("hex")], "a vote under the phone-number identity decrypts");
+    const viaLid = decryptVote(getPoll("P1"), {
+      creationKey,
+      voteKey,
+      vote: encryptVote(meLid, meLid, ["mavi"]),
+      meIds: [me, meLid],
+    });
+    assert.equal(
+      viaLid?.voterJid,
+      me,
+      "a vote under the @lid identity decrypts, and is recorded under one stable identity for the account",
+    );
+    assert.equal(
+      decryptVote(getPoll("P1"), {
+        creationKey,
+        voteKey,
+        vote: encryptVote("777@s.whatsapp.net", "777@s.whatsapp.net", ["mavi"]),
+        meIds: [me, meLid],
+      }),
+      null,
+      "a vote under no known identity is refused rather than decrypted to garbage",
+    );
+
+    // Changing an answer replaces it, an older vote arriving late never overwrites a newer one.
+    saveVote("P1", me, [sha("kırmızı").toString("hex")], 1000);
+    saveVote("P1", me, [sha("mavi").toString("hex")], 2000);
+    assert.deepEqual(
+      getPoll("P1").tally.map((t) => [t.name, t.voters.length]),
+      [
+        ["kırmızı", 0],
+        ["mavi", 1],
+      ],
+      "a changed answer counts once, for the new option",
+    );
+    assert.equal(
+      saveVote("P1", me, [sha("kırmızı").toString("hex")], 1500),
+      null,
+      "a stale earlier vote changes nothing and reports nothing, so it cannot wake a session",
+    );
+    assert.equal(getPoll("P1").tally[1].voters.length, 1, "a stale earlier vote does not overwrite a newer one");
+    assert.equal(
+      saveVote("P1", me, [sha("mavi").toString("hex")], 2000),
+      null,
+      "the same vote redelivered changes nothing and reports nothing",
+    );
+    // A poll whose creationKey is not flagged fromMe still decrypts: every stored poll is ours.
+    const unflagged = decryptVote(getPoll("P1"), {
+      creationKey: { id: "P1", remoteJid: me },
+      voteKey,
+      vote: encryptVote(me, me, ["kırmızı"]),
+      meIds: [me, meLid],
+    });
+    assert.deepEqual(unflagged?.hashes, [sha("kırmızı").toString("hex")], "creator identity falls back to our own");
+  }
 
   // The regression this module exists to prevent: readAll's {} fallback on a parse failure is safe
   // for a read, but savePoll/saveTally do read-modify-write, and writing that {} back with one new
@@ -860,11 +989,215 @@ assert.deepEqual(unansweredChats([STATS], 1 * H), [], "answering it takes it off
   );
 }
 
+// The daemon/shim split. What is asserted is the part that can fail without anyone noticing: that a
+// wrong token is refused, that a real MCP client's traffic round-trips through shim -> socket ->
+// McpServer, and that a daemon restart is invisible to the client (initialize is replayed, the tool
+// list is refreshed, a call made afterwards works) instead of leaving it talking to a dead pipe.
+{
+  const { McpServer } = await import("@modelcontextprotocol/sdk/server/mcp.js");
+  const { connect: netConnect } = await import("node:net");
+  const { PassThrough } = await import("node:stream");
+  const { serveOnSocket, loadOrCreateDaemonToken } = await import("./src/daemon-transport.mjs");
+  const { runShim } = await import("./src/shim.mjs");
+
+  const dir = mkdtempSync(join(tmpdir(), "wa-d-"));
+  const path = join(dir, "d.sock");
+  const tokenPath = join(dir, "d.token");
+  const token = loadOrCreateDaemonToken(tokenPath);
+  assert.equal(loadOrCreateDaemonToken(tokenPath), token, "the token is created once and then reused");
+
+  const makeServer = (answer) => {
+    const s = new McpServer({ name: "t", version: "0" });
+    s.registerTool("ping", { description: "x", inputSchema: {} }, async () => ({
+      content: [{ type: "text", text: answer }],
+    }));
+    return s;
+  };
+  let daemon = await serveOnSocket(makeServer("one"), { path, token });
+
+  const wait = async (cond, what) => {
+    for (let i = 0; i < 100; i++) {
+      if (cond()) return;
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    assert.fail(`timed out waiting for ${what}`);
+  };
+
+  // A connection with the wrong token must be closed without being served.
+  const bad = netConnect(path);
+  let badClosed = false;
+  bad.on("close", () => (badClosed = true));
+  bad.on("error", () => {});
+  bad.write(JSON.stringify({ wa_daemon_auth: "nope" }) + "\n");
+  await wait(() => badClosed, "the bad-token connection to be closed");
+
+  // A second daemon must refuse to start over a live one rather than take its socket file.
+  await assert.rejects(serveOnSocket(makeServer("x"), { path, token }), /already listening/);
+
+  const stdin = new PassThrough();
+  const stdout = new PassThrough();
+  const out = [];
+  let buf = "";
+  stdout.on("data", (c) => {
+    buf += c.toString();
+    let at;
+    while ((at = buf.indexOf("\n")) !== -1) {
+      out.push(JSON.parse(buf.slice(0, at)));
+      buf = buf.slice(at + 1);
+    }
+  });
+  const connect = () =>
+    new Promise((resolve, reject) => {
+      const s = netConnect(path);
+      s.once("error", reject);
+      s.once("connect", () => {
+        s.off("error", reject);
+        s.write(JSON.stringify({ wa_daemon_auth: token }) + "\n");
+        resolve(s);
+      });
+    });
+  const shim = runShim({ stdin, stdout, connect, retryMs: 50 });
+  const send = (o) => stdin.write(JSON.stringify(o) + "\n");
+
+  send({
+    jsonrpc: "2.0",
+    id: 1,
+    method: "initialize",
+    params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "t", version: "0" } },
+  });
+  await wait(() => out.some((m) => m.id === 1 && m.result), "initialize to be answered");
+  send({ jsonrpc: "2.0", method: "notifications/initialized" });
+  send({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "ping", arguments: {} } });
+  await wait(() => out.some((m) => m.id === 2), "a tool call through the shim");
+  assert.equal(out.find((m) => m.id === 2).result.content[0].text, "one", "a call round-trips shim -> daemon");
+
+  // Restart the daemon underneath a client that never re-initializes.
+  await daemon.close();
+  daemon = await serveOnSocket(makeServer("two"), { path, token });
+  await wait(() => out.some((m) => m.method === "notifications/tools/list_changed"), "the list_changed after restart");
+  assert.ok(
+    !out.some((m) => String(m.id ?? "").startsWith("wa-shim-reinit")),
+    "the daemon's reply to the replayed initialize is swallowed, not shown to the client",
+  );
+  send({ jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "ping", arguments: {} } });
+  await wait(() => out.some((m) => m.id === 3), "a tool call after the daemon restarted");
+  assert.equal(out.find((m) => m.id === 3).result.content[0].text, "two", "the restarted daemon serves the call");
+
+  stdin.end();
+  assert.equal(await shim, "closed", "a client that hangs up ends the shim normally");
+
+  // A second authenticated client replaces the first. The first is told why before it is closed (so a
+  // shim stops instead of reconnecting and displacing the new one in turn), and the new client must
+  // keep working afterwards: closing the old connection must not detach the new one. The new
+  // client also sends its auth line and its first request in a single write, which is the case a
+  // line-at-a-time reader gets wrong.
+  const rawClient = async (firstRequest) => {
+    const c = netConnect(path);
+    c.on("error", () => {});
+    const seen = [];
+    let acc = "";
+    c.on("data", (d) => {
+      acc += d.toString();
+      let at;
+      while ((at = acc.indexOf("\n")) !== -1) {
+        seen.push(JSON.parse(acc.slice(0, at)));
+        acc = acc.slice(at + 1);
+      }
+    });
+    let closed = false;
+    c.on("close", () => (closed = true));
+    await new Promise((r) => c.once("connect", r));
+    c.write(
+      JSON.stringify({ wa_daemon_auth: token }) + "\n" + (firstRequest ? JSON.stringify(firstRequest) + "\n" : ""),
+    );
+    return { c, seen, isClosed: () => closed };
+  };
+  const initialize = {
+    jsonrpc: "2.0",
+    id: 1,
+    method: "initialize",
+    params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "t", version: "0" } },
+  };
+  const first = await rawClient(initialize);
+  await wait(() => first.seen.some((m) => m.id === 1), "the first client to be served");
+  const second = await rawClient(initialize);
+  await wait(() => second.seen.some((m) => m.id === 1), "the second client to be served");
+  await wait(() => first.isClosed(), "the first client to be closed");
+  assert.ok(
+    first.seen.some((m) => m.wa_daemon_replaced),
+    "a displaced client is told it was replaced",
+  );
+  second.c.write(JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }) + "\n");
+  second.c.write(
+    JSON.stringify({ jsonrpc: "2.0", id: 9, method: "tools/call", params: { name: "ping", arguments: {} } }) + "\n",
+  );
+  await wait(() => second.seen.some((m) => m.id === 9), "a call from the client that replaced the first");
+  assert.equal(
+    second.seen.find((m) => m.id === 9).result.content[0].text,
+    "two",
+    "the replacing client keeps working after the old connection is closed",
+  );
+  second.c.destroy();
+
+  // A shim told it was replaced stops with that result rather than reconnecting.
+  const replacedShim = runShim({
+    stdin: new PassThrough(),
+    stdout: new PassThrough(),
+    connect: async () => {
+      const { Duplex } = await import("node:stream");
+      const fake = new Duplex({
+        read() {},
+        write(_c, _e, cb) {
+          cb();
+        },
+      });
+      setTimeout(() => fake.push(JSON.stringify({ wa_daemon_replaced: true }) + "\n"), 20);
+      setTimeout(() => fake.destroy(), 40);
+      return fake;
+    },
+    retryMs: 20,
+  });
+  assert.equal(await replacedShim, "replaced", "a replaced shim exits instead of fighting for the connection");
+
+  // A request queued while the daemon is unreachable is refused once the outage outlasts the limit,
+  // instead of waiting forever.
+  const downIn = new PassThrough();
+  const downOut = new PassThrough();
+  const downSeen = [];
+  downOut.on("data", (d) =>
+    downSeen.push(
+      ...d
+        .toString()
+        .trim()
+        .split("\n")
+        .map((l) => JSON.parse(l)),
+    ),
+  );
+  const downShim = runShim({
+    stdin: downIn,
+    stdout: downOut,
+    connect: async () => {
+      throw new Error("down");
+    },
+    retryMs: 20,
+    refuseAfterMs: 100,
+    sweepMs: 50,
+  });
+  await new Promise((r) => setTimeout(r, 30));
+  downIn.write(JSON.stringify({ jsonrpc: "2.0", id: 5, method: "tools/call", params: { name: "ping" } }) + "\n");
+  await wait(() => downSeen.some((m) => m.id === 5 && m.error), "a queued request to be refused during an outage");
+  downIn.end();
+  await downShim;
+
+  await daemon.close();
+  rmSync(dir, { recursive: true, force: true });
+}
+
 // Runs last: it deliberately exhausts the window, so anything after it would see a full budget.
 let sent = 0;
 while (!overSendLimit()) sent++;
 assert.equal(sent, 20, "rate limit allows exactly 20 sends per minute, then refuses");
 
 console.log(
-  "ok — allowlist, media naming, command regexes, quotes, secret scan, edit/delete ownership guard, sendable-source guard, sqlite store, search folding, stats, threads, polls, message-type coverage, drop detection, scheduling, link enrichment and rate limit",
+  "ok — allowlist, media naming, command regexes, quotes, secret scan, edit/delete ownership guard, sendable-source guard, sqlite store, search folding, stats, threads, polls, message-type coverage, drop detection, scheduling, link enrichment, daemon and shim, and rate limit",
 );

@@ -66,8 +66,11 @@ if [[ "$tool" == "Bash" ]]; then
   # command *text*, so `sqlite3 state/messages.db` is caught while a script that opens the same file
   # without naming it is not. It stops the casual path, not a determined one; sandbox.enabled is the
   # real boundary for Bash.
-  if grep -qE '(\.ssh|\.aws/|\.gnupg|\.netrc|\.git-credentials|\.pypirc|\.npmrc|id_rsa|id_ed25519|id_ecdsa|Keychains|\.credentials\.json|state/auth|messages\.db|state/contacts\.json|state/poll-state\.json|/\.env)' <<<"$cmd"; then
-    deny "this command" "references a credential location or the message store. Read it through a tool if you genuinely need it, so the deny rules apply."
+  if grep -qE '(\.ssh|\.aws/|\.gnupg|\.netrc|\.git-credentials|\.pypirc|\.npmrc|id_rsa|id_ed25519|id_ecdsa|Keychains|\.credentials\.json|state/auth|messages\.db|state/contacts\.json|state/poll-state\.json|state/daemon\.token|state/daemon\.sock|/\.env)' <<<"$cmd"; then
+    # daemon.token/daemon.sock: the daemon's socket plus its token is a way to send WhatsApp messages
+    # without going through the MCP tools, and so without their permission prompts. Anything that
+    # names either is refused for the same reason the credential files are.
+    deny "this command" "references a credential location, the daemon socket or token, or the message store. Read it through a tool if you genuinely need it, so the deny rules apply."
   fi
 
   # Textual expansion first: the resolver sees literal paths, not shell variables.

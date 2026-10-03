@@ -34,8 +34,21 @@ Register the server with Claude Code from whichever project should be able to dr
 claude mcp add whatsapp-personal -- node /absolute/path/to/whatsapp-mcp-personal/src/server.mjs
 ```
 
-**After editing any file under `src/`, an `/mcp` reconnect is required** — the server process only
-loads code at startup, so changes don't take effect until Claude Code reconnects.
+**After editing any file under `src/`, the server process must restart** — it only loads code at
+startup. In stdio mode that means an `/mcp` reconnect from Claude Code. In daemon mode (below) it
+means `bash scripts/restart-daemon.sh`, and no `/mcp` is needed unless `src/shim.mjs` itself changed.
+
+### Daemon mode (optional, preferred)
+
+`src/daemon.mjs` runs the same server under launchd (`bash scripts/install-daemon.sh`) and speaks
+MCP over a unix socket (`state/daemon.sock`, mode 0600, plus a token in `state/daemon.token`).
+Claude Code launches `src/shim.mjs` instead, a stdio proxy that replays the client's `initialize`
+after a daemon restart so the client never notices. The point is that the WhatsApp socket no longer
+dies with every `/mcp`, and Baileys only delivers to a live socket, so each restart used to be a
+window where messages were lost. The server, guards and scheduler are unchanged, only the transport
+differs (`WA_TRANSPORT=socket`). One client at a time, a new authenticated connection replaces the
+old one. In daemon mode a `connectionReplaced` does not exit, it sets `lastError` and `wa_connect`
+reclaims. Register with `claude mcp add whatsapp-personal -- node /abs/path/src/shim.mjs`.
 
 ## YouTube / video search and download
 

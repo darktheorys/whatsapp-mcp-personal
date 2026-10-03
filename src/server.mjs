@@ -7,6 +7,7 @@ import { promisify } from "node:util";
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { loadOrCreateDaemonToken, serveOnSocket } from "./daemon-transport.mjs";
 import {
   downloadMediaMessage,
   getAggregateVotesInPollMessage,
@@ -45,6 +46,8 @@ import {
   setVoiceEnabled,
   setVoiceOnly,
   speakingRate,
+  DAEMON_SOCK_PATH,
+  DAEMON_TOKEN_PATH,
   STATE_DIR,
   t2sTier,
   verbosity,
@@ -69,7 +72,16 @@ import {
   updatePollState,
 } from "./store.mjs";
 import { buildUrlInfo, enrichLinks } from "./linkinfo.mjs";
-import { getPoll, pollCreationMessageFor, renderTally, savePoll, saveTally } from "./polls.mjs";
+import {
+  decryptVote,
+  getPoll,
+  pollCreationMessageFor,
+  renderTally,
+  saveVote,
+  savePoll,
+  saveTally,
+  voteWakeLine,
+} from "./polls.mjs";
 import { loadSchedule, removeTask, startScheduler, upsertTask } from "./schedule.mjs";
 import { connectionState, getSocket, logger, setDropNotifier, startWhatsApp } from "./whatsapp.mjs";
 
@@ -977,6 +989,12 @@ async function handleIncoming(waMessage) {
   const jid = allowedJid(key.remoteJid, key.remoteJidAlt);
   if (!jid) return;
   const viewOnce = isViewOnce(waMessage.message);
+  const pollVote = unwrapped(waMessage.message)?.pollUpdateMessage;
+  if (pollVote) {
+    // Never allowed to throw out of here: a vote that cannot be read must not stop the message
+    // pipeline for everything after it.
+    await handlePollVoteMessage(waMessage, pollVote).catch((err) => logger.error(err, "poll vote handling failed"));
+  }
   const content = extractContent(unwrapped(waMessage.message));
   if (!content) return;
   // Reported, not just stored: a placeholder row tells you afterwards that something arrived in a
@@ -1286,6 +1304,31 @@ async function getStoredPollMessage(key) {
 // is only present once Baileys has already decrypted whatever votes it could using the poll message
 // getStoredPollMessage handed back above — there is nothing left to decrypt here, only to tally and
 // persist, since the vote itself is not retained anywhere and this is the only durable record of it.
+// Where votes actually arrive on this Baileys version: as a raw pollUpdateMessage in messages.upsert,
+// not as a decrypted messages.update (see decryptVote in polls.mjs). handlePollUpdate below is kept
+// for a Baileys that restores that path, and would simply record the same vote again.
+async function handlePollVoteMessage(waMessage, pollVote) {
+  const creationKey = pollVote.pollCreationMessageKey;
+  const entry = creationKey?.id ? getPoll(creationKey.id) : null;
+  if (!entry) return; // a poll this server did not send, whose secret it never had
+  const sock = getSocket();
+  const meIds = [sock?.user?.id, sock?.user?.lid].filter(Boolean).map(jidNormalizedUser);
+  const decrypted = decryptVote(entry, { creationKey, voteKey: waMessage.key, vote: pollVote.vote, meIds });
+  if (!decrypted) {
+    logger.warn({ poll: creationKey.id }, "could not decrypt a poll vote with any identity pairing");
+    return;
+  }
+  const sentAt = pollVote.senderTimestampMs;
+  const ts = Number(sentAt?.toNumber ? sentAt.toNumber() : (sentAt ?? Date.now()));
+  const tally = saveVote(creationKey.id, decrypted.voterJid, decrypted.hashes, ts);
+  // Only a poll sent to the owner's own DM wakes a session: that is how Claude asks Burak for
+  // permission, and the answer has to reach the session that asked. A vote in a group poll (the
+  // weekly FitStar one) is read on request with wa_poll_results and must not wake anything.
+  if (tally && meIds.includes(jidNormalizedUser(entry.jid))) {
+    logInbox(entry.jid, "🗳️ poll vote", voteWakeLine(entry, tally));
+  }
+}
+
 async function handlePollUpdate({ key, update }) {
   if (!update?.pollUpdates?.length) return;
   const entry = getPoll(key.id);
@@ -1296,6 +1339,10 @@ async function handlePollUpdate({ key, update }) {
     ownJid,
   );
   saveTally(key.id, tally);
+  // Only a poll sent to the owner's own DM wakes a session: that is how Claude asks Burak for
+  // permission, and the answer has to reach the session that asked. A vote in a group poll (the
+  // weekly FitStar one) is read on request with wa_poll_results and must not wake anything.
+  if (entry.jid === ownJid) logInbox(entry.jid, "🗳️ poll vote", voteWakeLine(entry, tally));
 }
 
 const server = new McpServer(
@@ -1339,7 +1386,20 @@ function notify(level, message, data = {}) {
 const DROP_REPORT_WINDOW_MS = 60_000;
 let lastDropReport = 0;
 let suppressedDrops = 0;
-setDropNotifier((message) => {
+setDropNotifier((message, jids = []) => {
+  // whatsapp.mjs stays protocol-only and hands up whatever candidate JIDs the log line carried
+  // (both the phone-number and @lid form, when present) rather than deciding relevance itself.
+  // Two batch-level signatures ("handling notification", "processing offline notification") never
+  // carry one — a whole batch failed, not one message's key — so `jids` is empty for those, and an
+  // unknown source is treated as relevant rather than silently swallowed: this filter exists to cut
+  // noise from groups the model was never watching in the first place, never to hide a drop it
+  // can't identify. A drop that *is* identified and matches nothing on the allowlist would have
+  // been discarded on arrival anyway (allowedJid gates storage), so losing it costs nothing —
+  // that's the actual reason to filter it, not that it is somehow less real.
+  if (jids.length > 0 && !allowedJid(...jids)) {
+    process.stderr.write(`dropped message ignored (not an allowlisted chat): ${message} ${jids.join(",")}\n`);
+    return;
+  }
   const now = Date.now();
   if (now - lastDropReport < DROP_REPORT_WINDOW_MS) {
     suppressedDrops++;
@@ -2503,6 +2563,16 @@ if (!process.env.WA_NO_CONNECT) {
     process.stderr.write(`whatsapp-mcp-personal: startup failed: ${err}\n`);
   });
 
-  const transport = new StdioServerTransport();
-  await server.connect(transport);
+  if (process.env.WA_TRANSPORT === "socket") {
+    // Run by src/daemon.mjs: the process outlives any one client, which connects through
+    // src/shim.mjs. stderr only, stdout belongs to nothing here but is kept clean on principle.
+    await serveOnSocket(server, {
+      path: DAEMON_SOCK_PATH,
+      token: loadOrCreateDaemonToken(DAEMON_TOKEN_PATH),
+      log: (line) => process.stderr.write(`whatsapp-mcp daemon: ${line}\n`),
+    });
+  } else {
+    const transport = new StdioServerTransport();
+    await server.connect(transport);
+  }
 }
