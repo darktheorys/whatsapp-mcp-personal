@@ -73,6 +73,7 @@
       "Read(./state/messages.db-shm)",
       "Read(./state/contacts.json)",
       "Read(./state/poll-state.json)",
+      "Read(./state/daemon.token)",
       "Read(./state/*.tgz)"
     ]
   }

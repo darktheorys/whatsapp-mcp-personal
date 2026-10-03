@@ -23,6 +23,17 @@ const DROP_SIGNATURES = [
   "Bad MAC",
 ];
 
+// Not every line matching a signature is a lost message. In Baileys 7.0.0-rc14, process-message.js
+// JSON.parses each messageStubParameters entry of a group participant leave/remove stub, and
+// WhatsApp now sends those as plain strings, so the parse throws and Baileys logs it as "unexpected
+// error in 'handling notification'". That is a membership event, not chat text: 115 of ~300 matching
+// lines in a real log were this one bug. Matched on the stack (type, file, and JSON.parse together)
+// so a genuine notification failure with any other cause still alerts.
+function isGroupStubParseBug(err) {
+  const stack = err?.stack ?? "";
+  return err?.type === "SyntaxError" && stack.includes("process-message.js") && stack.includes("JSON.parse");
+}
+
 // Set by server.mjs so these can be surfaced as MCP notifications. Module-level because the logger
 // is built at import time, long before any caller passes a callback in.
 let onDrop = null;
@@ -43,9 +54,22 @@ export const logger = pino(
       logFile.write(line);
       if (!onDrop) return;
       try {
-        const msg = JSON.parse(line)?.msg ?? "";
-        if (DROP_SIGNATURES.some((s) => msg.includes(s))) {
-          onDrop(msg);
+        const record = JSON.parse(line);
+        const msg = record?.msg ?? "";
+        if (DROP_SIGNATURES.some((s) => msg.includes(s)) && isGroupStubParseBug(record?.err)) {
+          // Still in baileys.log above, and now on stderr too, so a suppressed line is visible rather
+          // than gone: the filter must never be a place a real drop can hide without a trace.
+          process.stderr.write(`ignored the rc14 group-stub parse bug: ${msg}\n`);
+        } else if (DROP_SIGNATURES.some((s) => msg.includes(s))) {
+          // Only "failed to decrypt message" / "Bad MAC" carry a `key` (a single message's own
+          // sender/recipient); "handling notification" and "processing offline notification" are
+          // batch-level failures with no per-message key at all. `remoteJidAlt` exists because a
+          // message can be addressed by its privacy-preserving `@lid` form or the phone-number
+          // form -- same reason allowedJid() itself takes multiple candidates. Passing every
+          // candidate found (or none) up rather than guessing here keeps this file protocol-only;
+          // whatever decides "does this chat matter" is config.mjs's allowlist, not this one.
+          const jids = [record?.key?.remoteJid, record?.key?.remoteJidAlt].filter(Boolean);
+          onDrop(msg, jids);
         }
       } catch {
         // A malformed line is not worth failing a log write over, and must never throw into pino.
@@ -157,6 +181,16 @@ export async function startWhatsApp({ onMessage, onReaction, onPresence, onNotic
         // Idling here would leave a dead process an MCP client could still be talking to,
         // producing a silent "Connection Closed" on every tool call until someone notices.
         // Exiting makes the failure visible immediately instead.
+        //
+        // The daemon (src/daemon.mjs) is the exception: it is supervised by launchd with a client
+        // that can reconnect, so exiting would only be restarted straight back into the same fight.
+        // It stays up with `lastError` set, every tool call fails visibly, and `wa_connect` reclaims.
+        if (process.env.WA_TRANSPORT === "socket") {
+          const held = "Another instance took over this WhatsApp session. Call wa_connect to reclaim it.";
+          logger.error(held);
+          notice("critical", held, { statusCode });
+          return;
+        }
         const message =
           "Another instance took over this WhatsApp session — exiting so a stale process isn't left running.";
         logger.error(message);

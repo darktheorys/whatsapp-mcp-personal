@@ -1,5 +1,7 @@
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { decryptPollVote } from "@whiskeysockets/baileys";
 
 import { STATE_DIR } from "./config.mjs";
 
@@ -99,6 +101,83 @@ export function saveTally(messageId, tally) {
   all[messageId].tally = tally;
   all[messageId].tallyUpdatedAt = Date.now();
   writeAll(all);
+}
+
+// Baileys 7.0.0-rc14 no longer decrypts poll votes: the pollUpdateMessage branch in
+// process-message.js is commented out ("TODO: Remove entirely"), so no messages.update with
+// `pollUpdates` is ever emitted and a vote only shows up as a raw pollUpdateMessage in
+// messages.upsert. The votes were reaching the socket the whole time and being dropped as plumbing.
+// So the decryption is done here, with Baileys' own exported decryptPollVote.
+const sha256Hex = (text) => createHash("sha256").update(Buffer.from(text)).digest("hex");
+
+// The key is derived from the poll creator's and the voter's JIDs, and the phone may have used
+// either the phone-number or the @lid form of each, with no flag saying which. So every plausible
+// pairing is tried, and a wrong one fails authentication (AES-GCM) rather than decrypting to
+// garbage, which is what makes trying them all safe. Returns null when none works.
+export function decryptVote(entry, { creationKey, voteKey, vote, meIds }) {
+  const pollEncKey = Buffer.from(entry.secretB64, "base64");
+  const fromKey = (key) =>
+    key?.fromMe
+      ? meIds
+      : [...new Set([key?.participantAlt, key?.remoteJidAlt, key?.participant, key?.remoteJid].filter(Boolean))];
+  // Every poll in polls.json was created by this server, so the creator is always one of our own
+  // identities whatever the key says. The key's own forms are tried first, ours after, because a
+  // vote's creationKey is not always flagged fromMe from this device's point of view.
+  const creators = [...new Set([...fromKey(creationKey), ...meIds])];
+  for (const pollCreatorJid of creators) {
+    for (const voterJid of fromKey(voteKey)) {
+      try {
+        const decoded = decryptPollVote(vote, { pollEncKey, pollCreatorJid, pollMsgId: creationKey.id, voterJid });
+        // One person must be one voter however the phone addressed them: the same account voting under
+        // its phone-number form once and its @lid form later would otherwise be two entries, and a
+        // changed answer would count twice.
+        return {
+          voterJid: meIds.includes(voterJid) ? meIds[0] : voterJid,
+          hashes: (decoded.selectedOptions ?? []).map((o) => Buffer.from(o).toString("hex")),
+        };
+      } catch {
+        // wrong identity pairing, try the next
+      }
+    }
+  }
+  return null;
+}
+
+// One voter's latest vote replaces their earlier one (changing an answer must not count twice, which
+// Baileys' own aggregator would do), and an out-of-order older vote never overwrites a newer one.
+export function tallyFromVotes(entry) {
+  const votes = entry.votes ?? {};
+  return entry.values.map((name) => ({
+    name,
+    voters: Object.entries(votes)
+      .filter(([, v]) => v.hashes.includes(sha256Hex(name)))
+      .map(([voter]) => voter),
+  }));
+}
+
+// Returns the new tally, or null when nothing changed: an unknown poll, an older vote arriving late,
+// or the same vote redelivered (an offline-notification replay). Null is what keeps a redelivery
+// from waking the session again with an answer it has already acted on.
+export function saveVote(messageId, voterJid, hashes, ts) {
+  const all = readAllForWrite();
+  const entry = all[messageId];
+  if (!entry) return null;
+  entry.votes ??= {};
+  const prev = entry.votes[voterJid];
+  if (prev && (prev.ts > ts || (prev.ts === ts && JSON.stringify(prev.hashes) === JSON.stringify(hashes)))) return null;
+  entry.votes[voterJid] = { ts, hashes };
+  entry.tally = tallyFromVotes(entry);
+  entry.tallyUpdatedAt = Date.now();
+  writeAll(all);
+  return entry.tally;
+}
+
+// The one-line form of a vote update for state/inbox.log, which is what wakes a tailing session.
+// Only the options that actually hold votes are named, so "evet sil" reads as an answer rather than
+// a tally of every option. An empty tally means the voter withdrew their vote.
+export function voteWakeLine(entry, tally) {
+  const chosen = (tally ?? []).filter((t) => t.voters.length > 0).map((t) => t.name);
+  return chosen.length ? `${entry.name} → ${chosen.join(", ")}` : `${entry.name} → vote withdrawn`;
 }
 
 export function renderTally(entry) {
