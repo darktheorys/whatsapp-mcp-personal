@@ -804,6 +804,23 @@ assert.deepEqual(unansweredChats([STATS], 1 * H), [], "answering it takes it off
       null,
       "the same vote redelivered changes nothing and reports nothing",
     );
+    // The same account voting under two identities is one voter: an earlier vote stored under the
+    // @lid form is replaced by the newer one under the phone-number form, not counted beside it.
+    saveVote("P1", meLid, [sha("kırmızı").toString("hex")], 1000);
+    const merged = saveVote("P1", me, [sha("mavi").toString("hex")], 2500, [me, meLid]);
+    assert.deepEqual(
+      merged?.map((t) => [t.name, t.voters.length]),
+      [
+        ["kırmızı", 0],
+        ["mavi", 1],
+      ],
+      "one account under two identities counts once, for its newest answer",
+    );
+    assert.equal(
+      saveVote("P1", me, [sha("mavi").toString("hex")], 3000, [me, meLid]),
+      null,
+      "re-sending an unchanged choice is not news",
+    );
     // A poll whose creationKey is not flagged fromMe still decrypts: every stored poll is ours.
     const unflagged = decryptVote(getPoll("P1"), {
       creationKey: { id: "P1", remoteJid: me },

@@ -158,14 +158,28 @@ export function tallyFromVotes(entry) {
 // Returns the new tally, or null when nothing changed: an unknown poll, an older vote arriving late,
 // or the same vote redelivered (an offline-notification replay). Null is what keeps a redelivery
 // from waking the session again with an answer it has already acted on.
-export function saveVote(messageId, voterJid, hashes, ts) {
+export function saveVote(messageId, voterJid, hashes, ts, aliases = []) {
   const all = readAllForWrite();
   const entry = all[messageId];
   if (!entry) return null;
   entry.votes ??= {};
+  // The same account may already be stored under another of its identities (a vote recorded before
+  // voters were normalised, keyed by the @lid form). Left alone, one person's changed answer would
+  // show as two voters, one per option. Anything older under an alias is the same person's earlier
+  // answer and is dropped.
+  let merged = false;
+  for (const alias of aliases) {
+    if (alias !== voterJid && entry.votes[alias] && entry.votes[alias].ts <= ts) {
+      delete entry.votes[alias];
+      merged = true;
+    }
+  }
   const prev = entry.votes[voterJid];
-  if (prev && (prev.ts > ts || (prev.ts === ts && JSON.stringify(prev.hashes) === JSON.stringify(hashes)))) return null;
-  entry.votes[voterJid] = { ts, hashes };
+  const sameChoice = prev && JSON.stringify(prev.hashes) === JSON.stringify(hashes);
+  const stale = prev && prev.ts > ts;
+  // An unchanged choice, or an older vote arriving late, is not news and must not wake anyone.
+  if (!merged && (stale || sameChoice)) return null;
+  if (!stale) entry.votes[voterJid] = { ts, hashes };
   entry.tally = tallyFromVotes(entry);
   entry.tallyUpdatedAt = Date.now();
   writeAll(all);

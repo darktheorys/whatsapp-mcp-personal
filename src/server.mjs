@@ -1320,7 +1320,7 @@ async function handlePollVoteMessage(waMessage, pollVote) {
   }
   const sentAt = pollVote.senderTimestampMs;
   const ts = Number(sentAt?.toNumber ? sentAt.toNumber() : (sentAt ?? Date.now()));
-  const tally = saveVote(creationKey.id, decrypted.voterJid, decrypted.hashes, ts);
+  const tally = saveVote(creationKey.id, decrypted.voterJid, decrypted.hashes, ts, meIds);
   // Only a poll sent to the owner's own DM wakes a session: that is how Claude asks Burak for
   // permission, and the answer has to reach the session that asked. A vote in a group poll (the
   // weekly FitStar one) is read on request with wa_poll_results and must not wake anything.
