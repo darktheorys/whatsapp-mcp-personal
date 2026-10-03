@@ -2111,7 +2111,13 @@ server.registerTool(
     }
     const secret = randomBytes(32);
     const sock = getSocket();
-    const sent = await sock.sendMessage(to, { poll: { name, values, selectableCount, messageSecret: secret } });
+    // Passed explicitly because Baileys treats an unset selectableCount as 0, which WhatsApp reads as
+    // "any number of options". The documented default of 1 used to exist only in what was stored, so
+    // every poll sent without a count was multi-select: a yes/no permission poll let both be ticked.
+    const pickCount = selectableCount ?? 1;
+    const sent = await sock.sendMessage(to, {
+      poll: { name, values, selectableCount: pickCount, messageSecret: secret },
+    });
     const messageId = sent?.key?.id ?? null;
     // Saved before anything else touches this poll: if a vote arrives before this line runs,
     // getStoredPollMessage still has the secret to answer with.
@@ -2121,7 +2127,7 @@ server.registerTool(
     // be told that plainly rather than shown a generic error that implies nothing went out.
     if (messageId) {
       try {
-        savePoll(to, messageId, { name, values, selectableCount, secret });
+        savePoll(to, messageId, { name, values, selectableCount: pickCount, secret });
       } catch (err) {
         logger.error({ to, messageId, err: String(err?.message ?? err) }, "poll secret failed to save");
         return {
