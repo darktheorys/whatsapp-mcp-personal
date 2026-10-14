@@ -188,7 +188,7 @@ stream. Use `process.stderr.write` or the `state/baileys.log` pino logger instea
 - **`scanOutbound`** refuses sends matching private-key/AWS/GitHub/Slack/API-key/JWT shapes, or
   containing exact substrings from `state/auth/creds.json` — this holds regardless of *why* the
   model assembled the text, including if it was talked into it by untrusted chat content.
-- **`resolveSendable(path)`** confines outbound file sends (`wa_send_image`, `wa_send_audio`) to
+- **`resolveSendable(path)`** confines outbound file sends (`wa_send_image`, `wa_send_audio`, `wa_send_document`) to
   `state/memes/` and the session scratchpad — never `state/media/`, which holds what other chats
   sent *in*; allowing it as a source would make cross-chat forwarding a single tool call. Paths are
   resolved with `realpathSync` first so a symlink can't escape the check.

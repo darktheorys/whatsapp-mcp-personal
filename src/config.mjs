@@ -23,6 +23,12 @@ export const LOG_PATH = join(STATE_DIR, "baileys.log");
 // the socket is reachable only by this user, and the token is denied to Claude Code's own tools.
 export const DAEMON_SOCK_PATH = process.env.WA_DAEMON_SOCK ?? join(STATE_DIR, "daemon.sock");
 export const DAEMON_TOKEN_PATH = process.env.WA_DAEMON_TOKEN ?? join(STATE_DIR, "daemon.token");
+// The resident XTTS voice service (scripts/xtts_service.py) and the voices it may imitate. The
+// reference clips live in state/voices/, which is gitignored with the rest of state/ and is the only
+// place the service will read a cloning reference from.
+export const XTTS_SOCK_PATH = process.env.WA_XTTS_SOCK ?? join(STATE_DIR, "xtts.sock");
+export const VOICES_DIR = process.env.WA_VOICES_DIR ?? join(STATE_DIR, "voices");
+export const XTTS_DEFAULT_SPEAKER = "Damien Black";
 
 export function ensureDirs() {
   mkdirSync(AUTH_DIR, { recursive: true, mode: 0o700 });

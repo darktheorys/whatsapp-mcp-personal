@@ -421,6 +421,7 @@ MCP server connected in only one session at a time.
 | `wa_send_text_only` | `{ to, text }` — sends text to a voice-only chat without converting to voice. Useful for structured data (URLs, metadata, transcripts).    |
 | `wa_send_image`     | `{ to, path, caption? }` — sends a local image file, from a sendable directory only (see Security notes).                                  |
 | `wa_send_video`     | `{ to, path, caption? }` — sends a local video file (MP4 format) with optional caption, from a sendable directory only.                    |
+| `wa_send_document`  | `{ to, path, caption?, fileName? }` — sends a pdf/docx/xlsx/pptx/csv/txt/md from a sendable directory only. Text formats are secret-scanned. |
 | `wa_send_voice`     | `{ to, text, voice?, language?, rate? }` — speaks `text` (Piper by default, or a macOS `say` voice) and sends it as a voice note.          |
 | `wa_send_audio`     | `{ to, path }` — sends an already-made audio file as a voice note.                                                                         |
 | `wa_react`          | `{ jid, messageId, emoji }` — reacts to a specific logged message; empty `emoji` removes a reaction.                                       |

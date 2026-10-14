@@ -26,6 +26,13 @@ const HHMM = /^([01]\d|2[0-3]):([0-5]\d)$/;
 // was asleep at 10:03. Past this window it is stale enough that firing it is just confusing.
 const DEFAULT_CATCH_UP_MINUTES = 120;
 
+// A fired task is only done once a session has picked it up (acknowledged it with ackTask). Until
+// then the line is written again every RETRY_MINUTES, within the catch-up window, so a digest that
+// fired while no session was tailing the log is not lost for the day (owner decision, 2026-10-14).
+// Only tasks marked `pendingAck` retry: a task that last ran before this existed carries no such
+// mark and keeps the old fire-once behaviour, so an upgrade cannot send today's digest twice.
+const RETRY_MINUTES = 20;
+
 export function loadSchedule() {
   if (!existsSync(SCHEDULE_FILE)) return [];
   try {
@@ -78,8 +85,10 @@ export function dueTasks(tasks, now = Date.now()) {
     const window = (t.catchUpMinutes ?? DEFAULT_CATCH_UP_MINUTES) * 60_000;
     if (now - occurrence > window) return false;
     // The guard against firing twice: lastRun is the occurrence it last fired for, so a second
-    // check a minute later sees it has already run for this one and skips.
-    return !(t.lastRun >= occurrence);
+    // check a minute later sees it has already run for this one and skips. The one exception is a
+    // fired task nobody has acknowledged yet, which fires again after RETRY_MINUTES.
+    if (!(t.lastRun >= occurrence)) return true;
+    return t.pendingAck === true && now - (t.lastRanAt ?? 0) >= RETRY_MINUTES * 60_000;
   });
 }
 
@@ -91,7 +100,20 @@ export function markRan(id, when = Date.now()) {
   // at 10:40 still counts as "ran for 10:03" and cannot re-fire at 10:41.
   task.lastRun = occurrenceOn(when, task.at);
   task.lastRanAt = when;
+  task.pendingAck = true;
   saveSchedule(tasks);
+}
+
+// A session picked the task up: stop re-firing it for this occurrence. Returns false when there is no
+// such task.
+export function ackTask(id) {
+  const tasks = loadSchedule();
+  const task = tasks.find((t) => t.id === id);
+  if (!task) return false;
+  task.pendingAck = false;
+  task.lastAck = task.lastRun ?? null;
+  saveSchedule(tasks);
+  return true;
 }
 
 export function upsertTask(task) {

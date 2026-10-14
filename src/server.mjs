@@ -2,12 +2,16 @@ import { execFile, execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, join, sep } from "node:path";
+import { basename, extname, join, sep } from "node:path";
 import { promisify } from "node:util";
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { loadOrCreateDaemonToken, serveOnSocket } from "./daemon-transport.mjs";
+import { DocumentScanError, documentScanTexts } from "./doc-scan.mjs";
+import { parseSpeechMarkup, toSayText } from "./speech-markup.mjs";
+import { XTTS_SAMPLE_RATE, xttsRender } from "./xtts-client.mjs";
+import { defaultCloneFor, resolveClone } from "./voices.mjs";
 import {
   downloadMediaMessage,
   getAggregateVotesInPollMessage,
@@ -48,6 +52,7 @@ import {
   speakingRate,
   DAEMON_SOCK_PATH,
   DAEMON_TOKEN_PATH,
+  XTTS_DEFAULT_SPEAKER,
   STATE_DIR,
   t2sTier,
   verbosity,
@@ -82,7 +87,7 @@ import {
   saveTally,
   voteWakeLine,
 } from "./polls.mjs";
-import { loadSchedule, removeTask, startScheduler, upsertTask } from "./schedule.mjs";
+import { ackTask, loadSchedule, removeTask, startScheduler, upsertTask } from "./schedule.mjs";
 import { connectionState, getSocket, logger, setDropNotifier, startWhatsApp } from "./whatsapp.mjs";
 
 const execFileAsync = promisify(execFile);
@@ -171,10 +176,27 @@ const SENTENCE_SILENCE = "0.35"; // seconds of gap after each sentence (Piper de
 // never from the inbound pile.
 //
 // Not bare `tmpdir()`: on macOS that is the per-user temp directory every application on the
-// machine shares — browser downloads, other tools' scratch files — which is far wider than
-// "produced during this run", while *excluding* the one directory Claude Code actually writes to.
-// `/private/tmp/claude-<uid>` is that directory (see .claude/deny-outside-repo.sh).
-const SENDABLE_DIRS = [MEMES_DIR, STICKERS_DIR, `/private/tmp/claude-${process.getuid()}`];
+// machine shares. The session scratchpad lives under `/private/tmp/claude-<uid>/`, but only its
+// `outbox/` folder is a send source (owner decision, 2026-10-14): the scratchpad as a whole also holds
+// tool-result files and anything the model copies there, including a copy of something from
+// state/media, which would reopen the cross-chat forwarding hole above.
+const CLAUDE_TMP_ROOT = `/private/tmp/claude-${process.getuid()}`;
+const SENDABLE_DIRS = [MEMES_DIR, STICKERS_DIR];
+
+// A path is in a session outbox when, below the claude tmp root, it passes through
+// `scratchpad/outbox/`. Checked on the real path, so a symlink cannot smuggle a file in.
+function inSessionOutbox(real) {
+  let root;
+  try {
+    root = realpathSync(CLAUDE_TMP_ROOT);
+  } catch {
+    return false;
+  }
+  if (!real.startsWith(root + sep)) return false;
+  const parts = real.slice(root.length + 1).split(sep);
+  const i = parts.indexOf("scratchpad");
+  return i !== -1 && parts[i + 1] === "outbox" && parts.length > i + 2;
+}
 
 // Resolves symlinks first: a link inside a sendable dir pointing at ~/.ssh would otherwise pass a
 // plain string-prefix test.
@@ -188,58 +210,171 @@ export function resolveSendable(path) {
   } catch {
     return { error: `${path} does not exist` };
   }
-  const ok = SENDABLE_DIRS.some((dir) => {
-    // A sendable directory that doesn't exist yet must not throw: state/memes is gitignored, so on
-    // a fresh clone this threw ENOENT and every send — including one with a perfectly valid path in
-    // another sendable dir — died looking like a bug rather than a refusal.
-    let root;
-    try {
-      root = realpathSync(dir);
-    } catch {
-      return false;
-    }
-    return real === root || real.startsWith(root + sep);
-  });
+  const ok =
+    inSessionOutbox(real) ||
+    SENDABLE_DIRS.some((dir) => {
+      // A sendable directory that doesn't exist yet must not throw: state/memes is gitignored, so on
+      // a fresh clone this threw ENOENT and every send, including one with a perfectly valid path in
+      // another sendable dir, died looking like a bug rather than a refusal.
+      let root;
+      try {
+        root = realpathSync(dir);
+      } catch {
+        return false;
+      }
+      return real === root || real.startsWith(root + sep);
+    });
   if (!ok) {
     return {
-      error: `${path} is outside the sendable directories (state/memes, the session scratchpad) — state/media holds what other chats sent you and is never a send source`,
+      error: `${path} is outside the sendable directories (state/memes, state/stickers, the session scratchpad's outbox/ folder). state/media holds what other chats sent you and is never a send source`,
     };
   }
   return { real };
 }
 
-// Writes `text` to `outWav`. Piper (no `voice`) is the default engine, using PIPER_VOICES[lang];
-// naming a macOS `say` voice falls back to it for other languages/genders instead (`lang` is
-// unused on that path — the voice name already picks the language). `rate` is a speed multiplier
-// (1.0 normal, >1 faster, <1 slower), applied as Piper's inverse length-scale or `say`'s -r
-// words-per-minute.
-function synthWav(text, voice, rate, lang, outWav) {
-  if (!voice) {
-    // ponytail: punctuation + sentence gaps are the only prosody Piper has (no SSML, no emotion
-    // embedding in a single-speaker VITS). Tune SENTENCE_SILENCE by ear; real expressiveness
-    // needs a different model, not another flag here.
-    execFileSync(
-      PIPER_BIN,
-      [
-        "--model",
-        piperModel(lang),
-        "--length-scale",
-        String(1 / rate),
-        "--sentence-silence",
-        SENTENCE_SILENCE,
-        "--output_file",
-        outWav,
-      ],
-      {
-        input: text,
-      },
-    );
+// Renders `segments` (speech and pauses, from speech-markup.mjs) into one wav at `outWav`.
+// `renderSpeech(segment, file)` writes one spoken segment to `file` and may be async. A single plain
+// segment is rendered straight to `outWav`. Otherwise each segment is rendered separately and the
+// pieces are joined with real silence, which is what makes a pause an actual pause.
+async function joinSegments(segments, sampleRate, renderSpeech, outWav) {
+  if (segments.length === 1 && segments[0].type === "speech" && segments[0].scale === 1) {
+    await renderSpeech(segments[0], outWav);
     return;
   }
-  const aiff = `${outWav}.aiff`;
-  execFileSync("say", ["-v", voice, "-r", String(Math.round(DEFAULT_SAY_WPM * rate)), "-o", aiff, text]);
-  execFileSync("afconvert", [aiff, outWav, "-d", "LEI16", "-f", "WAVE"]);
-  rmSync(aiff, { force: true });
+  const dir = mkdtempSync(join(tmpdir(), "wa-seg-"));
+  try {
+    const files = [];
+    for (const [i, segment] of segments.entries()) {
+      const file = join(dir, `${i}.wav`);
+      if (segment.type === "pause") {
+        execFileSync(
+          "ffmpeg",
+          [
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            `anullsrc=r=${sampleRate}:cl=mono`,
+            "-t",
+            String(segment.ms / 1000),
+            "-c:a",
+            "pcm_s16le",
+            file,
+          ],
+          { stdio: "ignore" },
+        );
+      } else {
+        await renderSpeech(segment, file);
+      }
+      files.push(file);
+    }
+    // The concat filter wants identical formats, so every input is normalised first.
+    const normalise = files
+      .map((_, i) => `[${i}:a]aresample=${sampleRate},aformat=sample_fmts=s16:channel_layouts=mono[a${i}]`)
+      .join(";");
+    const joined = files.map((_, i) => `[a${i}]`).join("");
+    execFileSync(
+      "ffmpeg",
+      [
+        "-y",
+        ...files.flatMap((f) => ["-i", f]),
+        "-filter_complex",
+        `${normalise};${joined}concat=n=${files.length}:v=0:a=1[out]`,
+        "-map",
+        "[out]",
+        "-c:a",
+        "pcm_s16le",
+        outWav,
+      ],
+      { stdio: "ignore" },
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+// Writes `text` to `outWav`. The default engine is the resident XTTS-v2 service (xtts-client.mjs):
+// a more natural voice, at roughly real-time speed. If it is down, still loading or too slow, the
+// note falls back to Piper (using PIPER_VOICES[lang]) rather than failing, so a voice note is never
+// lost to it. Naming a macOS `say` voice uses that instead, for other languages/genders (`lang` is
+// unused there, the voice name already picks the language). `rate` is a speed multiplier (1.0
+// normal, >1 faster, <1 slower), passed to XTTS as its speed, applied as Piper's inverse
+// length-scale, or as `say`'s -r words-per-minute.
+//
+// `clone` ({ ref }) asks for a cloned voice instead. That never falls back: a note that was meant to
+// be in someone's voice and is read in another voice is wrong in a way that no note is not.
+//
+// Delivery markup (speech-markup.mjs) adds chosen pauses and slow/fast spans on every engine, by
+// rendering segments separately and joining them with silence.
+export async function synthWav(text, voice, rate, lang, outWav, { clone, cloneOptional } = {}) {
+  if (voice) {
+    const aiff = `${outWav}.aiff`;
+    execFileSync("say", ["-v", voice, "-r", String(Math.round(DEFAULT_SAY_WPM * rate)), "-o", aiff, toSayText(text)]);
+    execFileSync("afconvert", [aiff, outWav, "-d", "LEI16", "-f", "WAVE"]);
+    rmSync(aiff, { force: true });
+    return;
+  }
+  const parsed = parseSpeechMarkup(text);
+  const segments = parsed.length ? parsed : [{ type: "speech", text, scale: 1 }];
+  try {
+    await joinSegments(
+      segments,
+      XTTS_SAMPLE_RATE,
+      (segment, file) =>
+        xttsRender({
+          text: segment.text,
+          lang,
+          speaker: clone ? undefined : XTTS_DEFAULT_SPEAKER,
+          ref: clone?.ref,
+          speed: rate / segment.scale,
+          outWav: file,
+        }),
+      outWav,
+    );
+    return;
+  } catch (err) {
+    // An explicitly requested clone never falls back. A chat whose *default* voice is a clone
+    // (cloneOptional) does: nobody asked for that voice in particular, and being unable to answer at
+    // all because the service is down is the worse outcome.
+    if (clone && !cloneOptional) {
+      throw new Error(`the cloned voice is unavailable (${err.message}), not falling back to another voice`);
+    }
+    logger.warn({ err: String(err.message ?? err) }, "xtts unavailable, using piper for this voice note");
+  }
+  await joinSegments(
+    segments,
+    piperSampleRate(lang),
+    (segment, file) => piperRender(segment.text, lang, rate, segment.scale, file),
+    outWav,
+  );
+}
+
+// One Piper call. `scale` stretches this render's length (1.35 slow, 0.8 fast) on top of the chat's
+// speaking rate.
+function piperRender(text, lang, rate, scale, outWav) {
+  execFileSync(
+    PIPER_BIN,
+    [
+      "--model",
+      piperModel(lang),
+      "--length-scale",
+      String(scale / rate),
+      "--sentence-silence",
+      SENTENCE_SILENCE,
+      "--output_file",
+      outWav,
+    ],
+    { input: text },
+  );
+}
+
+// The model's own sample rate, so inserted silence matches what Piper writes.
+function piperSampleRate(lang) {
+  try {
+    return JSON.parse(readFileSync(`${piperModel(lang)}.json`, "utf8")).audio.sample_rate || 22050;
+  } catch {
+    return 22050;
+  }
 }
 
 // Encodes any audio file to the m4a WhatsApp voice notes need. Every outbound voice note goes
@@ -325,12 +460,13 @@ function respellLoanwords(text) {
 // (no `voice`) path — callers resolve it from the chat's default (isEnglish) unless overridden.
 // Loanword respelling only applies for `lang === "tr"` -- an English word read by the English
 // voice doesn't need Turkish-orthography help.
-function speakToBuffer(text, voice, rate = speakingRate(), lang = "tr") {
+async function speakToBuffer(text, voice, rate = speakingRate(), lang = "tr", clone, cloneOptional = false) {
   const dir = mkdtempSync(join(tmpdir(), "wa-tts-"));
   try {
     const wav = join(dir, "out.wav");
     const clean = stripEmoji(text);
-    synthWav(lang === "tr" ? respellLoanwords(clean) : clean, voice, rate, lang, wav);
+    const spoken = lang === "tr" ? respellLoanwords(clean) : clean;
+    await synthWav(spoken, voice, rate, lang, wav, { clone, cloneOptional });
     return encodeVoiceNote(wav);
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -415,11 +551,12 @@ export function scanOutboundAll(texts) {
 // an unofficial client, so the cap is deliberately far below anything a human would hit.
 const SEND_LIMIT_PER_MIN = 20;
 const recentSends = [];
-export function overSendLimit() {
+// `consume: false` only looks: it answers "would a send be refused right now" without spending a slot.
+export function overSendLimit(consume = true) {
   const now = Date.now();
   while (recentSends.length && now - recentSends[0] > 60_000) recentSends.shift();
   if (recentSends.length >= SEND_LIMIT_PER_MIN) return true;
-  recentSends.push(now);
+  if (consume) recentSends.push(now);
   return false;
 }
 
@@ -431,7 +568,16 @@ export function overSendLimit() {
 // happens to be up, and answering "not connected" to a message that should never be sent at all
 // is a worse answer. The rate limit goes last because it *consumes* budget: a send refused for any
 // earlier reason must not spend a slot that a legitimate send then gets denied for.
-export function guardSend(to, text) {
+//
+// `consume: false` runs every check, including the limit, but does not spend a slot. Tools that have
+// more to validate after this (a file's path, type, content) call `guardCheck` first, do their own
+// refusals, and only then `guardSend`, so a loop of bad requests cannot use up the budget that the
+// owner's real sends need (owner decision, 2026-10-14).
+export function guardCheck(to, text) {
+  return guardSend(to, text, { consume: false });
+}
+
+export function guardSend(to, text, { consume = true } = {}) {
   if (!allowedJid(to)) {
     return {
       isError: true,
@@ -471,7 +617,7 @@ export function guardSend(to, text) {
       ],
     };
   }
-  if (overSendLimit()) {
+  if (overSendLimit(consume)) {
     return {
       isError: true,
       content: [
@@ -936,6 +1082,36 @@ const PRESENCE_WAKE_MAX_WAIT_MS = 5 * 60_000;
 // regardless of how continuously composing signals arrive.
 const pendingWake = new Map();
 
+// The queue mirrored to disk, so a daemon restart inside the debounce window does not swallow wake
+// lines (owner decision, 2026-10-14). The messages themselves were always safe in the store, only the
+// wake was lost. Written on every change and replayed once at startup.
+const PENDING_WAKE_FILE = join(STATE_DIR, "pending-wake.json");
+function persistPendingWake() {
+  try {
+    const out = {};
+    for (const [jid, entry] of pendingWake) out[jid] = entry.lines;
+    if (Object.keys(out).length === 0) rmSync(PENDING_WAKE_FILE, { force: true });
+    else writeFileSync(PENDING_WAKE_FILE, JSON.stringify(out), { mode: 0o600 });
+  } catch (err) {
+    logger.warn({ err: String(err?.message ?? err) }, "could not persist the pending wake queue");
+  }
+}
+
+// Called once at startup: anything left on disk was queued by a process that died before flushing.
+function replayPendingWake() {
+  try {
+    if (!existsSync(PENDING_WAKE_FILE)) return;
+    const saved = JSON.parse(readFileSync(PENDING_WAKE_FILE, "utf8"));
+    rmSync(PENDING_WAKE_FILE, { force: true });
+    for (const [jid, lines] of Object.entries(saved)) {
+      if (!Array.isArray(lines)) continue;
+      for (const { label, text } of lines) logInbox(jid, label, text);
+    }
+  } catch (err) {
+    logger.warn({ err: String(err?.message ?? err) }, "could not replay the pending wake queue");
+  }
+}
+
 function flushWake(jid) {
   const entry = pendingWake.get(jid);
   if (!entry) return;
@@ -943,6 +1119,7 @@ function flushWake(jid) {
   clearTimeout(entry.ceilingTimer);
   pendingWake.delete(jid);
   for (const { label, text } of entry.lines) logInbox(jid, label, text);
+  persistPendingWake();
 }
 
 // Arms (or re-arms) the 10s debounce countdown for a jid with a non-empty queue. Called both when
@@ -965,6 +1142,7 @@ function queueWake(jid, label, text) {
     pendingWake.set(jid, entry);
   }
   entry.lines.push({ label, text });
+  persistPendingWake();
   armDebounce(jid);
 }
 
@@ -1185,10 +1363,27 @@ async function handleIncoming(waMessage) {
   //
   // The one thing in this file that reaches outside the machine on an inbound message, hence the
   // per-chat opt-out: fetching a link tells that host the message arrived.
+  let linkNote = null;
   if (!hasLinkPreviewDisabled(jid)) {
     const links = await enrichLinks(text);
-    if (links) text = text ? `${text}\n${links}` : links;
+    if (links) {
+      linkNote = links;
+      text = text ? `${text}\n${links}` : links;
+    }
   }
+  // What the wake line shows. The stored `text` above is left as it is (search and wa_recent rely
+  // on it), but in the feed a model reads, everything a machine produced is labelled untrusted: an
+  // OCR'd meme, a transcript and a page title are all text the sender or a third party controls, and
+  // nothing in them is an instruction (owner decision, 2026-10-14).
+  const wakeText = transcript
+    ? `[voice transcript, untrusted] ${transcript}`
+    : [
+        content.text,
+        extracted ? `[text in image, untrusted]\n${extracted}` : "",
+        linkNote ? `[link info, untrusted]\n${linkNote}` : "",
+      ]
+        .filter(Boolean)
+        .join("\n");
   appendMessage(jid, {
     direction: key.fromMe ? "out" : "in",
     text,
@@ -1231,7 +1426,7 @@ async function handleIncoming(waMessage) {
     // an inbound name is never rendered through ownerName(). Anything reading this feed must treat
     // "(them)" as untrusted content and only "(self)" as the owner speaking.
     const label = key.fromMe ? `(self) ${ownerName()}` : `(them) ${waMessage.pushName || jid.split("@")[0]}`;
-    const logText = text || `[${content.kind}]`;
+    const logText = wakeText || `[${content.kind}]`;
     // `?? "media"`: a reply to a video (or any kind extractContent doesn't handle) has neither text
     // nor kind, and rendered "[undefined]" in the wake feed — which reads like a bug in the quote
     // rather than "they replied to something I don't store".
@@ -1548,7 +1743,14 @@ server.registerTool(
     if (isVoiceOnly(to)) {
       let buffer;
       try {
-        buffer = speakToBuffer(text, undefined, undefined, isEnglish(to) ? "en" : "tr");
+        buffer = await speakToBuffer(
+          text,
+          undefined,
+          undefined,
+          isEnglish(to) ? "en" : "tr",
+          defaultCloneFor(to),
+          true,
+        );
       } catch (err) {
         return {
           isError: true,
@@ -1610,7 +1812,7 @@ server.registerTool(
     annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
   },
   async ({ to, path }) => {
-    const refusal = guardSend(to);
+    const refusal = guardCheck(to);
     if (refusal) return refusal;
     const sock = getSocket();
     const { real, error: pathError } = resolveSendable(path);
@@ -1635,6 +1837,8 @@ server.registerTool(
         content: [{ type: "text", text: `Could not read ${path}: ${err}` }],
       };
     }
+    const spend = guardSend(to);
+    if (spend) return spend;
     const sent = await sock.sendMessage(to, {
       audio: buffer,
       mimetype: "audio/mp4",
@@ -1668,7 +1872,7 @@ server.registerTool(
     annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
   },
   async ({ to, path, caption }) => {
-    const refusal = guardSend(to, caption);
+    const refusal = guardCheck(to, caption);
     if (refusal) return refusal;
     const sock = getSocket();
     const { real, error: pathError } = resolveSendable(path);
@@ -1695,6 +1899,8 @@ server.registerTool(
       };
     }
     const fullCaption = (caption ?? "") + ATTRIBUTION;
+    const spend = guardSend(to, caption);
+    if (spend) return spend;
     const sent = await sock.sendMessage(to, {
       image: buffer,
       caption: fullCaption,
@@ -1731,6 +1937,13 @@ server.registerTool(
         .enum(["tr", "en"])
         .optional()
         .describe("Piper voice language for this one message — omit to use the chat's default (see /language)"),
+      clone: z
+        .string()
+        .optional()
+        .describe(
+          "Name of a cloned voice (state/voices/voices.json), only usable in the chats that voice lists. " +
+            "Never falls back to another voice: if the clone cannot be rendered the call fails.",
+        ),
       rate: z
         .number()
         .positive()
@@ -1741,13 +1954,27 @@ server.registerTool(
     },
     annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
   },
-  async ({ to, text, voice, language: lang, rate }) => {
+  async ({ to, text, voice, language: lang, rate, clone }) => {
     const refusal = guardSend(to, text);
     if (refusal) return refusal;
+    let cloned;
+    if (clone) {
+      cloned = resolveClone(clone, to);
+      if (cloned.error) return { isError: true, content: [{ type: "text", text: `Refused: ${cloned.error}.` }] };
+    }
     const sock = getSocket();
     let buffer;
     try {
-      buffer = speakToBuffer(text, voice, rate, lang ?? (isEnglish(to) ? "en" : "tr"));
+      // No explicit clone and no `say` voice named: the chat's default clone, if it has one.
+      const fallbackClone = !cloned && !voice ? defaultCloneFor(to) : null;
+      buffer = await speakToBuffer(
+        text,
+        voice,
+        rate,
+        lang ?? (isEnglish(to) ? "en" : "tr"),
+        cloned ?? fallbackClone ?? undefined,
+        !cloned && Boolean(fallbackClone),
+      );
     } catch (err) {
       return {
         isError: true,
@@ -2346,6 +2573,22 @@ server.registerTool(
 );
 
 server.registerTool(
+  "wa_schedule_ack",
+  {
+    title: "Acknowledge a scheduled task",
+    description:
+      "Tell the server a woken session has picked up a scheduled task, so it stops writing the wake line " +
+      "again every 20 minutes. Call it first thing when a `⏰ <id>` line arrives, before doing the work. " +
+      "It changes nothing else.",
+    inputSchema: { id: z.string().describe("Task id from the ⏰ line, e.g. 'daily-digest'") },
+    annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+  },
+  async ({ id }) => ({
+    content: [{ type: "text", text: ackTask(id) ? `Acknowledged ${id}.` : `No task with id ${id}.` }],
+  }),
+);
+
+server.registerTool(
   "wa_send_text_only",
   {
     title: "Send a WhatsApp text message (bypassing voice-only mode)",
@@ -2400,7 +2643,7 @@ server.registerTool(
     annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
   },
   async ({ to, path }) => {
-    const refusal = guardSend(to);
+    const refusal = guardCheck(to);
     if (refusal) return refusal;
     const { real, error: pathError } = resolveSendable(path);
     if (pathError) {
@@ -2421,6 +2664,8 @@ server.registerTool(
     } catch (err) {
       return { isError: true, content: [{ type: "text", text: `Could not read ${path}: ${err}` }] };
     }
+    const spend = guardSend(to);
+    if (spend) return spend;
     const sent = await getSocket().sendMessage(to, { sticker: buffer });
     appendMessage(to, {
       direction: "out",
@@ -2450,7 +2695,7 @@ server.registerTool(
     annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
   },
   async ({ to, path, caption }) => {
-    const refusal = guardSend(to, caption);
+    const refusal = guardCheck(to, caption);
     if (refusal) return refusal;
     const sock = getSocket();
     const { real, error: pathError } = resolveSendable(path);
@@ -2477,6 +2722,8 @@ server.registerTool(
       };
     }
     const fullCaption = (caption ?? "") + ATTRIBUTION;
+    const spend = guardSend(to, caption);
+    if (spend) return spend;
     const sent = await sock.sendMessage(to, {
       video: buffer,
       caption: fullCaption,
@@ -2489,6 +2736,125 @@ server.registerTool(
       id: sent?.key?.id ?? null,
     });
     return { content: [{ type: "text", text: `Sent video to ${to}.` }] };
+  },
+);
+
+// Documents are an allowlist of extensions, not "anything in a sendable dir": an unknown extension is
+// more likely a stray artefact (a .db, a .pem, a log) than something meant for a chat. The file is read
+// ONCE and the same buffer is both scanned and sent, so nothing can change between the scan and the
+// send. Every format is scanned: plain text directly, pdf by inflating its streams, office files by
+// inflating their zip entries (see doc-scan.mjs).
+export const DOCUMENT_TYPES = {
+  ".pdf": "application/pdf",
+  ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  ".csv": "text/csv",
+  ".txt": "text/plain",
+  ".md": "text/markdown",
+};
+const MAX_DOCUMENT_BYTES = 50 * 1024 * 1024;
+
+// Returns { mimetype } for an allowed document path, or { error }. Cheap checks only, the content is
+// read and scanned by the caller.
+export function documentInfo(real) {
+  const ext = extname(real).toLowerCase();
+  const mimetype = DOCUMENT_TYPES[ext];
+  if (!mimetype) {
+    return {
+      error: `${ext || "a file with no extension"} is not an allowed document type (${Object.keys(DOCUMENT_TYPES).join(", ")})`,
+    };
+  }
+  if (statSync(real).size > MAX_DOCUMENT_BYTES) return { error: "file exceeds 50 MB" };
+  return { mimetype };
+}
+
+// Secret-scans a document's content. Returns a refusal reason, or null when it is clean.
+export function scanDocument(buffer, ext) {
+  let texts;
+  try {
+    texts = documentScanTexts(buffer, ext);
+  } catch (err) {
+    // Fails closed: a document the scanner cannot read in full is not sent.
+    if (err instanceof DocumentScanError) return `it could not be scanned (${err.message})`;
+    throw err;
+  }
+  for (const text of texts) {
+    const reason = scanOutbound(text);
+    if (reason) return reason;
+  }
+  return null;
+}
+
+server.registerTool(
+  "wa_send_document",
+  {
+    title: "Send a WhatsApp document",
+    description:
+      "Send a document (pdf, docx, xlsx, pptx, csv, txt, md) from a local file path to an allowlisted " +
+      "WhatsApp JID, with an optional caption. Same source rule as images: only state/memes, state/stickers " +
+      "and the session scratchpad's outbox/ folder, never state/media. The content is secret-scanned before " +
+      "sending. Refuses anything not in state/config.json's allowlist.",
+    inputSchema: {
+      to: z.string().describe("Recipient JID, e.g. 491701234567@s.whatsapp.net"),
+      path: z.string().describe("Absolute local path to the document"),
+      caption: z.string().optional(),
+      fileName: z
+        .string()
+        .optional()
+        .describe("Name shown in the chat, defaults to the file's own name. Its extension must match the file."),
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+  },
+  async ({ to, path, caption, fileName }) => {
+    // Everything that can refuse runs before guardSend, which is the step that spends a rate-limit slot.
+    const check = guardCheck(to, [caption, fileName].filter(Boolean).join("\n") || undefined);
+    if (check) return check;
+    const { real, error: pathError } = resolveSendable(path);
+    if (pathError) return { isError: true, content: [{ type: "text", text: `Refused: ${pathError}.` }] };
+    let info;
+    let buffer;
+    try {
+      info = documentInfo(real);
+      if (info.error) return { isError: true, content: [{ type: "text", text: `Refused: ${info.error}.` }] };
+      buffer = readFileSync(real);
+    } catch (err) {
+      return { isError: true, content: [{ type: "text", text: `Could not read ${path}: ${err}` }] };
+    }
+    if (buffer.length > MAX_DOCUMENT_BYTES) {
+      return { isError: true, content: [{ type: "text", text: "Refused: file exceeds 50 MB." }] };
+    }
+    const ext = extname(real).toLowerCase();
+    const leak = scanDocument(buffer, ext);
+    if (leak) {
+      notify("warning", `wa_send_document refused: ${basename(real)} matched the secret scan (${leak})`);
+      return { isError: true, content: [{ type: "text", text: `Refused: ${basename(real)}, ${leak}.` }] };
+    }
+    const name = basename(fileName ?? real);
+    if (extname(name).toLowerCase() !== ext) {
+      return {
+        isError: true,
+        content: [{ type: "text", text: "Refused: fileName must keep the file's real extension." }],
+      };
+    }
+    const refusal = guardSend(to, [caption, fileName].filter(Boolean).join("\n") || undefined);
+    if (refusal) return refusal;
+    const sock = getSocket();
+    const fullCaption = (caption ?? "") + ATTRIBUTION;
+    const sent = await sock.sendMessage(to, {
+      document: buffer,
+      mimetype: info.mimetype,
+      fileName: name,
+      caption: fullCaption,
+    });
+    appendMessage(to, {
+      direction: "out",
+      by: "claude",
+      text: fullCaption,
+      ts: Date.now(),
+      id: sent?.key?.id ?? null,
+    });
+    return { content: [{ type: "text", text: `Sent document ${name} to ${to}.` }] };
   },
 );
 
@@ -2545,6 +2911,7 @@ server.registerTool(
 // Importing this file otherwise connects to WhatsApp as a side effect, which would evict the
 // running server. The guard is what lets the test import the parsers above without doing that.
 if (!process.env.WA_NO_CONNECT) {
+  replayPendingWake();
   // Started here rather than next to the tool registrations so importing this file for tests does
   // not start a timer, same reason the socket is behind this guard.
   //
@@ -2576,6 +2943,9 @@ if (!process.env.WA_NO_CONNECT) {
       path: DAEMON_SOCK_PATH,
       token: loadOrCreateDaemonToken(DAEMON_TOKEN_PATH),
       log: (line) => process.stderr.write(`whatsapp-mcp daemon: ${line}\n`),
+      // A line in the wake feed, so the session that was displaced (or the owner reading the log) sees it.
+      onReplace: () =>
+        logInbox("(daemon)", "client replaced", "a new authenticated client took over the daemon connection"),
     });
   } else {
     const transport = new StdioServerTransport();
