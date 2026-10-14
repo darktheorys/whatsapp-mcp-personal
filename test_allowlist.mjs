@@ -13,6 +13,13 @@ const GROUP = "120363001234567890@g.us";
 const cfg = join(mkdtempSync(join(tmpdir(), "wa-test-")), "config.json");
 writeFileSync(cfg, JSON.stringify({ allowlist: [DM, GROUP] }));
 process.env.WA_CONFIG_PATH = cfg;
+// The voice paths (cloned voices, the XTTS socket, the daemon token) are also resolved when config.mjs
+// loads, so a test must not be able to touch the real ones.
+const voiceDir = mkdtempSync(join(tmpdir(), "wa-voices-"));
+process.env.WA_VOICES_DIR = join(voiceDir, "voices");
+process.env.WA_XTTS_SOCK = join(voiceDir, "x.sock");
+process.env.WA_DAEMON_TOKEN = join(voiceDir, "token");
+writeFileSync(process.env.WA_DAEMON_TOKEN, "t".repeat(64) + "\n");
 
 // Imported late: CONFIG_PATH is resolved at module load, so the env var must be set first.
 const { allowedJid, hasImageDisabled, isMentionOnly } = await import("./src/config.mjs");
@@ -356,6 +363,135 @@ try {
 } finally {
   rmSync(inbound, { force: true });
   rmSync(meme, { force: true });
+}
+
+// wa_send_document: only listed extensions go out, and every format is secret-scanned on its real
+// content, not its raw bytes (pdf and office files compress their text). Checks the pure helpers, the
+// tool itself needs a live socket.
+const { documentInfo, scanDocument, DOCUMENT_TYPES } = await import("./src/server.mjs");
+const { deflateSync, deflateRawSync } = await import("node:zlib");
+const docDir = join(STATE_DIR, "memes");
+mkdirSync(docDir, { recursive: true });
+const pdfDoc = join(docDir, "test-doc.PDF");
+const dbDoc = join(docDir, "test-doc.db");
+writeFileSync(pdfDoc, "%PDF-1.4");
+writeFileSync(dbDoc, "x");
+const SECRET = "AKIAIOSFODNN7EXAMPLE";
+try {
+  assert.equal(documentInfo(pdfDoc).mimetype, DOCUMENT_TYPES[".pdf"], "extension match is case-insensitive");
+  assert.match(documentInfo(dbDoc).error, /not an allowed document type/, "a .db is refused");
+} finally {
+  rmSync(pdfDoc, { force: true });
+  rmSync(dbDoc, { force: true });
+}
+assert.equal(scanDocument(Buffer.from("just a normal csv\n1,2,3"), ".csv"), null, "a clean text file passes");
+assert.ok(scanDocument(Buffer.from(`key,${SECRET}\n`), ".csv"), "a secret inside a csv is caught");
+// A pdf whose page text is Flate-compressed: the raw bytes contain no readable secret at all.
+const pdfBody = deflateSync(Buffer.from(`BT (${SECRET}) Tj ET`));
+const pdfBuf = Buffer.concat([
+  Buffer.from("%PDF-1.4\n1 0 obj\nstream\n"),
+  pdfBody,
+  Buffer.from("\nendstream\nendobj\n"),
+]);
+assert.ok(!pdfBuf.toString("latin1").includes(SECRET), "test setup: the secret is not visible in the raw pdf");
+assert.ok(scanDocument(pdfBuf, ".pdf"), "a secret inside a compressed pdf stream is caught");
+assert.equal(
+  scanDocument(
+    Buffer.concat([
+      Buffer.from("%PDF-1.4\nstream\n"),
+      deflateSync(Buffer.from("hello world")),
+      Buffer.from("\nendstream"),
+    ]),
+    ".pdf",
+  ),
+  null,
+  "a clean pdf passes",
+);
+// A minimal docx-shaped zip: one deflated xml entry, central directory at the end.
+function zipOf(name, content) {
+  const data = deflateRawSync(Buffer.from(content));
+  const nameBuf = Buffer.from(name);
+  const local = Buffer.alloc(30);
+  local.writeUInt32LE(0x04034b50, 0);
+  local.writeUInt16LE(8, 8); // deflate
+  local.writeUInt32LE(data.length, 18);
+  local.writeUInt32LE(content.length, 22);
+  local.writeUInt16LE(nameBuf.length, 26);
+  const central = Buffer.alloc(46);
+  central.writeUInt32LE(0x02014b50, 0);
+  central.writeUInt16LE(8, 10);
+  central.writeUInt32LE(data.length, 20);
+  central.writeUInt32LE(content.length, 24);
+  central.writeUInt16LE(nameBuf.length, 28);
+  central.writeUInt32LE(0, 42); // local header offset
+  const cdOffset = local.length + nameBuf.length + data.length;
+  const eocd = Buffer.alloc(22);
+  eocd.writeUInt32LE(0x06054b50, 0);
+  eocd.writeUInt16LE(1, 8);
+  eocd.writeUInt16LE(1, 10);
+  eocd.writeUInt32LE(central.length + nameBuf.length, 12);
+  eocd.writeUInt32LE(cdOffset, 16);
+  return Buffer.concat([local, nameBuf, data, central, nameBuf, eocd]);
+}
+assert.ok(
+  scanDocument(zipOf("word/document.xml", `<w:t>${SECRET}</w:t>`), ".docx"),
+  "a secret inside a docx is caught",
+);
+assert.equal(scanDocument(zipOf("word/document.xml", "<w:t>hello</w:t>"), ".docx"), null, "a clean docx passes");
+// Several streams in one pdf: the secret sits in the SECOND and the FOURTH, which an earlier version of the
+// scanner skipped by resuming inside the word "endstream".
+{
+  const stream = (t) =>
+    Buffer.concat([Buffer.from("obj\nstream\n"), deflateSync(Buffer.from(t)), Buffer.from("\nendstream\nendobj\n")]);
+  const clean = (n) => stream(`page ${n}`);
+  const head = Buffer.from("%PDF-1.4\n");
+  assert.ok(
+    scanDocument(Buffer.concat([head, clean(1), stream(SECRET), clean(3), clean(4)]), ".pdf"),
+    "secret in stream 2",
+  );
+  assert.ok(
+    scanDocument(Buffer.concat([head, clean(1), clean(2), clean(3), stream(SECRET)]), ".pdf"),
+    "secret in stream 4",
+  );
+  assert.equal(
+    scanDocument(Buffer.concat([head, clean(1), clean(2), clean(3), clean(4)]), ".pdf"),
+    null,
+    "four clean streams pass",
+  );
+  // Fails closed: a stream that starts like Flate but will not inflate is refused, not skipped.
+  const broken = Buffer.concat([
+    head,
+    Buffer.from("obj\nstream\n"),
+    Buffer.from([0x78, 0x9c, 0xff, 0xff, 0xff]),
+    Buffer.from("\nendstream\n"),
+  ]);
+  assert.match(scanDocument(broken, ".pdf"), /could not be scanned/, "an unreadable stream is refused");
+  // The container is recognised by its bytes, not its extension.
+  assert.ok(scanDocument(Buffer.concat([head, stream(SECRET)]), ".txt"), "a pdf renamed to .txt is still opened up");
+}
+
+// The rate limit is only spent by a real send. A refused request that merely checks must not use a slot.
+{
+  const { overSendLimit: limit } = await import("./src/server.mjs");
+  for (let i = 0; i < 60; i++) assert.equal(limit(false), false, "a check-only call never reports the limit");
+  assert.equal(limit(false), false, "...and spent nothing, 60 checks later a real send still fits");
+}
+
+// Only a session's outbox/ folder is a send source, not the scratchpad as a whole: anything copied
+// there from state/media would otherwise be forwardable.
+{
+  const scratch = join(`/private/tmp/claude-${process.getuid()}`, `wa-test-${process.pid}`, "scratchpad");
+  mkdirSync(join(scratch, "outbox"), { recursive: true });
+  const loose = join(scratch, "loose.txt");
+  const boxed = join(scratch, "outbox", "ok.txt");
+  writeFileSync(loose, "x");
+  writeFileSync(boxed, "x");
+  try {
+    assert.match(resolveSendable(loose).error, /outside the sendable/, "a loose scratchpad file is not sendable");
+    assert.equal(resolveSendable(boxed).error, undefined, "a file in scratchpad/outbox is sendable");
+  } finally {
+    rmSync(join(scratch, ".."), { recursive: true, force: true });
+  }
 }
 
 // wa_edit/wa_delete must not touch Burak's own phone-typed messages, which are `direction: "out"`
@@ -889,7 +1025,8 @@ assert.deepEqual(unansweredChats([STATS], 1 * H), [], "answering it takes it off
 // behaviour instead of whatever time the suite happens to run at. Thursday 17 Sep 2026, local time,
 // because the weekday filter is one of the things that has to be right.
 {
-  const { dueTasks, validateTask, upsertTask, removeTask, loadSchedule, markRan } = await import("./src/schedule.mjs");
+  const { dueTasks, validateTask, upsertTask, removeTask, loadSchedule, markRan, ackTask } =
+    await import("./src/schedule.mjs");
   const at = (h, m) => new Date(2026, 8, 17, h, m, 0, 0).getTime();
   const THURSDAY = 4;
   assert.equal(new Date(at(12, 0)).getDay(), THURSDAY, "sanity: the fixture date really is a Thursday");
@@ -915,6 +1052,15 @@ assert.deepEqual(unansweredChats([STATS], 1 * H), [], "answering it takes it off
     "yesterday's run does not satisfy today's",
   );
 
+  // Fired but not picked up by a session: it fires again every 20 minutes until acknowledged. A task
+  // without the pendingAck mark (one that ran before this existed) keeps the old fire-once behaviour.
+  const fired = { ...digest, lastRun: at(10, 3), lastRanAt: at(10, 3), pendingAck: true };
+  assert.equal(dueTasks([fired], at(10, 20)).length, 0, "not re-fired 17 minutes after firing");
+  assert.equal(dueTasks([fired], at(10, 24)).length, 1, "re-fired once 20 minutes pass with no acknowledgement");
+  assert.equal(dueTasks([{ ...fired, pendingAck: false }], at(11, 0)).length, 0, "acknowledged tasks stop re-firing");
+  assert.equal(dueTasks([{ ...fired, pendingAck: undefined }], at(11, 0)).length, 0, "old-style tasks never retry");
+  assert.equal(dueTasks([fired], at(12, 30)).length, 0, "and retries stop when the catch-up window closes");
+
   assert.equal(
     dueTasks([{ ...digest, days: [THURSDAY] }], at(11, 0)).length,
     1,
@@ -938,6 +1084,10 @@ assert.deepEqual(unansweredChats([STATS], 1 * H), [], "answering it takes it off
   assert.equal(loadSchedule().length, 1, "and not written");
   markRan("daily-digest", at(10, 30));
   assert.equal(loadSchedule()[0].lastRun, at(10, 3), "markRan records the occurrence, not the wall clock it fired at");
+  assert.equal(loadSchedule()[0].pendingAck, true, "a fired task waits for a session to acknowledge it");
+  assert.equal(ackTask("daily-digest"), true, "acknowledging a known task works");
+  assert.equal(ackTask("no-such-task"), false, "acknowledging an unknown task reports it");
+  assert.equal(loadSchedule()[0].pendingAck, false, "and clears the wait");
   // Editing a task must not resurrect an occurrence that already ran, or a prompt tweak at 11:00
   // would send a second digest.
   upsertTask({ id: "daily-digest", at: "10:03", prompt: "reworded" });
@@ -1208,6 +1358,148 @@ assert.deepEqual(unansweredChats([STATS], 1 * H), [], "answering it takes it off
 
   await daemon.close();
   rmSync(dir, { recursive: true, force: true });
+}
+
+// Delivery markup for voice notes: pauses and slow/fast spans, parsed outside the TTS engine.
+{
+  const { parseSpeechMarkup, stripSpeechMarkup, toSayText } = await import("./src/speech-markup.mjs");
+  assert.deepEqual(
+    parseSpeechMarkup("Merhaba [pause 700] dünya"),
+    [
+      { type: "speech", text: "Merhaba", scale: 1 },
+      { type: "pause", ms: 700 },
+      { type: "speech", text: "dünya", scale: 1 },
+    ],
+    "an explicit pause splits the speech",
+  );
+  assert.deepEqual(
+    parseSpeechMarkup("tamam... gidiyorum").map((p) => p.type === "pause" && p.ms),
+    [false, 450, false],
+    "an ellipsis becomes an automatic beat",
+  );
+  const spans = parseSpeechMarkup("hızlı [slow]çok yavaş[/slow] normal");
+  assert.deepEqual(
+    spans.map((p) => p.scale),
+    [1, 1.35, 1],
+    "a slow span stretches only the text inside it",
+  );
+  assert.equal(parseSpeechMarkup("[pause 9999] a")[0].type, "speech", "a pause with nothing before it is dropped");
+  assert.equal(
+    parseSpeechMarkup("a [pause 2900] [pause 2900] b").find((p) => p.type === "pause").ms,
+    3000,
+    "pauses are merged and clamped to three seconds",
+  );
+  assert.equal(stripSpeechMarkup("bir [pause] iki [fast]üç[/fast]"), "bir iki üç", "stripping leaves only the words");
+  assert.equal(toSayText("bir [pause 300] iki"), "bir [[slnc 300]] iki", "say gets its own silence command");
+  assert.equal(
+    parseSpeechMarkup("düz bir cümle").length,
+    1,
+    "plain text stays one segment, so it takes the unchanged path",
+  );
+  assert.deepEqual(
+    parseSpeechMarkup("[slow]tamam[/slow]. [pause 400] .").map((p) => p.type),
+    ["speech"],
+    "a chunk of punctuation alone is dropped rather than handed to Piper, which fails on it",
+  );
+}
+
+// Cloned voices and the XTTS client. A synthetic voice note has no text marker, so a clone of a real
+// person's voice reaching the wrong chat could pass as them: the chat list is enforced at the send,
+// there is no fallback to a different voice, and the service is only ever reached with the token.
+{
+  const { resolveClone } = await import("./src/voices.mjs");
+  const { xttsRequest, xttsRender } = await import("./src/xtts-client.mjs");
+  const { synthWav } = await import("./src/server.mjs");
+  const { createServer } = await import("node:net");
+  const dir = process.env.WA_VOICES_DIR;
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "alice.wav"), "RIFF");
+  writeFileSync(
+    join(dir, "voices.json"),
+    JSON.stringify({ alice: { ref: "alice.wav", allowed_jids: ["31600000000@s.whatsapp.net"] } }),
+  );
+  assert.ok(resolveClone("alice", "31600000000@s.whatsapp.net").ref, "a listed chat may use the voice");
+  assert.match(resolveClone("alice", "49170000000@s.whatsapp.net").error, /not allowed/, "an unlisted DM is refused");
+  assert.match(resolveClone("alice", "120363000000000001@g.us").error, /not allowed/, "a group is refused");
+  assert.match(resolveClone("nobody", "31600000000@s.whatsapp.net").error, /no cloned voice/, "an unknown name");
+  // A voice that lists "*" is usable in any chat (the chat itself still has to pass guardSend).
+  writeFileSync(
+    join(dir, "voices.json"),
+    JSON.stringify({ alice: { ref: "alice.wav", allowed_jids: ["31600000000@s.whatsapp.net", "*"] } }),
+  );
+  assert.ok(resolveClone("alice", "120363000000000001@g.us").ref, "a wildcard voice works in any chat");
+  writeFileSync(
+    join(dir, "voices.json"),
+    JSON.stringify({ alice: { ref: "alice.wav", allowed_jids: ["31600000000@s.whatsapp.net"] } }),
+  );
+  assert.match(resolveClone("../etc/passwd", "x").error, /not a valid voice name/, "a path is not a voice name");
+  // A chat can make a voice its default, but only where the voice is also allowed.
+  const { defaultCloneFor } = await import("./src/voices.mjs");
+  writeFileSync(
+    join(dir, "voices.json"),
+    JSON.stringify({
+      alice: {
+        ref: "alice.wav",
+        allowed_jids: ["31600000000@s.whatsapp.net"],
+        default_jids: ["31600000000@s.whatsapp.net", "49170000000@s.whatsapp.net"],
+      },
+    }),
+  );
+  assert.equal(defaultCloneFor("31600000000@s.whatsapp.net")?.name, "alice", "a listed chat gets its default voice");
+  assert.equal(
+    defaultCloneFor("49170000000@s.whatsapp.net"),
+    null,
+    "being a default chat is not enough, the voice must also be allowed there",
+  );
+  assert.equal(defaultCloneFor("120363000000000001@g.us"), null, "an unlisted chat has no default clone");
+  writeFileSync(
+    join(dir, "voices.json"),
+    JSON.stringify({ escape: { ref: "../../etc/hosts", allowed_jids: ["31600000000@s.whatsapp.net"] } }),
+  );
+  assert.ok(
+    resolveClone("escape", "31600000000@s.whatsapp.net").error,
+    "a reference path that leaves the voices directory is refused",
+  );
+
+  // The client against a fake service: it sends the token, a refusal rejects, a hang times out.
+  const sockPath = process.env.WA_XTTS_SOCK;
+  let seen = null;
+  let mode = "ok";
+  const fake = createServer((c) => {
+    let acc = "";
+    c.on("data", (d) => {
+      acc += d.toString();
+      if (!acc.includes("\n")) return;
+      seen = JSON.parse(acc);
+      if (mode === "ok") c.end(JSON.stringify({ ok: true, seconds: 1 }) + "\n");
+      else if (mode === "refuse") c.end(JSON.stringify({ ok: false, error: "bad token" }) + "\n");
+      // "hang": never answer
+    });
+    c.on("error", () => {});
+  });
+  await new Promise((r) => fake.listen(sockPath, r));
+  assert.deepEqual(await xttsRequest({ op: "ping" }), { ok: true, seconds: 1 }, "an answer resolves");
+  assert.equal(seen.token, "t".repeat(64), "every request carries the daemon token");
+  mode = "refuse";
+  await assert.rejects(xttsRequest({ op: "ping" }), /refused: bad token/, "a refusal rejects");
+  mode = "hang";
+  await assert.rejects(
+    xttsRequest({ op: "ping" }, { timeoutMs: 150 }),
+    /timed out/,
+    "a hung service cannot stall a chat",
+  );
+  await new Promise((r) => fake.close(r));
+  await assert.rejects(
+    xttsRender({ text: "x", lang: "tr", outWav: "/tmp/x.wav" }),
+    "a service that is down rejects fast",
+  );
+
+  // A cloned voice never falls back to another voice when the service is down.
+  await assert.rejects(
+    synthWav("merhaba", undefined, 1, "tr", join(dir, "out.wav"), { clone: { ref: join(dir, "alice.wav") } }),
+    /not falling back to another voice/,
+    "a clone with the service down fails instead of speaking in a different voice",
+  );
 }
 
 // Runs last: it deliberately exhausts the window, so anything after it would see a full budget.

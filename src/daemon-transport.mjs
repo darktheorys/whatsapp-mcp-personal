@@ -67,7 +67,7 @@ function socketIsLive(path) {
 // One client at a time, mirroring the old stdio behaviour where a second session took over: a new
 // authenticated connection closes the previous one. `server` is the McpServer, which can only be
 // connected to a single transport, so the previous one has to be closed first.
-export async function serveOnSocket(server, { path, token, log = () => {} }) {
+export async function serveOnSocket(server, { path, token, log = () => {}, onReplace = () => {} }) {
   if (existsSync(path)) {
     if (await socketIsLive(path)) throw new Error(`another daemon is already listening on ${path}`);
     unlinkSync(path);
@@ -95,6 +95,14 @@ export async function serveOnSocket(server, { path, token, log = () => {} }) {
       // Said before it is closed, so the displaced shim knows it lost the connection to a newer
       // client and stops, instead of reconnecting and displacing that one in turn, forever.
       previous.socket.write(JSON.stringify({ wa_daemon_replaced: true }) + "\n");
+      // Made visible (owner decision, 2026-10-14): the token is static, so a takeover by anything that
+      // holds it looks exactly like a normal reconnect unless something says it happened.
+      log("a new authenticated client replaced the active one");
+      try {
+        onReplace();
+      } catch {
+        // A notice failing must never stop the takeover it is reporting.
+      }
       await closeConnection(previous);
     }
     const input = new PassThrough();

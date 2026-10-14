@@ -7,6 +7,8 @@ description: Use when a scheduler wake line (a `[(scheduler)] ⏰` entry for dai
 
 `src/schedule.mjs` fires a due task by writing a `⏰ <id>: <prompt>` line to `state/inbox.log`. The server cannot do the work (composing needs a model), so whichever session is tailing the log does it. The wake line can be truncated in the Monitor notification. Read the full line with `grep -a "<id>" state/inbox.log | tail -n 1` before acting, or list the stored prompt with `wa_schedule` (`action: list`).
 
+Acknowledge first: the moment a `⏰ <id>` line arrives, call `wa_schedule_ack` with that id, before doing the work. Until it is acknowledged the server writes the same line again every 20 minutes (inside the catch-up window), because a fired task nobody picked up is not done. A repeated line for a task you already acknowledged means the ack failed, so call it again.
+
 Tasks are stored in `state/schedule.json` (not versioned, gitignored). `at` is local `HH:MM` plus optional `days` (0 is Sunday). `lastRun` stores the occurrence a run was for, which is what makes catch-up and the no-double-fire guard the same mechanism.
 
 Chat ids are not written in this file. Each task's stored prompt names its target chat, and that is where the id comes from.
@@ -17,7 +19,7 @@ Chat ids are not written in this file. Each task's stored prompt names its targe
 - Late fire: if the line arrives late (machine was asleep, catch-up), say so in the message, once, in one clause. Do not over-apologize.
 - A missed day is not backfilled silently. If two digests were missed, send one combined digest and say which dates it covers.
 - Counts and facts come from tools, never from memory. If a number is not known, ask or leave it out.
-- Style: Turkish, short, no filler, no em dashes, links on their own line, signed `(_Claude_)`. Digest and review go to the owner's own DM, which is voice-only, so use `wa_send_text_only`, never a voice note.
+- Style: Turkish, short, no filler, no em dashes, links on their own line, no hand-written attribution (the server appends `(_Claude_)` itself, the owner decided to keep it on 2026-10-14). Digest and review go to the owner's own DM, which is voice-only, so use `wa_send_text_only`, never a voice note.
 - After sending, nothing else is required. Do not ask the owner to confirm.
 
 ## daily-digest (10:03 local, catch-up 240 min)
@@ -33,7 +35,6 @@ Target: the owner's own DM.
    - `*Günlük AI özeti, <D Ay>*`
    - `*Haberler*` then numbered items
    - `*Makaleler*` then numbered items
-   - `(_Claude_)`
 6. Technical notes (lost messages, outages) go at the end under a plain "Ayrıca" line, only if real.
 
 ## weekly-review (Sunday 19:07, catch-up 300 min)
