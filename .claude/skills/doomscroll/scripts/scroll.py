@@ -18,10 +18,10 @@ UA = "whatsapp-mcp-personal/1.0 (personal feed reader)"
 TIMEOUT = 20
 
 PRESETS = {
-    "kgbtr":   "https://www.reddit.com/r/KGBTR/hot/.rss",
-    "turkey":  "https://www.reddit.com/r/Turkey/hot/.rss",
+    "kgbtr": "https://www.reddit.com/r/KGBTR/hot/.rss",
+    "turkey": "https://www.reddit.com/r/Turkey/hot/.rss",
     "turkiye": "https://www.reddit.com/r/Turkiye/hot/.rss",
-    "hn":      "https://news.ycombinator.com/rss",
+    "hn": "https://news.ycombinator.com/rss",
 }
 
 NS = {"atom": "http://www.w3.org/2005/Atom"}
@@ -36,8 +36,11 @@ def resolve(source: str) -> str:
         return f"https://www.youtube.com/feeds/videos.xml?channel_id={source.split(':', 1)[1]}"
     if source.startswith(("http://", "https://")):
         return source
-    print(f"Unknown source '{source}'. Presets: {', '.join(sorted(PRESETS))}; "
-          f"or reddit:<sub>, yt:<channel_id>, or a feed URL.", file=sys.stderr)
+    print(
+        f"Unknown source '{source}'. Presets: {', '.join(sorted(PRESETS))}; "
+        f"or reddit:<sub>, yt:<channel_id>, or a feed URL.",
+        file=sys.stderr,
+    )
     sys.exit(2)
 
 
@@ -73,32 +76,48 @@ def parse(raw: bytes, limit: int):
     # Atom (Reddit, YouTube)
     for entry in root.findall(".//atom:entry", NS)[:limit]:
         link_el = entry.find("atom:link", NS)
-        out.append({
-            "title": (entry.findtext("atom:title", "", NS) or "").strip(),
-            "link": (link_el.get("href") if link_el is not None else "") or "",
-            "date": (entry.findtext("atom:updated", "", NS)
-                     or entry.findtext("atom:published", "", NS) or "").strip(),
-            "author": (entry.findtext("atom:author/atom:name", "", NS) or "").strip(),
-        })
+        out.append(
+            {
+                "title": (entry.findtext("atom:title", "", NS) or "").strip(),
+                "link": (link_el.get("href") if link_el is not None else "") or "",
+                "date": (
+                    entry.findtext("atom:updated", "", NS)
+                    or entry.findtext("atom:published", "", NS)
+                    or ""
+                ).strip(),
+                "author": (
+                    entry.findtext("atom:author/atom:name", "", NS) or ""
+                ).strip(),
+            }
+        )
     if out:
         return out
 
     # RSS 2.0 (Hacker News and most classic feeds)
     for item in root.findall(".//item")[:limit]:
-        out.append({
-            "title": (item.findtext("title", "") or "").strip(),
-            "link": (item.findtext("link", "") or "").strip(),
-            "date": (item.findtext("pubDate", "") or "").strip(),
-            "author": (item.findtext("author", "") or "").strip(),
-        })
+        out.append(
+            {
+                "title": (item.findtext("title", "") or "").strip(),
+                "link": (item.findtext("link", "") or "").strip(),
+                "date": (item.findtext("pubDate", "") or "").strip(),
+                "author": (item.findtext("author", "") or "").strip(),
+            }
+        )
     return out
 
 
 def main():
-    p = argparse.ArgumentParser(description="Scroll public RSS/Atom feeds for fresh items")
-    p.add_argument("sources", nargs="+",
-                   help=f"Presets ({', '.join(sorted(PRESETS))}), reddit:<sub>, yt:<channel_id>, or feed URLs")
-    p.add_argument("--limit", type=int, default=10, help="Items per source (default 10)")
+    p = argparse.ArgumentParser(
+        description="Scroll public RSS/Atom feeds for fresh items"
+    )
+    p.add_argument(
+        "sources",
+        nargs="+",
+        help=f"Presets ({', '.join(sorted(PRESETS))}), reddit:<sub>, yt:<channel_id>, or feed URLs",
+    )
+    p.add_argument(
+        "--limit", type=int, default=10, help="Items per source (default 10)"
+    )
     p.add_argument("--json", action="store_true", help="Print raw JSON")
     args = p.parse_args()
 

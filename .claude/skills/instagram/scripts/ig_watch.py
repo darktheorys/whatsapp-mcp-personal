@@ -36,10 +36,22 @@ def run_json(cmd, what):
 
 
 def main():
-    p = argparse.ArgumentParser(description="Download and watch a public Instagram reel/post (no login)")
+    p = argparse.ArgumentParser(
+        description="Download and watch a public Instagram reel/post (no login)"
+    )
     p.add_argument("target", help="Post/reel URL or bare shortcode")
-    p.add_argument("--fps", type=float, default=1.0, help="Frames per second to sample (default: 1)")
-    p.add_argument("-o", "--out-dir", default=None, help="Directory for the download (default: state/tmp)")
+    p.add_argument(
+        "--fps",
+        type=float,
+        default=1.0,
+        help="Frames per second to sample (default: 1)",
+    )
+    p.add_argument(
+        "-o",
+        "--out-dir",
+        default=None,
+        help="Directory for the download (default: state/tmp)",
+    )
     args = p.parse_args()
 
     if not WATCH_VIDEO.exists():
@@ -54,8 +66,17 @@ def main():
     videos = [f for f in dl.get("files", []) if f.lower().endswith(".mp4")]
     if not videos:
         # Image post: nothing to transcribe, just hand back the stills to look at.
-        print(json.dumps({**dl, "watch": None,
-                          "tip": "Image post -- Read the files[] directly."}, indent=2, ensure_ascii=False))
+        print(
+            json.dumps(
+                {
+                    **dl,
+                    "watch": None,
+                    "tip": "Image post -- Read the files[] directly.",
+                },
+                indent=2,
+                ensure_ascii=False,
+            )
+        )
         return
 
     # watch_video.py defaults to a system temp dir, which sits outside the repo and is
@@ -67,19 +88,25 @@ def main():
         "watch_video.py",
     )
 
-    print(json.dumps({
-        "shortcode": dl.get("shortcode"),
-        "owner": dl.get("owner"),
-        "duration": dl.get("duration"),
-        "caption": dl.get("caption"),
-        "video": videos[0],
-        "first_frame": watch.get("first_frame"),
-        "contact_sheet": watch.get("contact_sheet"),
-        "transcript": watch.get("transcript"),
-        "frames": watch.get("frames"),
-        "tip": "Read first_frame for a quick check, then contact_sheet for the whole flow. "
-               "Transcript is whisper output and may be empty for music-only reels.",
-    }, indent=2, ensure_ascii=False))
+    print(
+        json.dumps(
+            {
+                "shortcode": dl.get("shortcode"),
+                "owner": dl.get("owner"),
+                "duration": dl.get("duration"),
+                "caption": dl.get("caption"),
+                "video": videos[0],
+                "first_frame": watch.get("first_frame"),
+                "contact_sheet": watch.get("contact_sheet"),
+                "transcript": watch.get("transcript"),
+                "frames": watch.get("frames"),
+                "tip": "Read first_frame for a quick check, then contact_sheet for the whole flow. "
+                "Transcript is whisper output and may be empty for music-only reels.",
+            },
+            indent=2,
+            ensure_ascii=False,
+        )
+    )
 
 
 if __name__ == "__main__":

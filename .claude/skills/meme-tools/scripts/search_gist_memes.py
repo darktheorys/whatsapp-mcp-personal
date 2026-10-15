@@ -16,10 +16,7 @@ def fetch_gist():
     """Fetch meme collection from Gist."""
     try:
         result = subprocess.run(
-            ["curl", "-s", GIST_URL],
-            capture_output=True,
-            text=True,
-            timeout=10
+            ["curl", "-s", GIST_URL], capture_output=True, text=True, timeout=10
         )
         if result.returncode != 0:
             print("Error: Failed to fetch Gist", file=sys.stderr)
@@ -36,20 +33,16 @@ def fetch_gist():
 def parse_gist(content):
     """Parse Gist markdown table to extract videos."""
     videos = []
-    for line in content.split('\n'):
-        if '|' in line and 'youtube.com' in line:
-            parts = [p.strip() for p in line.split('|')]
+    for line in content.split("\n"):
+        if "|" in line and "youtube.com" in line:
+            parts = [p.strip() for p in line.split("|")]
             if len(parts) >= 5:
                 try:
                     index = parts[2]
                     title = parts[3]
                     url = parts[4]
-                    if url.startswith('http'):
-                        videos.append({
-                            'index': index,
-                            'title': title,
-                            'url': url
-                        })
+                    if url.startswith("http"):
+                        videos.append({"index": index, "title": title, "url": url})
                 except (IndexError, ValueError):
                     pass
     return videos
@@ -58,7 +51,7 @@ def parse_gist(content):
 def search_videos(videos, keyword):
     """Search videos by keyword (case-insensitive)."""
     keyword_lower = keyword.lower()
-    matches = [v for v in videos if keyword_lower in v['title'].lower()]
+    matches = [v for v in videos if keyword_lower in v["title"].lower()]
     return matches
 
 
@@ -80,7 +73,9 @@ def main():
     parser = argparse.ArgumentParser(description="Search meme video collection")
     parser.add_argument("keyword", help="Keyword to search for")
     parser.add_argument("--random", action="store_true", help="Return random match")
-    parser.add_argument("--limit", type=int, default=5, help="Number of results (default: 5)")
+    parser.add_argument(
+        "--limit", type=int, default=5, help="Number of results (default: 5)"
+    )
     parser.add_argument("--json", action="store_true", help="Output as JSON")
 
     args = parser.parse_args()
@@ -105,7 +100,7 @@ def main():
 
     # Output
     if args.json:
-        print(json.dumps(matches[:args.limit], indent=2))
+        print(json.dumps(matches[: args.limit], indent=2))
     else:
         format_results(matches, args.limit)
 
