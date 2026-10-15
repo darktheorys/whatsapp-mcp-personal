@@ -13,15 +13,25 @@ import sys
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Probe a local media file's duration/codec/resolution")
+    parser = argparse.ArgumentParser(
+        description="Probe a local media file's duration/codec/resolution"
+    )
     parser.add_argument("path", help="Path to a local media file")
-    parser.add_argument("--json", action="store_true", help="Print raw ffprobe JSON instead of a summary line")
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print raw ffprobe JSON instead of a summary line",
+    )
     args = parser.parse_args()
 
     cmd = [
-        "ffprobe", "-v", "error",
-        "-show_entries", "format=duration:stream=codec_type,codec_name,width,height",
-        "-of", "json",
+        "ffprobe",
+        "-v",
+        "error",
+        "-show_entries",
+        "format=duration:stream=codec_type,codec_name,width,height",
+        "-of",
+        "json",
         args.path,
     ]
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
@@ -35,12 +45,18 @@ def main():
 
     data = json.loads(result.stdout)
     duration = data.get("format", {}).get("duration")
-    video = next((s for s in data.get("streams", []) if s.get("codec_type") == "video"), None)
-    audio = next((s for s in data.get("streams", []) if s.get("codec_type") == "audio"), None)
+    video = next(
+        (s for s in data.get("streams", []) if s.get("codec_type") == "video"), None
+    )
+    audio = next(
+        (s for s in data.get("streams", []) if s.get("codec_type") == "audio"), None
+    )
 
     print(f"duration: {float(duration):.1f}s" if duration else "duration: unknown")
     if video:
-        print(f"video: {video.get('codec_name')} {video.get('width')}x{video.get('height')}")
+        print(
+            f"video: {video.get('codec_name')} {video.get('width')}x{video.get('height')}"
+        )
     if audio:
         print(f"audio: {audio.get('codec_name')}")
 

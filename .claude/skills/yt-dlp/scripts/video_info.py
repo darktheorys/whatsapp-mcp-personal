@@ -12,12 +12,26 @@ import sys
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Print video metadata (title/duration/uploader), no download")
+    parser = argparse.ArgumentParser(
+        description="Print video metadata (title/duration/uploader), no download"
+    )
     parser.add_argument("url", help="Video URL")
-    parser.add_argument("--json", action="store_true", help="Print raw JSON instead of plain lines")
+    parser.add_argument(
+        "--json", action="store_true", help="Print raw JSON instead of plain lines"
+    )
     args = parser.parse_args()
 
-    cmd = ["yt-dlp", "--no-download", "--print", "%(title)s", "--print", "%(duration)s", "--print", "%(uploader)s", args.url]
+    cmd = [
+        "yt-dlp",
+        "--no-download",
+        "--print",
+        "%(title)s",
+        "--print",
+        "%(duration)s",
+        "--print",
+        "%(uploader)s",
+        args.url,
+    ]
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
     if result.returncode != 0:
         print(f"Failed to fetch info: {result.stderr.strip()}", file=sys.stderr)
@@ -29,7 +43,11 @@ def main():
     uploader = lines[2] if len(lines) > 2 else None
 
     if args.json:
-        print(json.dumps({"title": title, "duration": duration, "uploader": uploader}, indent=2))
+        print(
+            json.dumps(
+                {"title": title, "duration": duration, "uploader": uploader}, indent=2
+            )
+        )
     else:
         print(f"title: {title}")
         print(f"duration: {duration}")

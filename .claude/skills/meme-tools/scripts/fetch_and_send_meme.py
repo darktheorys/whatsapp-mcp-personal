@@ -24,37 +24,35 @@ def search_gist(keyword, random_choice=False):
     """Search Gist for matching video."""
     try:
         result = subprocess.run(
-            ["curl", "-s", GIST_URL],
-            capture_output=True,
-            text=True,
-            timeout=10
+            ["curl", "-s", GIST_URL], capture_output=True, text=True, timeout=10
         )
         if result.returncode != 0:
             return None
 
         videos = []
-        for line in result.stdout.split('\n'):
-            if '|' in line and 'youtube.com' in line:
-                parts = [p.strip() for p in line.split('|')]
+        for line in result.stdout.split("\n"):
+            if "|" in line and "youtube.com" in line:
+                parts = [p.strip() for p in line.split("|")]
                 if len(parts) >= 5:
                     try:
                         index = parts[2]
                         title = parts[3]
                         url = parts[4]
-                        if url.startswith('http'):
-                            videos.append({'index': index, 'title': title, 'url': url})
+                        if url.startswith("http"):
+                            videos.append({"index": index, "title": title, "url": url})
                     except (IndexError, ValueError):
                         pass
 
         # Search by keyword
         keyword_lower = keyword.lower()
-        matches = [v for v in videos if keyword_lower in v['title'].lower()]
+        matches = [v for v in videos if keyword_lower in v["title"].lower()]
 
         if not matches:
             return None
 
         if random_choice:
             import random
+
             return random.choice(matches)
         return matches[0]
 
@@ -67,10 +65,12 @@ def download_video(url, output_dir=MEMES_DIR):
     """Download video using yt-dlp."""
     try:
         cmd = [
-            "yt-dlp", url,
-            "-o", f"{output_dir}/%(title)s.%(ext)s",
+            "yt-dlp",
+            url,
+            "-o",
+            f"{output_dir}/%(title)s.%(ext)s",
             "--no-playlist",
-            "--write-info-json"
+            "--write-info-json",
         ]
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
         if result.returncode != 0:
@@ -78,8 +78,8 @@ def download_video(url, output_dir=MEMES_DIR):
             return None
 
         # Find the downloaded file
-        for line in result.stderr.split('\n'):
-            if 'Merging' in line or 'Writing' in line:
+        for line in result.stderr.split("\n"):
+            if "Merging" in line or "Writing" in line:
                 parts = line.split("'")
                 if len(parts) >= 2:
                     return parts[1]
@@ -95,7 +95,7 @@ def download_video(url, output_dir=MEMES_DIR):
 
 def convert_if_needed(input_file, quality="medium"):
     """Convert to MP4 if not already MP4."""
-    if input_file.endswith('.mp4'):
+    if input_file.endswith(".mp4"):
         return input_file
 
     base = Path(input_file).stem
@@ -103,10 +103,12 @@ def convert_if_needed(input_file, quality="medium"):
 
     try:
         cmd = [
-            sys.argv[0].replace('fetch_and_send_meme.py', 'convert_to_mp4.py'),
+            sys.argv[0].replace("fetch_and_send_meme.py", "convert_to_mp4.py"),
             input_file,
-            "-o", output_file,
-            "-q", quality
+            "-o",
+            output_file,
+            "-q",
+            quality,
         ]
         result = subprocess.run(cmd, capture_output=True, text=True)
         if result.returncode == 0:
@@ -117,14 +119,21 @@ def convert_if_needed(input_file, quality="medium"):
     return input_file
 
 
-
-
 def main():
-    parser = argparse.ArgumentParser(description="Search, download, convert, and send meme")
+    parser = argparse.ArgumentParser(
+        description="Search, download, convert, and send meme"
+    )
     parser.add_argument("keyword", help="Video keyword to search for")
-    parser.add_argument("--random", action="store_true", help="Pick random matching video")
-    parser.add_argument("-q", "--quality", choices=["low", "medium", "high"],
-                        default="medium", help="Video quality")
+    parser.add_argument(
+        "--random", action="store_true", help="Pick random matching video"
+    )
+    parser.add_argument(
+        "-q",
+        "--quality",
+        choices=["low", "medium", "high"],
+        default="medium",
+        help="Video quality",
+    )
 
     args = parser.parse_args()
 
@@ -142,7 +151,7 @@ def main():
 
     # Download
     print("Downloading...", file=sys.stderr)
-    downloaded = download_video(video_info['url'])
+    downloaded = download_video(video_info["url"])
     if not downloaded:
         print("Download failed.", file=sys.stderr)
         sys.exit(1)
@@ -154,12 +163,16 @@ def main():
     final_file = convert_if_needed(downloaded, args.quality)
 
     # Output result (Claude will handle sending via WhatsApp)
-    print(json.dumps({
-        'title': video_info['title'],
-        'url': video_info['url'],
-        'file': final_file,
-        'ready': True
-    }))
+    print(
+        json.dumps(
+            {
+                "title": video_info["title"],
+                "url": video_info["url"],
+                "file": final_file,
+                "ready": True,
+            }
+        )
+    )
 
 
 if __name__ == "__main__":

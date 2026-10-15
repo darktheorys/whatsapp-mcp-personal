@@ -88,14 +88,24 @@ def lift_subject(src, work_dir):
     the right answer rather than an error.
     """
     if not CUTOUT_BIN.exists():
-        print(f"note: {CUTOUT_BIN} not built, keeping the background "
-              f"(run: bash scripts/setup-text-extract.sh)", file=sys.stderr)
+        print(
+            f"note: {CUTOUT_BIN} not built, keeping the background "
+            f"(run: bash scripts/setup-text-extract.sh)",
+            file=sys.stderr,
+        )
         return None
     cut = work_dir / "cutout.png"
-    result = subprocess.run([str(CUTOUT_BIN), str(src), str(cut)], capture_output=True, text=True, timeout=120)
+    result = subprocess.run(
+        [str(CUTOUT_BIN), str(src), str(cut)],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
     if result.returncode != 0 or not cut.exists():
-        print(f"note: no subject lifted ({result.stderr.strip()[:120]}), keeping the background",
-              file=sys.stderr)
+        print(
+            f"note: no subject lifted ({result.stderr.strip()[:120]}), keeping the background",
+            file=sys.stderr,
+        )
         return None
     return cut
 
@@ -110,14 +120,38 @@ def make_static(src, out, pad, cutout=False):
             # its own edges, so cropping would cut into it rather than trim empty space.
             if lifted is not None:
                 source, pad = lifted, True
-        run(["ffmpeg", "-y", "-i", str(source), "-vf", scale_filter(pad), "-frames:v", "1", str(frame)],
-            "ffmpeg (scaling to 512x512)")
+        run(
+            [
+                "ffmpeg",
+                "-y",
+                "-i",
+                str(source),
+                "-vf",
+                scale_filter(pad),
+                "-frames:v",
+                "1",
+                str(frame),
+            ],
+            "ffmpeg (scaling to 512x512)",
+        )
         # Walk the quality down until it fits. Starting high and stepping is simpler to reason about
         # than predicting a quality from the source, and a sticker is small enough that a few passes
         # cost nothing.
         for quality in (90, 80, 70, 60, 50, 40, 30):
-            run(["cwebp", "-quiet", "-q", str(quality), "-alpha_q", "100", str(frame), "-o", str(out)],
-                "cwebp")
+            run(
+                [
+                    "cwebp",
+                    "-quiet",
+                    "-q",
+                    str(quality),
+                    "-alpha_q",
+                    "100",
+                    str(frame),
+                    "-o",
+                    str(out),
+                ],
+                "cwebp",
+            )
             if out.stat().st_size <= MAX_STATIC_BYTES:
                 return quality, out.stat().st_size
         return quality, out.stat().st_size
@@ -130,9 +164,17 @@ def make_animated(src, out, pad, fps, duration):
         run(
             # No -vsync: it was removed in ffmpeg 8 ("Unrecognized option 'vsync'"), and the fps=
             # filter above already fixes the output rate, so it was redundant even while it existed.
-            ["ffmpeg", "-y", "-t", str(duration), "-i", str(src),
-             "-vf", f"fps={fps}," + scale_filter(pad),
-             str(frames_dir / "f%04d.png")],
+            [
+                "ffmpeg",
+                "-y",
+                "-t",
+                str(duration),
+                "-i",
+                str(src),
+                "-vf",
+                f"fps={fps}," + scale_filter(pad),
+                str(frames_dir / "f%04d.png"),
+            ],
             "ffmpeg (extracting frames)",
         )
         frames = sorted(frames_dir.glob("f*.png"))
@@ -149,29 +191,70 @@ def make_animated(src, out, pad, fps, duration):
         # Dropping frames beats dropping quality once quality stops helping: a busy scene at 512x512
         # is dominated by frame count, and a sticker at 6fps still reads as motion where a smeared
         # one at 20 quality does not.
-        for quality, keep_every in ((75, 1), (60, 1), (45, 1), (60, 2), (45, 2), (40, 3)):
+        for quality, keep_every in (
+            (75, 1),
+            (60, 1),
+            (45, 1),
+            (60, 2),
+            (45, 2),
+            (40, 3),
+        ):
             used = frames[::keep_every]
-            run(["img2webp", "-loop", "0", "-lossy", "-m", "6",
-                 "-d", str(int(round(1000 / fps)) * keep_every), "-q", str(quality),
-                 *[str(f) for f in used], "-o", str(out)],
-                "img2webp")
+            run(
+                [
+                    "img2webp",
+                    "-loop",
+                    "0",
+                    "-lossy",
+                    "-m",
+                    "6",
+                    "-d",
+                    str(int(round(1000 / fps)) * keep_every),
+                    "-q",
+                    str(quality),
+                    *[str(f) for f in used],
+                    "-o",
+                    str(out),
+                ],
+                "img2webp",
+            )
             if out.stat().st_size <= MAX_ANIMATED_BYTES:
                 return quality, out.stat().st_size, len(used)
         return quality, out.stat().st_size, len(used)
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Build a WhatsApp sticker (512x512 WebP)")
+    parser = argparse.ArgumentParser(
+        description="Build a WhatsApp sticker (512x512 WebP)"
+    )
     parser.add_argument("input", help="Source image or video")
     parser.add_argument("name", help="Sticker name -> state/stickers/<name>.webp")
-    parser.add_argument("--animated", action="store_true", help="Make a moving sticker from a video/gif")
-    parser.add_argument("--fps", type=float, default=12, help="Frames per second when animated (default 12)")
-    parser.add_argument("--duration", type=float, default=MAX_ANIMATED_SECONDS,
-                        help=f"Seconds to use when animated (default/max {MAX_ANIMATED_SECONDS})")
-    parser.add_argument("--no-pad", action="store_true", help="Crop to the square instead of padding with transparency")
-    parser.add_argument("--cutout", action="store_true",
-                        help="Die-cut the subject onto transparency first (macOS subject lifting). "
-                             "This is what makes it look like a sticker rather than a photo in a box.")
+    parser.add_argument(
+        "--animated", action="store_true", help="Make a moving sticker from a video/gif"
+    )
+    parser.add_argument(
+        "--fps",
+        type=float,
+        default=12,
+        help="Frames per second when animated (default 12)",
+    )
+    parser.add_argument(
+        "--duration",
+        type=float,
+        default=MAX_ANIMATED_SECONDS,
+        help=f"Seconds to use when animated (default/max {MAX_ANIMATED_SECONDS})",
+    )
+    parser.add_argument(
+        "--no-pad",
+        action="store_true",
+        help="Crop to the square instead of padding with transparency",
+    )
+    parser.add_argument(
+        "--cutout",
+        action="store_true",
+        help="Die-cut the subject onto transparency first (macOS subject lifting). "
+        "This is what makes it look like a sticker rather than a photo in a box.",
+    )
     args = parser.parse_args()
 
     if not NAME_RE.match(args.name):
@@ -190,7 +273,9 @@ def main():
     out = OUT_DIR / f"{args.name}.webp"
 
     if args.animated:
-        quality, size, frames = make_animated(src, out, not args.no_pad, args.fps, args.duration)
+        quality, size, frames = make_animated(
+            src, out, not args.no_pad, args.fps, args.duration
+        )
         limit = MAX_ANIMATED_BYTES
         detail = f"{frames} frames at {args.fps}fps"
     else:
@@ -200,12 +285,16 @@ def main():
 
     ok = size <= limit
     print(f"{'✓' if ok else '⚠'} {out}")
-    print(f"  {detail}, quality {quality}, {size / 1024:.0f}KB (limit {limit // 1024}KB)")
+    print(
+        f"  {detail}, quality {quality}, {size / 1024:.0f}KB (limit {limit // 1024}KB)"
+    )
     if not ok:
         # Reported rather than raised: the file exists and may well still send, but WhatsApp can
         # refuse it, and silently handing back something oversized would look like a send bug later.
-        print("  still over the limit -- try --no-pad, a lower --fps, or a shorter --duration",
-              file=sys.stderr)
+        print(
+            "  still over the limit -- try --no-pad, a lower --fps, or a shorter --duration",
+            file=sys.stderr,
+        )
         sys.exit(2)
 
 

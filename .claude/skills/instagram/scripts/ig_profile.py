@@ -21,15 +21,24 @@ try:
     import instaloader
 except ImportError:
     if VENV_PY.exists() and Path(sys.prefix) != VENV_PY.parent.parent:
-        os.execv(str(VENV_PY), [str(VENV_PY), str(Path(__file__).resolve())] + sys.argv[1:])
-    print("instaloader not installed (expected at state/instaloader-venv)", file=sys.stderr)
+        os.execv(
+            str(VENV_PY), [str(VENV_PY), str(Path(__file__).resolve())] + sys.argv[1:]
+        )
+    print(
+        "instaloader not installed (expected at state/instaloader-venv)",
+        file=sys.stderr,
+    )
     sys.exit(1)
 
 
 def main():
-    p = argparse.ArgumentParser(description="Print public Instagram profile metadata (no login, no download)")
+    p = argparse.ArgumentParser(
+        description="Print public Instagram profile metadata (no login, no download)"
+    )
     p.add_argument("username", help="Instagram username, with or without leading @")
-    p.add_argument("--json", action="store_true", help="Print raw JSON instead of plain lines")
+    p.add_argument(
+        "--json", action="store_true", help="Print raw JSON instead of plain lines"
+    )
     args = p.parse_args()
 
     username = args.username.lstrip("@").strip("/").split("/")[-1]
@@ -41,7 +50,10 @@ def main():
         print(f"No such profile: {username}", file=sys.stderr)
         sys.exit(2)
     except instaloader.exceptions.ConnectionException as e:
-        print(f"Instagram refused the request (rate limit or anonymous access blocked): {e}", file=sys.stderr)
+        print(
+            f"Instagram refused the request (rate limit or anonymous access blocked): {e}",
+            file=sys.stderr,
+        )
         sys.exit(3)
 
     info = {
@@ -62,7 +74,10 @@ def main():
         for k, v in info.items():
             print(f"{k}: {v}")
         if prof.is_private:
-            print("\nNOTE: profile is private -- posts are not retrievable without an approved follower login.", file=sys.stderr)
+            print(
+                "\nNOTE: profile is private -- posts are not retrievable without an approved follower login.",
+                file=sys.stderr,
+            )
 
 
 if __name__ == "__main__":
