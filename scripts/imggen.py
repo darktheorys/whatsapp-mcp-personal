@@ -52,54 +52,112 @@ def check_out(path):
     except ValueError:
         fail(f"--out must be under {TMP_ROOT}/<session>/scratchpad/outbox/")
     parts = rel.parts
-    if "scratchpad" not in parts or parts[parts.index("scratchpad") + 1 :][:1] != ("outbox",):
+    if "scratchpad" not in parts or parts[parts.index("scratchpad") + 1 :][:1] != (
+        "outbox",
+    ):
         fail("--out must be inside a scratchpad outbox/ folder")
     return parent / out.name
 
 
 def main():
-    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     p.add_argument("mode", choices=["generate", "edit"])
     p.add_argument("--prompt", required=True)
     p.add_argument("--out", required=True)
     p.add_argument("--image", help="source photo for edit")
-    p.add_argument("--width", type=int, default=768)
-    p.add_argument("--height", type=int, default=768)
+    p.add_argument(
+        "--model",
+        choices=["z", "dev"],
+        default="z",
+        help="generate only: z = Z-Image-Turbo, dev = FLUX.1 dev (about 6 minutes)",
+    )
+    p.add_argument(
+        "--width", type=int, help="default 768 for generate, the source size for edit"
+    )
+    p.add_argument(
+        "--height", type=int, help="default 768 for generate, the source size for edit"
+    )
     p.add_argument("--steps", type=int)
     p.add_argument("--seed", type=int, default=int(time.time()) % 100000)
-    p.add_argument("--wait", type=int, default=1800, help="seconds to wait for another render to finish")
+    p.add_argument(
+        "--wait",
+        type=int,
+        default=1800,
+        help="seconds to wait for another render to finish",
+    )
     a = p.parse_args()
 
     out = check_out(a.out)
     if not (BIN / "mflux-generate").exists():
-        fail("the image venv is missing (state/imggen-venv), see the image-generation skill")
+        fail(
+            "the image venv is missing (state/imggen-venv), see the image-generation skill"
+        )
     if not TOKEN_FILE.exists():
         fail("state/hf-token is missing")
     if a.mode == "edit":
         if not a.image or not Path(a.image).is_file():
             fail("edit needs --image pointing at an existing file")
 
-    if a.mode == "generate":
+    if a.mode == "generate" and a.model == "dev":
+        cmd = [
+            str(BIN / "mflux-generate"),
+            "--model",
+            "dev",
+            "-q",
+            "4",
+            "--prompt",
+            a.prompt,
+            "--steps",
+            str(a.steps or 20),
+            "--seed",
+            str(a.seed),
+            "--width",
+            str(a.width or 768),
+            "--height",
+            str(a.height or 768),
+            "--output",
+            str(out),
+        ]
+    elif a.mode == "generate":
         cmd = [
             str(BIN / "mflux-generate-z-image-turbo"),
-            "-q", "4",
-            "--prompt", a.prompt,
-            "--steps", str(a.steps or 8),
-            "--seed", str(a.seed),
-            "--width", str(a.width),
-            "--height", str(a.height),
-            "--output", str(out),
+            "-q",
+            "4",
+            "--prompt",
+            a.prompt,
+            "--steps",
+            str(a.steps or 8),
+            "--seed",
+            str(a.seed),
+            "--width",
+            str(a.width or 768),
+            "--height",
+            str(a.height or 768),
+            "--output",
+            str(out),
         ]
     else:
         cmd = [
             str(BIN / "mflux-generate-kontext"),
-            "-q", "4",
-            "--image-path", a.image,
-            "--prompt", a.prompt,
-            "--steps", str(a.steps or 20),
-            "--seed", str(a.seed),
-            "--output", str(out),
+            "-q",
+            "4",
+            "--image-path",
+            a.image,
+            "--prompt",
+            a.prompt,
+            "--steps",
+            str(a.steps or 20),
+            "--seed",
+            str(a.seed),
+            "--output",
+            str(out),
         ]
+        if a.width:
+            cmd += ["--width", str(a.width)]
+        if a.height:
+            cmd += ["--height", str(a.height)]
 
     env = dict(os.environ)
     env["HF_TOKEN"] = TOKEN_FILE.read_text().strip()

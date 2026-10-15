@@ -31,7 +31,9 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 STATE = os.path.join(ROOT, "state")
 SOCK = os.environ.get("WA_XTTS_SOCK", os.path.join(STATE, "xtts.sock"))
 TOKEN_PATH = os.environ.get("WA_DAEMON_TOKEN", os.path.join(STATE, "daemon.token"))
-VOICES_DIR = os.path.realpath(os.environ.get("WA_VOICES_DIR", os.path.join(STATE, "voices")))
+VOICES_DIR = os.path.realpath(
+    os.environ.get("WA_VOICES_DIR", os.path.join(STATE, "voices"))
+)
 TMP_ROOT = os.path.realpath(tempfile.gettempdir())
 MAX_TEXT = 2000
 LANGS = {"tr", "en"}
@@ -48,8 +50,9 @@ def inside(path, root):
 
 
 def main():
-    import torch
-    from TTS.api import TTS
+    # Installed in state/xtts-venv, which is where this runs, not where the type checker looks.
+    import torch  # pyright: ignore[reportMissingImports]
+    from TTS.api import TTS  # pyright: ignore[reportMissingImports]
 
     token = open(TOKEN_PATH).read().strip()
     if len(token) < 32:
@@ -75,14 +78,22 @@ def main():
         if not text or len(text) > MAX_TEXT or lang not in LANGS:
             return {"ok": False, "error": "bad text or language"}
         out = str(request.get("out", ""))
-        if not out.endswith(".wav") or not inside(os.path.dirname(out) or ".", TMP_ROOT):
-            return {"ok": False, "error": "output must be a .wav under the temp directory"}
+        if not out.endswith(".wav") or not inside(
+            os.path.dirname(out) or ".", TMP_ROOT
+        ):
+            return {
+                "ok": False,
+                "error": "output must be a .wav under the temp directory",
+            }
         speed = min(2.0, max(0.5, float(request.get("speed", 1.0))))
         kwargs = {"text": text, "language": lang, "file_path": out, "speed": speed}
         ref = request.get("ref")
         if ref:
             if not inside(ref, VOICES_DIR) or not os.path.isfile(ref):
-                return {"ok": False, "error": "reference must be a file under state/voices"}
+                return {
+                    "ok": False,
+                    "error": "reference must be a file under state/voices",
+                }
             kwargs["speaker_wav"] = ref
         else:
             speaker = request.get("speaker", "Damien Black")
