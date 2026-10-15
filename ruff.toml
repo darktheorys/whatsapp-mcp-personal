@@ -1,0 +1,14 @@
+# The repo's Python is standalone scripts (scripts/ and .claude/skills/*/scripts/), run with the
+# system python3 or a venv under state/. Default formatter style, line length 88, which is what the
+# existing files were already written to.
+extend-exclude = ["state", ".playwright-mcp"]
+line-length = 88
+
+[format]
+quote-style = "double"
+indent-style = "space"
+
+[lint]
+# Real errors only (syntax, undefined names, unused imports and variables). Style opinions beyond the
+# formatter would be churn in scripts that are not a library.
+select = ["E4", "E7", "E9", "F"]

@@ -18,6 +18,8 @@ pnpm start                        # node src/server.mjs — normally launched by
 pnpm test                         # node test_allowlist.mjs — the entire test suite, one file, run top to bottom
 pnpm format / pnpm format:check   # oxfmt over src/, scripts/, test_allowlist.mjs
 pnpm lint                         # oxlint over the same paths
+pnpm format:py / format:py:check  # ruff format over the Python scripts (ruff.toml, run through uvx)
+pnpm lint:py / typecheck:py       # ruff check and pyright over scripts/ and .claude/skills (pyrightconfig.json)
 bash scripts/setup-voice.sh [tier]  # re-run voice setup directly; pass low/mid/high to fetch one whisper model
 ```
 

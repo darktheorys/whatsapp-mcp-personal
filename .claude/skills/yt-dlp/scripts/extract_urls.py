@@ -94,7 +94,7 @@ def main():
         # Try as file first
         try:
             urls = extract_urls_from_file(input_arg)
-        except:
+        except Exception:
             # Fall back to treating as text
             urls = extract_urls_from_text(input_arg)
 
