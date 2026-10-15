@@ -96,7 +96,11 @@ def main():
         "shortcode": post.shortcode,
         "owner": post.owner_username,
         "type": "video" if post.is_video else "image",
-        "duration": round(post.video_duration, 1) if (post.is_video and getattr(post, "video_duration", None)) else None,
+        "duration": (
+            round(duration, 1)
+            if post.is_video and (duration := getattr(post, "video_duration", None))
+            else None
+        ),
         "caption": caption,
         "files": [str(f) for f in media],
     }

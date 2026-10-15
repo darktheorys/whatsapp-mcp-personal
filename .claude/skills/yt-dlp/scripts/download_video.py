@@ -47,7 +47,7 @@ def is_video_url(url):
                 return True
 
         return False
-    except:
+    except Exception:
         return False
 
 

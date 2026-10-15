@@ -1,0 +1,12 @@
+{
+  "include": ["scripts", ".claude/skills"],
+  "exclude": ["state", "node_modules", ".playwright-mcp"],
+  "pythonVersion": "3.12",
+  "executionEnvironments": [
+    {
+      "root": ".claude/skills/instagram",
+      "extraPaths": ["state/instaloader-venv/lib/python3.12/site-packages"]
+    },
+    { "root": "." }
+  ]
+}

@@ -13,7 +13,6 @@ import time
 import urllib.error
 import urllib.request
 import xml.etree.ElementTree as ET
-from datetime import datetime, timezone
 
 UA = "whatsapp-mcp-personal/1.0 (personal feed reader)"
 TIMEOUT = 20

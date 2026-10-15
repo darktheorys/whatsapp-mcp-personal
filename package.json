@@ -14,7 +14,11 @@
     "setup:text": "bash scripts/setup-text-extract.sh",
     "format": "oxfmt src/ scripts/ test_allowlist.mjs",
     "format:check": "oxfmt --check src/ scripts/ test_allowlist.mjs",
-    "lint": "oxlint src/ scripts/ test_allowlist.mjs"
+    "lint": "oxlint src/ scripts/ test_allowlist.mjs",
+    "format:py": "uvx ruff@0.17.0 format .",
+    "format:py:check": "uvx ruff@0.17.0 format --check .",
+    "lint:py": "uvx ruff@0.17.0 check .",
+    "typecheck:py": "uvx pyright@1.1.411"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.30.0",
