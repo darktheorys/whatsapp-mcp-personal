@@ -79,6 +79,8 @@ import {
   findMessage,
   forgetMemory,
   listMemories,
+  receiptsFor,
+  recordReceipt,
   logCommand,
   logInbox,
   messageCount,
@@ -1880,6 +1882,10 @@ async function handleIncoming(waMessage) {
   const { key } = waMessage;
   const jid = allowedJid(key.remoteJid, key.remoteJidAlt);
   if (!jid) return;
+  // A resent copy of a message that first failed to decrypt: cancel its pending "lost" report. Only a
+  // message with real content counts: Baileys also upserts the undecryptable CIPHERTEXT stub itself,
+  // under the same id, as a placeholder.
+  if (waMessage.message && !waMessage.messageStubType) noteArrived(key.id);
   const viewOnce = isViewOnce(waMessage.message);
   // An edit or delete by someone else arrives as a protocolMessage pointing at the original. It used to
   // be dropped as plumbing, so the stored text stayed the original forever. It is now a row of its own
@@ -2310,6 +2316,15 @@ async function handlePollVoteMessage(waMessage, pollVote) {
   }
 }
 
+// A receipt for one of this account's own messages: only for allowlisted, non-incognito chats, and only
+// for messages that are in the log. It never wakes anything; reads show it on the message itself.
+async function handleReceipt({ key, status, who }) {
+  const jid = allowedJid(key.remoteJid, key.remoteJidAlt);
+  if (!jid || isIncognito(jid) || !key.id || !findMessage(jid, key.id)) return;
+  const reader = who ? await resolveSender(who) : "";
+  recordReceipt(jid, key.id, jid.endsWith("@g.us") ? reader : "", status);
+}
+
 async function handlePollUpdate({ key, update }) {
   if (!update?.pollUpdates?.length) return;
   const entry = getPoll(key.id);
@@ -2367,7 +2382,24 @@ function notify(level, message, data = {}) {
 const DROP_REPORT_WINDOW_MS = 60_000;
 let lastDropReport = 0;
 let suppressedDrops = 0;
-setDropNotifier((message, jids = []) => {
+// A message that failed to decrypt is not necessarily lost: Baileys 7 asks the phone to resend it
+// (placeholder resend, and a retry receipt to the sender), and it often arrives a few seconds later
+// under the same id. Reporting it at once said "lost forever" about messages that were then stored
+// normally. A drop with an id now waits RECOVERY_WAIT_MS; if the id arrives in the meantime it was
+// recovered and nothing is reported. A drop without an id (a whole batch) is reported at once.
+export const RECOVERY_WAIT_MS = 30_000;
+const pendingDrops = new Map();
+
+export function noteArrived(id) {
+  const pending = id ? pendingDrops.get(id) : null;
+  if (!pending) return false;
+  clearTimeout(pending);
+  pendingDrops.delete(id);
+  logger.info({ id }, "a message that failed to decrypt was recovered by the resend");
+  return true;
+}
+
+setDropNotifier((message, jids = [], id = null) => {
   // whatsapp.mjs stays protocol-only and hands up whatever candidate JIDs the log line carried
   // (both the phone-number and @lid form, when present) rather than deciding relevance itself.
   // Two batch-level signatures ("handling notification", "processing offline notification") never
@@ -2381,6 +2413,17 @@ setDropNotifier((message, jids = []) => {
     process.stderr.write(`dropped message ignored (not an allowlisted chat): ${message} ${jids.join(",")}\n`);
     return;
   }
+  if (!id) return reportDrop(message, false);
+  if (pendingDrops.has(id)) return;
+  const timer = setTimeout(() => {
+    pendingDrops.delete(id);
+    reportDrop(message, true);
+  }, RECOVERY_WAIT_MS);
+  timer.unref?.();
+  pendingDrops.set(id, timer);
+});
+
+function reportDrop(message, resendTried) {
   const now = Date.now();
   if (now - lastDropReport < DROP_REPORT_WINDOW_MS) {
     suppressedDrops++;
@@ -2396,9 +2439,11 @@ setDropNotifier((message, jids = []) => {
   logInbox(
     "(server)",
     "⚠️ inbound message lost",
-    `${message}${suffix} — only the phone has it now; this server cannot recover it`,
+    resendTried
+      ? `${message}${suffix} — the phone was asked to resend it and it did not arrive within ${RECOVERY_WAIT_MS / 1000}s; only the phone has it now`
+      : `${message}${suffix} — only the phone has it now; this server cannot recover it`,
   );
-});
+}
 
 server.registerTool(
   "wa_status",
@@ -3822,6 +3867,32 @@ server.registerTool(
 );
 
 server.registerTool(
+  "wa_receipts",
+  {
+    title: "Did they see it?",
+    description:
+      "Delivery and read receipts for a message this account sent: in a DM delivered/read/played, in a group " +
+      "who read it. Receipts only come from people who have read receipts switched on, so a missing 'read' does " +
+      "not prove a message was not read. This server never sends read receipts itself.",
+    inputSchema: {
+      jid: z.string().describe("The allowlisted chat"),
+      messageId: z.string().describe("The id of a message this account sent (from wa_recent)"),
+    },
+    annotations: { readOnlyHint: true, openWorldHint: false },
+  },
+  async ({ jid, messageId }) => {
+    const chat = allowedJid(jid);
+    if (!chat) return refused(`${jid} is not on the allowlist.`);
+    const row = findMessage(chat, messageId);
+    if (!row) return refused(`message ${messageId} is not in ${chat}'s log.`);
+    if (row.direction !== "out") return refused("receipts only exist for messages this account sent.");
+    const rows = receiptsFor(chat, messageId);
+    const text = rows.length ? JSON.stringify(rows, null, 2) : "no receipt yet (not delivered, or receipts are off)";
+    return { content: [{ type: "text", text }] };
+  },
+);
+
+server.registerTool(
   "wa_send_location",
   {
     title: "Send a WhatsApp location pin",
@@ -3935,6 +4006,7 @@ server.registerTool(
         onPresence: handlePresenceUpdate,
         onNotice: notify,
         onPollUpdate: handlePollUpdate,
+        onReceipt: handleReceipt,
         getMessage: getStoredPollMessage,
       });
       // startWhatsApp returns as soon as the socket object exists, which is well before WhatsApp
@@ -3991,6 +4063,7 @@ if (!process.env.WA_NO_CONNECT) {
     onPresence: handlePresenceUpdate,
     onNotice: notify,
     onPollUpdate: handlePollUpdate,
+    onReceipt: handleReceipt,
     getMessage: getStoredPollMessage,
   }).catch((err) => {
     process.stderr.write(`whatsapp-mcp-personal: startup failed: ${err}\n`);

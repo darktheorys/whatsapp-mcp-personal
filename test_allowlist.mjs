@@ -2027,6 +2027,36 @@ assert.deepEqual(unansweredChats([STATS], 1 * H), [], "answering it takes it off
   assert.match(vcardFor("Selin", "4915100000777"), /waid=4915100000777:\+4915100000777/);
 }
 
+// Receipts: their own table, highest status wins, and reads show them on the message.
+{
+  const store = await import("./src/store.mjs");
+  const DM = "4915100000444@s.whatsapp.net";
+  const GRP = "120363000000000401@g.us";
+  store.appendMessage(DM, { direction: "out", by: "claude", text: "geldi mi", ts: 20, id: "R1" });
+  store.recordReceipt(DM, "R1", "", 3, 21);
+  assert.equal(store.findMessage(DM, "R1").receipt, "delivered");
+  store.recordReceipt(DM, "R1", "", 4, 22);
+  store.recordReceipt(DM, "R1", "", 3, 23);
+  assert.equal(store.findMessage(DM, "R1").receipt, "read", "a late delivered never overwrites read");
+  store.recordReceipt(DM, "R1", "", 1, 24);
+  assert.equal(store.receiptsFor(DM, "R1").length, 1, "pending/server-ack statuses are not stored");
+
+  store.appendMessage(GRP, { direction: "out", by: "claude", text: "herkese", ts: 30, id: "R2" });
+  store.recordReceipt(GRP, "R2", "4915100000001@s.whatsapp.net", 4, 31);
+  store.recordReceipt(GRP, "R2", "4915100000002@s.whatsapp.net", 3, 32);
+  const g = store.findMessage(GRP, "R2");
+  assert.deepEqual(g.readBy, ["4915100000001@s.whatsapp.net"], "who read it in a group");
+  assert.equal(g.deliveredTo, 1, "and how many it only reached");
+  assert.equal(store.readRecent(GRP, 50).filter((r) => r.kind).length, 0, "receipts never show up as rows");
+}
+
+// A message that failed to decrypt is only reported lost if it does not arrive within the wait.
+{
+  const { noteArrived, RECOVERY_WAIT_MS } = await import("./src/server.mjs");
+  assert.ok(RECOVERY_WAIT_MS >= 10_000, "long enough for the phone to answer a resend request");
+  assert.equal(noteArrived("never-pending"), false, "an ordinary message cancels nothing");
+}
+
 // Runs last: it deliberately exhausts the window, so anything after it would see a full budget.
 let sent = 0;
 while (!overSendLimit()) sent++;

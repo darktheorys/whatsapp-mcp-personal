@@ -87,6 +87,19 @@ function getDb() {
       ts    INTEGER NOT NULL
     );
     CREATE INDEX IF NOT EXISTS memories_jid ON memories (jid, about);
+    -- Delivery and read receipts for messages this account sent (owner decision, 2026-10-17). Their
+    -- own table, not rows in messages: a group read receipt arrives once per member, and as message
+    -- rows they would flood every read of the chat. who is the reader in a group, '' in a DM.
+    -- status: 3 delivered, 4 read, 5 played (WAMessageStatus). Only ever received, never sent: this
+    -- server does not mark anything read.
+    CREATE TABLE IF NOT EXISTS receipts (
+      jid    TEXT NOT NULL,
+      msg_id TEXT NOT NULL,
+      who    TEXT NOT NULL DEFAULT '',
+      status INTEGER NOT NULL,
+      ts     INTEGER NOT NULL,
+      PRIMARY KEY (jid, msg_id, who)
+    );
   `);
   // A database created before these columns existed keeps its old shape — CREATE TABLE IF NOT
   // EXISTS is a no-op on it, indexes on missing columns then fail. Adding them here is cheap and
@@ -187,6 +200,27 @@ export function findRelated(jid, messageId) {
 // Records that an in-chat command fired -- called from every command branch in server.mjs,
 // unconditionally, before any incognito early-return. This must never be gated by incognito: the
 // one thing worth recording about a chat with incognito on is that incognito was toggled at all.
+export const RECEIPT_STATUS = { 3: "delivered", 4: "read", 5: "played" };
+
+// Keeps the highest status seen per reader: a late "delivered" never overwrites "read".
+export function recordReceipt(jid, msgId, who, status, ts = Date.now()) {
+  if (!RECEIPT_STATUS[status] || !msgId) return;
+  getDb()
+    .prepare(
+      `INSERT INTO receipts (jid, msg_id, who, status, ts) VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT (jid, msg_id, who) DO UPDATE SET status = excluded.status, ts = excluded.ts
+       WHERE excluded.status > receipts.status`,
+    )
+    .run(jid, msgId, who ?? "", status, ts);
+}
+
+export function receiptsFor(jid, msgId) {
+  return getDb()
+    .prepare("SELECT who, status, ts FROM receipts WHERE jid = ? AND msg_id = ? ORDER BY ts")
+    .all(jid, msgId)
+    .map((r) => ({ who: r.who || null, status: RECEIPT_STATUS[r.status], ts: r.ts }));
+}
+
 export const MAX_MEMORIES_PER_CHAT = 200;
 export const MAX_MEMORY_CHARS = 300;
 
@@ -316,8 +350,20 @@ function withStatus(jid, entries) {
        ORDER BY ts`,
     )
     .all(jid, ...ids);
-  if (acts.length === 0) return entries;
   const byId = new Map();
+  // Our own sent messages also carry how far they got: in a DM the one status, in a group who read it.
+  const receiptRows = getDb()
+    .prepare(`SELECT msg_id, who, status FROM receipts WHERE jid = ? AND msg_id IN (${placeholders})`)
+    .all(jid, ...ids);
+  for (const r of receiptRows) {
+    const status = byId.get(r.msg_id) ?? {};
+    const label = RECEIPT_STATUS[r.status];
+    if (!r.who) status.receipt = label;
+    else if (r.status >= 4) status.readBy = [...(status.readBy ?? []), r.who];
+    else status.deliveredTo = (status.deliveredTo ?? 0) + 1;
+    byId.set(r.msg_id, status);
+  }
+  if (acts.length === 0 && byId.size === 0) return entries;
   for (const a of acts) {
     const status = byId.get(a.to_id) ?? {};
     // Ordered by ts, so a later edit overwrites an earlier one and the last text wins.

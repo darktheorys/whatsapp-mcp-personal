@@ -69,7 +69,9 @@ export const logger = pino(
           // candidate found (or none) up rather than guessing here keeps this file protocol-only;
           // whatever decides "does this chat matter" is config.mjs's allowlist, not this one.
           const jids = [record?.key?.remoteJid, record?.key?.remoteJidAlt].filter(Boolean);
-          onDrop(msg, jids);
+          // The message's own id, when the line has one: Baileys asks the phone to resend a message it
+          // could not decrypt, and the server uses the id to tell a recovered message from a lost one.
+          onDrop(msg, jids, record?.key?.id ?? null);
         }
       } catch {
         // A malformed line is not worth failing a log write over, and must never throw into pino.
@@ -103,7 +105,15 @@ const safely = (fn, arg, what) => Promise.resolve(fn?.(arg)).catch((err) => logg
 // `onNotice(level, message, data)` is optional and lets the MCP layer forward connection events to
 // the client as protocol log notifications. This module deliberately knows nothing about MCP — it
 // gets a callback, not a server — so importing it stays free of protocol concerns.
-export async function startWhatsApp({ onMessage, onReaction, onPresence, onNotice, onPollUpdate, getMessage }) {
+export async function startWhatsApp({
+  onMessage,
+  onReaction,
+  onPresence,
+  onNotice,
+  onPollUpdate,
+  onReceipt,
+  getMessage,
+}) {
   const notice = (level, message, data) => {
     try {
       onNotice?.(level, message, data);
@@ -207,8 +217,8 @@ export async function startWhatsApp({ onMessage, onReaction, onPresence, onNotic
       setTimeout(() => {
         // onNotice included: dropping it here would silence connection reporting from the first
         // reconnect onward, exactly when it starts being worth having.
-        startWhatsApp({ onMessage, onReaction, onPresence, onNotice, onPollUpdate, getMessage }).catch((err) =>
-          logger.error(err, "reconnect failed"),
+        startWhatsApp({ onMessage, onReaction, onPresence, onNotice, onPollUpdate, onReceipt, getMessage }).catch(
+          (err) => logger.error(err, "reconnect failed"),
         );
       }, 3000);
     }
@@ -243,6 +253,27 @@ export async function startWhatsApp({ onMessage, onReaction, onPresence, onNotic
     thisSock.ev.on("messages.update", (updates) => {
       if (getSocket() !== thisSock) return;
       for (const u of updates) safely(onPollUpdate, u, "onPollUpdate");
+    });
+  }
+
+  // Delivery and read receipts for messages this account sent. In a DM they arrive as a status on
+  // messages.update; in a group, once per member on message-receipt.update. Only received: nothing
+  // here ever sends a read receipt, which would clear the owner's unread badges (see the top of file).
+  if (onReceipt) {
+    thisSock.ev.on("messages.update", (updates) => {
+      if (getSocket() !== thisSock) return;
+      for (const u of updates) {
+        if (u.key?.fromMe && typeof u.update?.status === "number") {
+          safely(onReceipt, { key: u.key, status: u.update.status, who: null }, "onReceipt");
+        }
+      }
+    });
+    thisSock.ev.on("message-receipt.update", (receipts) => {
+      if (getSocket() !== thisSock) return;
+      for (const { key, receipt } of receipts) {
+        const status = receipt?.playedTimestamp ? 5 : receipt?.readTimestamp ? 4 : receipt?.receiptTimestamp ? 3 : 0;
+        if (key?.fromMe && status) safely(onReceipt, { key, status, who: receipt.userJid ?? null }, "onReceipt");
+      }
     });
   }
 
