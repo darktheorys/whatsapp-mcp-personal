@@ -74,8 +74,11 @@ import {
   appendMessage,
   archiveOldMessages,
   chatStats,
+  addMemory,
   chatsOfMessage,
   findMessage,
+  forgetMemory,
+  listMemories,
   logCommand,
   logInbox,
   messageCount,
@@ -1412,7 +1415,15 @@ export const COMMANDS = {
   generate: /^\/generate(?![\s\S]*\(_Claude_\))(?:\s+([\s\S]*?))?\s*$/i,
   ai: /^\/ai\s+off\s*$/i,
   incognito: /^\/incognito\s+(on|off)\s*$/i,
+  memory: /^\/memory\s*$/i,
+  forget: /^\/forget\s+(\d{1,9})\s*$/i,
 };
+
+// A chat's memories as a short numbered list, for /memory and wa_memory list.
+export function formatMemories(rows) {
+  if (rows.length === 0) return "bu sohbet icin kayitli bir sey yok";
+  return rows.map((r) => `#${r.id} ${r.about ? `${r.about}: ` : ""}${r.text}`).join("\n");
+}
 
 // `/generate` (owner decision, 2026-10-15): typed on the owner's own device in any allowlisted chat, the
 // server runs scripts/imggen.py itself and sends the picture back as a reply, with no session involved.
@@ -1695,6 +1706,9 @@ function helpText(jid) {
     "/read-audio yes|no — keep and transcribe (or stop) voice notes from this chat",
     "/verbosity low|mid|high — how much detail Claude's replies to this chat carry",
     '/generate --model z --prompt "..." [--negative "..."] [--steps N --width N --height N --seed N] — the server draws an image and sends it here, no session needed',
+    "/generate status [id] — progress of this chat's renders, with the latest step; /generate cancel stops them",
+    "/memory — what is remembered about this chat and its people, numbered",
+    "/forget N — drop memory #N from this chat",
     "/help — this message",
     "/ai off — remove this chat from the allowlist entirely (one-way, no /ai on)",
     "/incognito on|off — while on, no storage/media/wake for this chat at all, overrides wakelevel",
@@ -2035,6 +2049,19 @@ async function handleIncoming(waMessage) {
     if (COMMANDS.help.exec(trimmed)) {
       await commandReply(jid, helpText(jid));
       logCommand(jid, "help", null);
+      return;
+    }
+    // Only this chat's memories are shown or touched: the list and the delete are both keyed by jid.
+    if (COMMANDS.memory.exec(trimmed)) {
+      logCommand(jid, "memory", "list");
+      await commandReply(jid, formatMemories(listMemories(jid)));
+      return;
+    }
+    const forgetCmd = COMMANDS.forget.exec(trimmed);
+    if (forgetCmd) {
+      const ok = forgetMemory(jid, Number(forgetCmd[1]));
+      logCommand(jid, "forget", forgetCmd[1]);
+      await commandReply(jid, ok ? `#${forgetCmd[1]} silindi` : `#${forgetCmd[1]} bu sohbette yok`);
       return;
     }
     // "/ai off" removes this chat from the allowlist entirely -- a one-way door, deliberately.
@@ -3384,9 +3411,9 @@ server.registerTool(
 server.registerTool(
   "wa_schedule",
   {
-    title: "Scheduled recurring work",
+    title: "Scheduled work and reminders",
     description:
-      "List, add, update or remove recurring tasks that the SERVER fires, not the session — they " +
+      "List, add, update or remove recurring tasks and one-off reminders (`once`) that the SERVER fires, not the session — they " +
       "survive restarts, /mcp reconnects and having no session at all. A due task writes a line " +
       "into state/inbox.log, which wakes whichever session is tailing it; the server cannot do the " +
       "work itself, it only guarantees the reminder arrives. Use for a daily digest or a weekly " +
@@ -3398,7 +3425,17 @@ server.registerTool(
         .string()
         .optional()
         .describe("Task id, e.g. 'daily-digest'. Required for set/remove; set overwrites by id."),
-      at: z.string().optional().describe('Local 24-hour time, "HH:MM", e.g. "10:03". Required for set.'),
+      at: z
+        .string()
+        .optional()
+        .describe('Daily task: local 24-hour time, "HH:MM", e.g. "10:03". Give this or `once` for set.'),
+      once: z
+        .string()
+        .optional()
+        .describe(
+          'One-off reminder: local date and time, "YYYY-MM-DDTHH:MM", e.g. "2026-10-23T18:00". It fires once and ' +
+            "switches itself off after it is acknowledged. Put the target chat's full id in the prompt.",
+        ),
       days: z
         .array(z.number().int().min(0).max(6))
         .optional()
@@ -3415,7 +3452,7 @@ server.registerTool(
     },
     annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
   },
-  async ({ action, id, at, days, prompt, enabled, catchUpMinutes }) => {
+  async ({ action, id, at, once, days, prompt, enabled, catchUpMinutes }) => {
     if (action === "list") {
       return { content: [{ type: "text", text: JSON.stringify(loadSchedule(), null, 2) }] };
     }
@@ -3429,7 +3466,8 @@ server.registerTool(
     }
     const { task, error } = upsertTask({
       id,
-      at,
+      // Whichever kind is given replaces the other, so an edited task cannot end up with both.
+      ...(once === undefined ? { at, once: undefined } : { once, at: undefined }),
       prompt,
       ...(days ? { days } : {}),
       ...(enabled === undefined ? {} : { enabled }),
@@ -3737,6 +3775,144 @@ server.registerTool(
       id: sent?.key?.id ?? null,
     });
     return { content: [{ type: "text", text: `Sent document ${name} to ${to}.` }] };
+  },
+);
+
+server.registerTool(
+  "wa_memory",
+  {
+    title: "Remember things about a chat and its people",
+    description:
+      "Keep short notes about people and a chat (preferences, facts, running jokes) so later replies can use " +
+      "them. Every note belongs to ONE chat: list and forget only ever see that chat's notes, so what is known " +
+      "in one chat never surfaces in another. Never store secrets, health or money details, or anything a person " +
+      "said in confidence. The owner can see them with /memory and drop one with /forget N.",
+    inputSchema: {
+      action: z.enum(["add", "list", "forget"]),
+      jid: z.string().describe("The allowlisted chat the note belongs to"),
+      about: z.string().optional().describe("The person it is about, as named in that chat; omit for the chat itself"),
+      text: z.string().optional().describe("add: the note, one short sentence"),
+      id: z.number().int().positive().optional().describe("forget: the note's number from list"),
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+  },
+  async ({ action, jid, about, text, id }) => {
+    const chat = allowedJid(jid);
+    if (!chat) return refused(`${jid} is not on the allowlist.`);
+    if (action === "list") {
+      return { content: [{ type: "text", text: formatMemories(listMemories(chat, about)) }] };
+    }
+    if (action === "forget") {
+      if (!id) return refused("forget needs the note's id.");
+      return {
+        content: [{ type: "text", text: forgetMemory(chat, id) ? `Forgot #${id}.` : `No note #${id} in ${chat}.` }],
+      };
+    }
+    if (!text) return refused("add needs text.");
+    const leak = scanOutbound(text);
+    if (leak) return refused(`not storing that, ${leak}.`);
+    const result = addMemory(chat, about, text);
+    if (result.error) return refused(`${result.error}.`);
+    return {
+      content: [
+        { type: "text", text: result.duplicate ? `Already known as #${result.id}.` : `Remembered as #${result.id}.` },
+      ],
+    };
+  },
+);
+
+server.registerTool(
+  "wa_send_location",
+  {
+    title: "Send a WhatsApp location pin",
+    description: "Send a map pin (latitude/longitude, optional place name and address) to an allowlisted chat.",
+    inputSchema: {
+      ...TARGET_FIELDS,
+      latitude: z.number().min(-90).max(90),
+      longitude: z.number().min(-180).max(180),
+      name: z.string().max(120).optional().describe("Place name shown on the pin"),
+      address: z.string().max(200).optional(),
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+  },
+  async ({ to: toArg, reply_to, unprompted, latitude, longitude, name, address }) => {
+    const { target: to, error } = targetFor({ to: toArg, reply_to, unprompted });
+    if (error) return error;
+    const label = [name, address].filter(Boolean).join(" — ");
+    const refusal = guardSend(to, label || undefined);
+    if (refusal) return refusal;
+    const sent = await sendWithQuote(getSocket(), to, reply_to, {
+      location: {
+        degreesLatitude: latitude,
+        degreesLongitude: longitude,
+        ...(name ? { name } : {}),
+        ...(address ? { address } : {}),
+      },
+    });
+    appendMessage(to, {
+      direction: "out",
+      by: "claude",
+      text: `[location] ${label ? `${label} ` : ""}(${latitude}, ${longitude})`,
+      ts: Date.now(),
+      id: sent?.key?.id ?? null,
+    });
+    return { content: [{ type: "text", text: `Sent location to ${to}.` }] };
+  },
+);
+
+// A contact card hands a phone number to everyone in the chat, so only numbers already known to that
+// chat can be shared: someone who has written there, or the owner. Never a number from another chat.
+export function contactAllowed(chat, digits, ownJid, participants) {
+  if (digits === String(ownJid ?? "").split(/[@:]/)[0]) return true;
+  // In a DM the other person is the chat itself.
+  if (!chat.endsWith("@g.us") && digits === chat.split("@")[0]) return true;
+  return participants.some((p) => p.who !== "(you)" && String(p.who).split("@")[0] === digits);
+}
+
+export function vcardFor(name, digits) {
+  const safe = String(name)
+    .replace(/[\r\n;]/g, " ")
+    .trim();
+  return `BEGIN:VCARD\nVERSION:3.0\nFN:${safe}\nTEL;type=CELL;type=VOICE;waid=${digits}:+${digits}\nEND:VCARD`;
+}
+
+server.registerTool(
+  "wa_send_contact",
+  {
+    title: "Send a WhatsApp contact card",
+    description:
+      "Send a tappable contact card. Only for a number already known to the target chat (someone who has " +
+      "written there, or the owner), so a number from another chat can never be passed on.",
+    inputSchema: {
+      ...TARGET_FIELDS,
+      name: z.string().min(1).max(80).describe("Name shown on the card"),
+      phone: z.string().describe("The number with country code, digits only or with + and spaces"),
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+  },
+  async ({ to: toArg, reply_to, unprompted, name, phone }) => {
+    const { target: to, error } = targetFor({ to: toArg, reply_to, unprompted });
+    if (error) return error;
+    const digits = String(phone).replace(/\D/g, "");
+    if (!/^\d{7,15}$/.test(digits)) return refused("that is not a phone number with a country code.");
+    const check = guardCheck(to, name);
+    if (check) return check;
+    if (!contactAllowed(to, digits, getSocket()?.user?.id, participantStats(to).participants)) {
+      return refused("that number has not written in this chat, so it is not shared here.");
+    }
+    const refusal = guardSend(to, name);
+    if (refusal) return refusal;
+    const sent = await sendWithQuote(getSocket(), to, reply_to, {
+      contacts: { displayName: name, contacts: [{ vcard: vcardFor(name, digits) }] },
+    });
+    appendMessage(to, {
+      direction: "out",
+      by: "claude",
+      text: `[contact] ${name} +${digits}`,
+      ts: Date.now(),
+      id: sent?.key?.id ?? null,
+    });
+    return { content: [{ type: "text", text: `Sent contact card for ${name} to ${to}.` }] };
   },
 );
 

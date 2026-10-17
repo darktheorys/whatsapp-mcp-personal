@@ -51,8 +51,30 @@ function saveSchedule(tasks) {
   writeFileSync(SCHEDULE_FILE, JSON.stringify(tasks, null, 2), { mode: 0o600 });
 }
 
-export function validateTask({ id, at, days, prompt }) {
+// A one-off task (a reminder, owner decision 2026-10-17) has `once` instead of `at`: a local date and
+// time, "YYYY-MM-DDTHH:MM". It fires at that moment, and once a session acknowledges it, it is switched
+// off for good rather than coming back the next day.
+const ONCE = /^(\d{4})-(\d{2})-(\d{2})T([01]\d|2[0-3]):([0-5]\d)$/;
+
+function onceTime(once) {
+  const m = ONCE.exec(once ?? "");
+  if (!m) return null;
+  const [, y, mo, d, h, mi] = m.map(Number);
+  const t = new Date(y, mo - 1, d, h, mi, 0, 0);
+  // new Date rolls 2026-02-31 over into March; a date that does not exist is refused instead.
+  if (t.getFullYear() !== y || t.getMonth() !== mo - 1 || t.getDate() !== d) return null;
+  return t.getTime();
+}
+
+export function validateTask({ id, at, once, days, prompt }) {
   if (!id || !/^[a-z0-9-]{1,40}$/i.test(id)) return "id must be 1-40 characters of letters, digits or hyphens";
+  if (once !== undefined) {
+    if (at !== undefined) return "give either at (daily) or once (one date), not both";
+    if (days !== undefined) return "days only goes with at";
+    if (onceTime(once) === null) return `once must be "YYYY-MM-DDTHH:MM" local time, got ${JSON.stringify(once)}`;
+    if (!prompt || typeof prompt !== "string") return "prompt is required";
+    return null;
+  }
   if (!HHMM.test(at ?? "")) return `at must be "HH:MM" in 24-hour local time, got ${JSON.stringify(at)}`;
   if (days !== undefined) {
     if (!Array.isArray(days) || days.length === 0) return "days must be a non-empty array when given";
@@ -71,13 +93,18 @@ function occurrenceOn(now, at) {
   return d.getTime();
 }
 
+// The occurrence a task is due for at `now`: today's `at`, or the one fixed moment of a `once` task.
+function occurrenceFor(task, now) {
+  return task.once !== undefined ? onceTime(task.once) : occurrenceOn(now, task.at);
+}
+
 // Separated from the timer and given `now` explicitly so it can be tested without waiting for a
 // clock. Returns the tasks that should fire at this instant.
 export function dueTasks(tasks, now = Date.now()) {
   return tasks.filter((t) => {
     if (t.enabled === false) return false;
     if (validateTask(t)) return false; // a malformed task must never fire, and never throw
-    const occurrence = occurrenceOn(now, t.at);
+    const occurrence = occurrenceFor(t, now);
     if (now < occurrence) return false;
     // Weekday is checked against the occurrence, not `now`, so a catch-up that crosses midnight
     // is still judged by the day the task was actually scheduled for.
@@ -98,7 +125,7 @@ export function markRan(id, when = Date.now()) {
   if (!task) return;
   // Stored as the occurrence rather than the wall-clock time it actually fired, so a catch-up run
   // at 10:40 still counts as "ran for 10:03" and cannot re-fire at 10:41.
-  task.lastRun = occurrenceOn(when, task.at);
+  task.lastRun = occurrenceFor(task, when);
   task.lastRanAt = when;
   task.pendingAck = true;
   saveSchedule(tasks);
@@ -112,6 +139,8 @@ export function ackTask(id) {
   if (!task) return false;
   task.pendingAck = false;
   task.lastAck = task.lastRun ?? null;
+  // A one-off is done once it has been picked up.
+  if (task.once !== undefined && task.lastRun !== undefined) task.enabled = false;
   saveSchedule(tasks);
   return true;
 }

@@ -75,6 +75,18 @@ function getDb() {
       detail  TEXT
     );
     CREATE INDEX IF NOT EXISTS command_log_jid_ts ON command_log (jid, ts);
+    -- Things worth remembering about people and chats (owner decision, 2026-10-17): preferences, facts,
+    -- running jokes. Every row belongs to ONE chat (jid), and every read names that chat, so what is
+    -- known in one chat never surfaces in another. about is a person's name or number as used in that
+    -- chat, NULL for the chat as a whole.
+    CREATE TABLE IF NOT EXISTS memories (
+      rowid INTEGER PRIMARY KEY,
+      jid   TEXT NOT NULL,
+      about TEXT,
+      text  TEXT NOT NULL,
+      ts    INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS memories_jid ON memories (jid, about);
   `);
   // A database created before these columns existed keeps its old shape — CREATE TABLE IF NOT
   // EXISTS is a no-op on it, indexes on missing columns then fail. Adding them here is cheap and
@@ -175,6 +187,47 @@ export function findRelated(jid, messageId) {
 // Records that an in-chat command fired -- called from every command branch in server.mjs,
 // unconditionally, before any incognito early-return. This must never be gated by incognito: the
 // one thing worth recording about a chat with incognito on is that incognito was toggled at all.
+export const MAX_MEMORIES_PER_CHAT = 200;
+export const MAX_MEMORY_CHARS = 300;
+
+// Returns { id } or { error }. The text is checked by the caller's secret scan before it gets here.
+export function addMemory(jid, about, text, ts = Date.now()) {
+  const clean = String(text ?? "").trim();
+  if (!clean) return { error: "text is empty" };
+  if (clean.length > MAX_MEMORY_CHARS) return { error: `keep it under ${MAX_MEMORY_CHARS} characters` };
+  const db = getDb();
+  const { n } = db.prepare("SELECT count(*) AS n FROM memories WHERE jid = ?").get(jid);
+  if (n >= MAX_MEMORIES_PER_CHAT) return { error: `this chat already has ${n} memories, forget some first` };
+  const who = about?.trim() || null;
+  const dup = db
+    .prepare(
+      `SELECT rowid FROM memories WHERE jid = ? AND unicode_lower(text) = unicode_lower(?)
+       AND (about IS ? OR unicode_lower(about) = unicode_lower(?))`,
+    )
+    .get(jid, clean, who, who);
+  if (dup) return { id: dup.rowid, duplicate: true };
+  const { lastInsertRowid } = db
+    .prepare("INSERT INTO memories (jid, about, text, ts) VALUES (?, ?, ?, ?)")
+    .run(jid, who, clean, ts);
+  return { id: Number(lastInsertRowid) };
+}
+
+// One chat's memories, optionally about one person (matched the way search matches: case and
+// diacritics folded). Oldest first.
+export function listMemories(jid, about) {
+  const rows = getDb()
+    .prepare("SELECT rowid AS id, about, text, ts FROM memories WHERE jid = ? ORDER BY rowid")
+    .all(jid);
+  if (!about?.trim()) return rows;
+  const q = normalizeForSearch(about.trim());
+  return rows.filter((r) => r.about && normalizeForSearch(r.about) === q);
+}
+
+// Only in the chat it belongs to: an id from another chat deletes nothing.
+export function forgetMemory(jid, id) {
+  return getDb().prepare("DELETE FROM memories WHERE jid = ? AND rowid = ?").run(jid, id).changes > 0;
+}
+
 export function logCommand(jid, command, detail) {
   getDb()
     .prepare("INSERT INTO command_log (ts, jid, command, detail) VALUES (?, ?, ?, ?)")

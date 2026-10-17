@@ -1046,6 +1046,8 @@ for (const [name, re] of Object.entries(CMDS)) {
     ai: "/ai off",
     incognito: "/incognito on",
     generate: "/generate --prompt x",
+    memory: "/memory",
+    forget: "/forget 3",
   }[name];
   assert.ok(re.exec(sample), `${name} matches its own command form`);
   assert.equal(re.exec(sample + ATTR), null, `${name} cannot match a message carrying the (_Claude_) attribution`);
@@ -1939,6 +1941,90 @@ assert.deepEqual(unansweredChats([STATS], 1 * H), [], "answering it takes it off
     /not falling back to another voice/,
     "a clone with the service down fails instead of speaking in a different voice",
   );
+}
+
+// One-off reminders: `once` fires at its moment, retries until acknowledged, then switches off.
+{
+  const { dueTasks, validateTask, upsertTask, loadSchedule, markRan, ackTask } = await import("./src/schedule.mjs");
+  const at = (d, h, m) => new Date(2026, 9, d, h, m, 0, 0).getTime();
+  const reminder = { id: "rem-test", once: "2026-10-23T18:00", prompt: "remind 120363000000000201@g.us: hali saha" };
+  assert.equal(validateTask(reminder), null, "a once task is valid");
+  assert.match(validateTask({ ...reminder, at: "10:00" }), /not both/, "not both at and once");
+  assert.match(validateTask({ ...reminder, days: [1] }), /days only goes with at/);
+  assert.match(validateTask({ ...reminder, once: "2026-02-31T10:00" }), /YYYY-MM-DD/, "a date that does not exist");
+  assert.match(validateTask({ ...reminder, once: "23.10.2026 18:00" }), /YYYY-MM-DD/, "the wrong format");
+  assert.equal(dueTasks([reminder], at(23, 17, 59)).length, 0, "not before its moment");
+  assert.equal(dueTasks([reminder], at(23, 18, 1)).length, 1, "due at its moment");
+  assert.equal(dueTasks([reminder], at(24, 18, 1)).length, 0, "and not the next day");
+  assert.equal(dueTasks([reminder], at(22, 18, 1)).length, 0, "nor the day before");
+
+  upsertTask(reminder);
+  markRan("rem-test", at(23, 18, 1));
+  const fired = loadSchedule().find((t) => t.id === "rem-test");
+  assert.equal(fired.lastRun, at(23, 18, 0), "lastRun is the reminder's own moment");
+  assert.equal(dueTasks([fired], at(23, 18, 30)).length, 1, "it retries while nobody has picked it up");
+  ackTask("rem-test");
+  const done = loadSchedule().find((t) => t.id === "rem-test");
+  assert.equal(done.enabled, false, "an acknowledged reminder is switched off");
+  assert.equal(dueTasks([done], at(23, 18, 40)).length, 0, "and never fires again");
+
+  // Turning a reminder into a daily task drops `once`, so it cannot carry both.
+  upsertTask({ id: "rem-test", at: "09:00", once: undefined, prompt: "daily now" });
+  const daily = loadSchedule().find((t) => t.id === "rem-test");
+  assert.equal(daily.once, undefined, "the old once is gone");
+  assert.equal(validateTask(daily), null);
+}
+
+// Memories: per chat, never across chats, no duplicates, a size limit, forget only in its own chat.
+{
+  const store = await import("./src/store.mjs");
+  const { formatMemories, COMMANDS, contactAllowed, vcardFor } = await import("./src/server.mjs");
+  const G = "120363000000000301@g.us";
+  const H = "120363000000000302@g.us";
+  const a = store.addMemory(G, "Selin", "kahveyi sekersiz icer");
+  assert.ok(a.id, "a note is stored");
+  assert.equal(store.addMemory(G, "selin", "Kahveyi sekersiz icer").duplicate, true, "the same note twice is one note");
+  store.addMemory(G, null, "cumalari hali saha");
+  store.addMemory(H, "Selin", "baska sohbetten bir not");
+  assert.equal(store.listMemories(G).length, 2, "only this chat's notes");
+  assert.equal(store.listMemories(G, "SELİN").length, 1, "about matches with case and diacritics folded");
+  assert.ok(
+    !store.listMemories(G).some((m) => m.text.includes("baska sohbetten")),
+    "another chat's note never shows up",
+  );
+  assert.equal(store.forgetMemory(H, a.id), false, "an id from another chat deletes nothing");
+  assert.equal(store.forgetMemory(G, a.id), true, "forget works in its own chat");
+  assert.equal(store.listMemories(G).length, 1);
+  assert.match(
+    store.addMemory(G, null, "x".repeat(store.MAX_MEMORY_CHARS + 1)).error,
+    /under/,
+    "long notes are refused",
+  );
+  assert.match(store.addMemory(G, null, "   ").error, /empty/, "empty notes are refused");
+  assert.match(formatMemories(store.listMemories(G)), /^#\d+ cumalari hali saha$/, "list format");
+  assert.match(formatMemories([]), /kayitli bir sey yok/);
+
+  assert.ok(COMMANDS.memory.test("/memory") && !COMMANDS.memory.test("/memory sil"), "/memory is anchored");
+  assert.equal(COMMANDS.forget.exec("/forget 12")[1], "12");
+  assert.ok(
+    !COMMANDS.forget.test("/forget 12 (_Claude_)") && !COMMANDS.forget.test("/forget all"),
+    "/forget is anchored",
+  );
+
+  // Contact cards only for numbers that chat already knows.
+  const people = [{ who: "4915100000777@s.whatsapp.net" }, { who: "(you)" }];
+  assert.ok(
+    contactAllowed(G, "4915100000777", "491700000000:3@s.whatsapp.net", people),
+    "someone who wrote in the chat",
+  );
+  assert.ok(contactAllowed(G, "491700000000", "491700000000:3@s.whatsapp.net", people), "the owner's own number");
+  assert.ok(
+    contactAllowed("4915100000888@s.whatsapp.net", "4915100000888", "491700000000:3@s.whatsapp.net", []),
+    "a DM's own person",
+  );
+  assert.ok(!contactAllowed(G, "4915100000999", "491700000000:3@s.whatsapp.net", people), "anyone else is refused");
+  assert.ok(!vcardFor("A;B\nC", "49151").includes("\nC"), "a name cannot break out of its vCard line");
+  assert.match(vcardFor("Selin", "4915100000777"), /waid=4915100000777:\+4915100000777/);
 }
 
 // Runs last: it deliberately exhausts the window, so anything after it would see a full budget.
