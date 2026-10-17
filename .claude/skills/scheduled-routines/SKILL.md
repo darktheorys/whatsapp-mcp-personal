@@ -11,7 +11,7 @@ Acknowledge first: the moment a `⏰ <id>` line arrives, call `wa_schedule_ack` 
 
 Tasks are stored in `state/schedule.json` (not versioned, gitignored). `at` is local `HH:MM` plus optional `days` (0 is Sunday). `lastRun` stores the occurrence a run was for, which is what makes catch-up and the no-double-fire guard the same mechanism.
 
-Chat ids are not written in this file. Each task's stored prompt names its target chat, and that is where the id comes from.
+Chat ids are not written in this file. Each task's stored prompt names its target chat, and that is where the id comes from. Keep the full chat id in the stored prompt: when the task fires, the server opens that chat for sends (the wrong-chat guard otherwise refuses a chat that has not woken the session). If a send is still refused that way, pass `unprompted` with the task id.
 
 ## Rules for every routine
 
