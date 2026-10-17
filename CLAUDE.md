@@ -190,8 +190,15 @@ stream. Use `process.stderr.write` or the `state/baileys.log` pino logger instea
 - **`scanOutbound`** refuses sends matching private-key/AWS/GitHub/Slack/API-key/JWT shapes, or
   containing exact substrings from `state/auth/creds.json` — this holds regardless of *why* the
   model assembled the text, including if it was talked into it by untrusted chat content.
-- **`resolveSendable(path)`** confines outbound file sends (`wa_send_image`, `wa_send_audio`, `wa_send_document`) to
-  `state/memes/` and the session scratchpad — never `state/media/`, which holds what other chats
+- **`resolveTarget`** (server.mjs) decides which chat a send tool writes to. `reply_to` alone is enough: the
+  chat is taken from the quoted message, and a `to` that disagrees is refused. A chat counts as live for 90
+  minutes after it woke the session (a wake queued for it, or a scheduled task whose prompt names it; rebuilt
+  from inbox.log on restart). A send to a chat that is not live is refused unless the call passes
+  `unprompted` with a reason, which goes to command_log. The owner's own DM is always live. This is what
+  stops a reply meant for one allowlisted chat from going to another by a wrong id.
+- **`resolveSendable(path)`** confines outbound file sends (`wa_send_image`, `wa_send_audio`, `wa_send_document`,
+  stickers, videos) to `state/memes/`, `state/stickers/`, `state/outbox/` and the session scratchpad's `outbox/` —
+  never `state/media/`, which holds what other chats
   sent *in*; allowing it as a source would make cross-chat forwarding a single tool call. Paths are
   resolved with `realpathSync` first so a symlink can't escape the check.
 - **`guardOwnMessage(jid, messageId)`** restricts `wa_edit`/`wa_delete` to messages this server

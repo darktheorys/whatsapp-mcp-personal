@@ -74,6 +74,7 @@ import {
   appendMessage,
   archiveOldMessages,
   chatStats,
+  chatsOfMessage,
   findMessage,
   logCommand,
   logInbox,
@@ -354,7 +355,9 @@ export function speechEndSeconds(words, text) {
   return null;
 }
 
-async function trimTrailingBabble(wav, text) {
+// `lang` is the language the note was spoken in: whisper forced to Turkish on an English note finds
+// the wrong words, so the end of speech came out wrong.
+async function trimTrailingBabble(wav, text, lang = "tr") {
   const dir = mkdtempSync(join(tmpdir(), "wa-trim-"));
   try {
     const limit = { timeout: 60_000, killSignal: "SIGKILL" };
@@ -362,7 +365,7 @@ async function trimTrailingBabble(wav, text) {
     await execFileAsync("ffmpeg", ["-y", "-loglevel", "error", "-i", wav, "-ar", "16000", "-ac", "1", wav16], limit);
     const { stdout } = await execFileAsync(
       "whisper-cli",
-      ["-m", whisperModel(), "-f", wav16, "-l", "tr", "-ml", "1", "-sow"],
+      ["-m", whisperModel(), "-f", wav16, "-l", lang === "en" ? "en" : "tr", "-ml", "1", "-sow"],
       { ...limit, encoding: "utf8" },
     );
     const end = speechEndSeconds(parseWordTimestamps(stdout), text);
@@ -444,7 +447,7 @@ export async function synthWav(text, voice, rate, lang, outWav, { clone, cloneOp
           speed: rate / segment.scale,
           outWav: file,
         });
-        await trimTrailingBabble(file, segment.text);
+        await trimTrailingBabble(file, segment.text, lang);
       },
       outWav,
     );
@@ -661,6 +664,110 @@ export function applyMentions(text, resolved) {
 
 function sendWithQuote(sock, to, replyTo, content) {
   return sock.sendMessage(to, content, quoteOptions(sock, to, replyTo));
+}
+
+// Which chat a send goes to (owner decisions, 2026-10-17). The allowlist says who may be written to; it
+// cannot tell a reply meant for one chat from the same text sent to another allowlisted chat by a wrong
+// id. Two checks close that:
+//  - `reply_to` alone is enough: the chat is taken from the quoted message, so the target cannot be
+//    mistyped. A `to` that disagrees with it is refused.
+//  - A chat counts as live for LIVE_MS after something in it woke the session (a tag, a reply, the
+//    owner writing there, a scheduled task naming it). A send to a chat that is not live is refused
+//    unless the call says why in `unprompted`, which is logged. The owner's own DM is always live.
+export const LIVE_MS = 90 * 60_000;
+const liveChats = new Map();
+export function markLive(jid, now = Date.now()) {
+  if (jid) liveChats.set(jid, now);
+}
+export function isLive(jid, now = Date.now()) {
+  const at = liveChats.get(jid);
+  return at !== undefined && now - at <= LIVE_MS;
+}
+// Chat ids written in a scheduled task's prompt: the task names its own target there.
+export function jidsIn(text) {
+  return [...new Set(String(text ?? "").match(/\b\d{6,}(?:-\d+)?@(?:g\.us|s\.whatsapp\.net)\b/g) ?? [])];
+}
+
+// After a restart the map is empty, which would refuse replies to wakes that arrived just before it.
+// It is rebuilt from the tail of inbox.log, which holds exactly the wake lines.
+export function liveFromInboxLines(lines, now = Date.now()) {
+  const out = new Map();
+  for (const line of lines) {
+    const m = /^\[([^\]]+)\] \[([^\]]+)\] (.*)$/.exec(line);
+    if (!m) continue;
+    const at = Date.parse(m[1]);
+    if (!Number.isFinite(at) || now - at > LIVE_MS) continue;
+    for (const jid of m[2] === "(scheduler)" ? jidsIn(m[3]) : [m[2]]) out.set(jid, Math.max(out.get(jid) ?? 0, at));
+  }
+  return out;
+}
+function seedLiveChats() {
+  try {
+    const buf = readFileSync(join(STATE_DIR, "inbox.log"));
+    const tail = buf
+      .subarray(Math.max(0, buf.length - 256 * 1024))
+      .toString("utf8")
+      .split("\n");
+    for (const [jid, at] of liveFromInboxLines(tail)) markLive(jid, at);
+  } catch {
+    /* no inbox.log yet */
+  }
+}
+
+const refused = (text) => ({ isError: true, content: [{ type: "text", text: `Refused: ${text}` }] });
+
+export function resolveTarget({ to, replyTo, unprompted, ownJid, chatsOf = chatsOfMessage, live = isLive }) {
+  let target = to;
+  if (replyTo) {
+    const chats = chatsOf(replyTo);
+    if (chats.length === 0) return { error: refused(`message ${replyTo} is not in any chat's log.`) };
+    if (to && !chats.includes(to)) {
+      return { error: refused(`message ${replyTo} is in ${chats.join(", ")}, not in ${to}. Nothing was sent.`) };
+    }
+    if (!to && chats.length > 1) {
+      return { error: refused(`message ${replyTo} exists in more than one chat, pass \`to\` as well.`) };
+    }
+    target = to ?? chats[0];
+  }
+  if (!target) return { error: refused("give `to`, or `reply_to` so the chat can be taken from the quoted message.") };
+  if (target !== ownJid && !live(target) && !unprompted?.trim()) {
+    return {
+      error: refused(
+        `${target} has not woken this session in the last ${LIVE_MS / 60_000} minutes, so a send there looks like ` +
+          "the wrong chat. If it is meant (a scheduled task, or the owner asked for it), pass `unprompted` with the reason.",
+      ),
+    };
+  }
+  return { target };
+}
+
+// The schema fields every send tool shares, and the step that turns them into a target.
+const TARGET_FIELDS = {
+  to: z
+    .string()
+    .optional()
+    .describe("Recipient JID, e.g. 491701234567@s.whatsapp.net. Optional when reply_to is given."),
+  reply_to: z
+    .string()
+    .optional()
+    .describe(
+      "Message id to quote as a reply (the id field from wa_recent). The send goes to the chat that message is in.",
+    ),
+  unprompted: z
+    .string()
+    .optional()
+    .describe(
+      "Only for a send to a chat that has not woken this session in the last 90 minutes: why it is meant " +
+        "(a scheduled task's id, or the owner's instruction). Logged.",
+    ),
+};
+
+function targetFor({ to, reply_to, unprompted }) {
+  const result = resolveTarget({ to, replyTo: reply_to, unprompted, ownJid: jidNormalizedUser(getSocket()?.user?.id) });
+  if (result.target && unprompted?.trim() && !isLive(result.target)) {
+    logCommand(result.target, "unprompted-send", unprompted.trim().slice(0, 200));
+  }
+  return result;
 }
 
 // A long reply goes out as up to three shorter messages, cut at paragraph boundaries (or sentence
@@ -1287,6 +1394,9 @@ async function resolveSender(jid) {
 // Every one is anchored `^...$`. That is what makes them immune to the attribution suffix: a
 // message this server sent ends in "\n\n(_Claude_)", so it can never match its own command form
 // even if WhatsApp started echoing our sends back as `notify`.
+export const SPEAKING_RATE_MIN = 0.5;
+export const SPEAKING_RATE_MAX = 3;
+
 export const COMMANDS = {
   wakelevel: /^\/wakelevel\s+(mention-only|verbose)\s*$/i,
   speaking: /^\/speaking\s+(voice-only|text-only)\s*$/i,
@@ -1415,14 +1525,28 @@ function quoteOwnCommand(sock, jid, key, text) {
   };
 }
 
-async function replyToCommand(jid, key, commandText, text, image = null) {
+// A command's own reply: through guardSend (allowlist, secret scan, rate limit) and into the log like
+// every other message this server sends. Some replies used to go straight to the socket and were
+// neither rate-limited nor stored.
+async function commandReply(jid, text, options) {
   const sock = getSocket();
   if (!sock || guardSend(jid, text)) return;
+  const sent = await sock.sendMessage(jid, { text: text + ATTRIBUTION }, options);
+  appendMessage(jid, {
+    direction: "out",
+    by: "claude",
+    text: text + ATTRIBUTION,
+    ts: Date.now(),
+    id: sent?.key?.id ?? null,
+  });
+}
+
+async function replyToCommand(jid, key, commandText, text, image = null) {
+  const sock = getSocket();
+  if (!sock) return;
   const quote = quoteOwnCommand(sock, jid, key, commandText);
-  if (!image) {
-    await sock.sendMessage(jid, { text: text + ATTRIBUTION }, quote);
-    return;
-  }
+  if (!image) return commandReply(jid, text, quote);
+  if (guardSend(jid, text)) return;
   const { real, error } = resolveSendable(image);
   if (error) return;
   const sent = await sock.sendMessage(jid, { image: readFileSync(real), caption: text + ATTRIBUTION }, quote);
@@ -1473,10 +1597,7 @@ async function runGenerate(jid, key, rest, commandText) {
   const sock = getSocket();
   if (!sock) return;
   const parsed = parseGenerateArgs(rest);
-  const say = async (text) => {
-    if (guardSend(jid, text)) return;
-    await sock.sendMessage(jid, { text: text + ATTRIBUTION }, quoteOwnCommand(sock, jid, key, commandText));
-  };
+  const say = (text) => commandReply(jid, text, quoteOwnCommand(sock, jid, key, commandText));
   if (parsed.error === "usage") {
     return say(
       '/generate --model z --prompt "a red fez on a desk" --negative "blurry" [--steps N --width N --height N --seed N]',
@@ -1672,6 +1793,7 @@ function armDebounce(jid) {
 }
 
 function queueWake(jid, label, text) {
+  markLive(jid);
   let entry = pendingWake.get(jid);
   if (!entry) {
     entry = {
@@ -1702,12 +1824,63 @@ function handlePresenceUpdate({ id, presences }) {
   }
 }
 
+// WAProto ProtocolMessage.Type values.
+export const PROTOCOL_REVOKE = 0;
+export const PROTOCOL_MESSAGE_EDIT = 14;
+
+// The row an edit or delete becomes, or null when there is nothing to store. Pure, for the test.
+export function protocolChangeEntry(protocol, { fromMe, ts, from, name, editedText, targetByClaude }) {
+  const targetId = protocol?.key?.id;
+  if (!targetId) return null;
+  if (protocol.type !== PROTOCOL_REVOKE && protocol.type !== PROTOCOL_MESSAGE_EDIT) return null;
+  // This server already wrote a row when it edited or deleted its own message.
+  if (targetByClaude) return null;
+  const kind = protocol.type === PROTOCOL_REVOKE ? "delete" : "edit";
+  return {
+    direction: fromMe ? "out" : "in",
+    kind,
+    to: targetId,
+    ts,
+    ...(kind === "edit" ? { text: editedText ?? "" } : {}),
+    ...(from ? { from, name } : {}),
+  };
+}
+
+async function recordProtocolChange(jid, waMessage, protocol) {
+  const { key } = waMessage;
+  const from = key.participant ? await resolveSender(key.participantAlt ?? key.participant) : null;
+  const target = protocol.key?.id ? findMessage(jid, protocol.key.id) : null;
+  const edited = protocol.editedMessage ? extractContent(unwrapped(protocol.editedMessage)) : null;
+  const entry = protocolChangeEntry(protocol, {
+    fromMe: key.fromMe,
+    ts: Number(waMessage.messageTimestamp) * 1000 || Date.now(),
+    from,
+    name: waMessage.pushName,
+    editedText: edited?.text,
+    targetByClaude: target?.by === "claude",
+  });
+  if (entry) appendMessage(jid, entry);
+}
+
 async function handleIncoming(waMessage) {
   const { key } = waMessage;
   const jid = allowedJid(key.remoteJid, key.remoteJidAlt);
   if (!jid) return;
   const viewOnce = isViewOnce(waMessage.message);
-  const pollVote = unwrapped(waMessage.message)?.pollUpdateMessage;
+  // An edit or delete by someone else arrives as a protocolMessage pointing at the original. It used to
+  // be dropped as plumbing, so the stored text stayed the original forever. It is now a row of its own
+  // (kind edit/delete, `to` the original), the same shape this server already writes for its own edits,
+  // which reads derive "edited"/"deleted" from. It never wakes anything.
+  const protocol = unwrapped(waMessage.message)?.protocolMessage;
+  if (protocol) {
+    if (!isIncognito(jid)) {
+      await recordProtocolChange(jid, waMessage, protocol).catch((err) =>
+        logger.warn({ err: String(err?.message ?? err) }, "could not record an edit or delete"),
+      );
+    }
+    return;
+  }
+  const pollVote = isIncognito(jid) ? null : unwrapped(waMessage.message)?.pollUpdateMessage;
   if (pollVote) {
     // Never allowed to throw out of here: a vote that cannot be read must not stop the message
     // pipeline for everything after it.
@@ -1746,7 +1919,13 @@ async function handleIncoming(waMessage) {
     // Global, not per-chat — see speakingRate()'s comment in config.mjs.
     const speed = COMMANDS.speakingSpeed.exec(trimmed);
     if (speed) {
-      setSpeakingRate(Number(speed[1]));
+      // 0 used to pass the regex and make every voice note fail (Piper got an infinite length scale).
+      const rate = Number(speed[1]);
+      if (!(rate >= SPEAKING_RATE_MIN && rate <= SPEAKING_RATE_MAX)) {
+        await commandReply(jid, `speaking-speed ${SPEAKING_RATE_MIN} ile ${SPEAKING_RATE_MAX} arasinda olmali`);
+        return;
+      }
+      setSpeakingRate(rate);
       logCommand(jid, "speaking-speed", speed[1]);
       return;
     }
@@ -1758,9 +1937,10 @@ async function handleIncoming(waMessage) {
       const tier = s2t[1].toLowerCase();
       const model = join(STATE_DIR, "whisper-models", S2T_MODELS[tier]);
       if (!existsSync(model)) {
-        await getSocket()?.sendMessage(jid, {
-          text: `Model for "${tier}" not downloaded yet (${S2T_MODELS[tier]}). Run: bash scripts/setup-voice.sh ${tier}${ATTRIBUTION}`,
-        });
+        await commandReply(
+          jid,
+          `Model for "${tier}" not downloaded yet (${S2T_MODELS[tier]}). Run: bash scripts/setup-voice.sh ${tier}`,
+        );
         return;
       }
       setS2tTier(tier);
@@ -1777,9 +1957,10 @@ async function handleIncoming(waMessage) {
       const voice = PIPER_VOICES[isEnglish(jid) ? "en" : "tr"][tier];
       const model = join(STATE_DIR, "piper-models", voice);
       if (!existsSync(model)) {
-        await getSocket()?.sendMessage(jid, {
-          text: `Piper voice for "${tier}" not downloaded yet (${voice}). Run: bash scripts/setup-voice.sh ${tier}${ATTRIBUTION}`,
-        });
+        await commandReply(
+          jid,
+          `Piper voice for "${tier}" not downloaded yet (${voice}). Run: bash scripts/setup-voice.sh ${tier}`,
+        );
         return;
       }
       setT2sTier(tier);
@@ -1797,9 +1978,10 @@ async function handleIncoming(waMessage) {
       const voice = PIPER_VOICES[newLang][t2sTier()];
       const model = join(STATE_DIR, "piper-models", voice);
       if (!existsSync(model)) {
-        await getSocket()?.sendMessage(jid, {
-          text: `Piper voice for "${newLang}" at the current t2s tier not downloaded yet (${voice}). Run: bash scripts/setup-voice.sh ${t2sTier()}${ATTRIBUTION}`,
-        });
+        await commandReply(
+          jid,
+          `Piper voice for "${newLang}" at the current t2s tier not downloaded yet (${voice}). Run: bash scripts/setup-voice.sh ${t2sTier()}`,
+        );
         return;
       }
       setEnglish(jid, newLang === "en");
@@ -1843,9 +2025,7 @@ async function handleIncoming(waMessage) {
         const count = generateRegistry.size;
         for (const job of generateRegistry.values()) job.controller.abort();
         void ownReact(jid, key, "\u{1F6D1}");
-        if (count === 0 && !guardSend(jid, "calisan yok")) {
-          void getSocket()?.sendMessage(jid, { text: "calisan yok" + ATTRIBUTION });
-        }
+        if (count === 0) void commandReply(jid, "calisan yok");
         return;
       }
       logCommand(jid, "generate", null);
@@ -1853,7 +2033,7 @@ async function handleIncoming(waMessage) {
       return;
     }
     if (COMMANDS.help.exec(trimmed)) {
-      await getSocket()?.sendMessage(jid, { text: helpText(jid) + ATTRIBUTION });
+      await commandReply(jid, helpText(jid));
       logCommand(jid, "help", null);
       return;
     }
@@ -2308,11 +2488,7 @@ server.registerTool(
     description:
       "Send a text message to an allowlisted WhatsApp JID. Refuses anything not in state/config.json's allowlist.",
     inputSchema: {
-      to: z.string().describe("Recipient JID, e.g. 491701234567@s.whatsapp.net"),
-      reply_to: z
-        .string()
-        .optional()
-        .describe("Message id in THIS chat to quote as a reply (the id field from wa_recent)."),
+      ...TARGET_FIELDS,
       mention: z
         .array(z.string())
         .max(2)
@@ -2324,7 +2500,9 @@ server.registerTool(
     },
     annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
   },
-  async ({ to, text, reply_to, mention }) => {
+  async ({ to: toArg, text, reply_to, unprompted, mention }) => {
+    const { target: to, error } = targetFor({ to: toArg, reply_to, unprompted });
+    if (error) return error;
     const refusal = guardSend(to, text);
     if (refusal) return refusal;
     const sock = getSocket();
@@ -2390,12 +2568,14 @@ server.registerTool(
       "voice note. For speaking text directly, use wa_send_voice instead — this is for a file that " +
       "already exists on disk.",
     inputSchema: {
-      to: z.string().describe("Recipient JID, e.g. 491701234567@s.whatsapp.net"),
+      ...TARGET_FIELDS,
       path: z.string().describe("Absolute local path to the audio file (m4a/ogg/mp3 etc.)"),
     },
     annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
   },
-  async ({ to, path }) => {
+  async ({ to: toArg, reply_to, unprompted, path }) => {
+    const { target: to, error } = targetFor({ to: toArg, reply_to, unprompted });
+    if (error) return error;
     const refusal = guardCheck(to);
     if (refusal) return refusal;
     const sock = getSocket();
@@ -2423,7 +2603,7 @@ server.registerTool(
     }
     const spend = guardSend(to);
     if (spend) return spend;
-    const sent = await sock.sendMessage(to, {
+    const sent = await sendWithQuote(sock, to, reply_to, {
       audio: buffer,
       mimetype: "audio/mp4",
       ptt: true,
@@ -2449,17 +2629,15 @@ server.registerTool(
       "Send an image (from a local file path) to an allowlisted WhatsApp JID, with an optional caption. " +
       "Refuses anything not in state/config.json's allowlist.",
     inputSchema: {
-      to: z.string().describe("Recipient JID, e.g. 491701234567@s.whatsapp.net"),
-      reply_to: z
-        .string()
-        .optional()
-        .describe("Message id in THIS chat to quote as a reply (the id field from wa_recent)."),
+      ...TARGET_FIELDS,
       path: z.string().describe("Absolute local path to the image file"),
       caption: z.string().optional(),
     },
     annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
   },
-  async ({ to, path, caption, reply_to }) => {
+  async ({ to: toArg, path, caption, reply_to, unprompted }) => {
+    const { target: to, error } = targetFor({ to: toArg, reply_to, unprompted });
+    if (error) return error;
     const refusal = guardCheck(to, caption);
     if (refusal) return refusal;
     const sock = getSocket();
@@ -2515,11 +2693,7 @@ server.registerTool(
       "`language` defaults to this chat's usual language (set with /language) but can be overridden " +
       "per call — e.g. to reply in English for one message in an otherwise-Turkish chat.",
     inputSchema: {
-      to: z.string().describe("Recipient JID, e.g. 491701234567@s.whatsapp.net"),
-      reply_to: z
-        .string()
-        .optional()
-        .describe("Message id in THIS chat to quote as a reply (the id field from wa_recent)."),
+      ...TARGET_FIELDS,
       text: z.string().min(1),
       voice: z
         .string()
@@ -2546,14 +2720,19 @@ server.registerTool(
     },
     annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
   },
-  async ({ to, text, voice, language: lang, rate, clone, reply_to }) => {
-    const refusal = guardSend(to, text);
-    if (refusal) return refusal;
+  async ({ to: toArg, text, voice, language: lang, rate, clone, reply_to, unprompted }) => {
+    const { target: to, error } = targetFor({ to: toArg, reply_to, unprompted });
+    if (error) return error;
+    // Every refusal runs before guardSend, which spends a rate-limit slot.
+    const check = guardCheck(to, text);
+    if (check) return check;
     let cloned;
     if (clone) {
       cloned = resolveClone(clone, to);
       if (cloned.error) return { isError: true, content: [{ type: "text", text: `Refused: ${cloned.error}.` }] };
     }
+    const refusal = guardSend(to, text);
+    if (refusal) return refusal;
     const sock = getSocket();
     let buffer;
     try {
@@ -2891,15 +3070,18 @@ server.registerTool(
       "made from your own phone — can be read as a message but never as tallied votes. Check " +
       "results later with wa_poll_results, using the message id this returns.",
     inputSchema: {
-      to: z.string().describe("Recipient JID, e.g. 491701234567@s.whatsapp.net"),
+      ...TARGET_FIELDS,
       name: z.string().min(1).describe("The poll question"),
       values: z.array(z.string().min(1)).min(2).max(12).describe("2-12 options"),
       selectableCount: z.number().int().min(1).optional().describe("How many options one voter may pick (default 1)"),
     },
     annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
   },
-  async ({ to, name, values, selectableCount }) => {
-    const refusal = guardSend(to, name);
+  async ({ to: toArg, reply_to, unprompted, name, values, selectableCount }) => {
+    const { target: to, error } = targetFor({ to: toArg, reply_to, unprompted });
+    if (error) return error;
+    // guardCheck here, guardSend after the option checks below: a refused poll must not spend a slot.
+    const refusal = guardCheck(to, name);
     if (refusal) return refusal;
     // guardSend only ever saw `name` — the poll question — but every option in `values` is sent
     // to WhatsApp (and stored) exactly the same as the question is. Without this, a secret placed
@@ -2928,13 +3110,15 @@ server.registerTool(
         ],
       };
     }
+    const spend = guardSend(to, name);
+    if (spend) return spend;
     const secret = randomBytes(32);
     const sock = getSocket();
     // Passed explicitly because Baileys treats an unset selectableCount as 0, which WhatsApp reads as
     // "any number of options". The documented default of 1 used to exist only in what was stored, so
     // every poll sent without a count was multi-select: a yes/no permission poll let both be ticked.
     const pickCount = selectableCount ?? 1;
-    const sent = await sock.sendMessage(to, {
+    const sent = await sendWithQuote(sock, to, reply_to, {
       poll: { name, values, selectableCount: pickCount, messageSecret: secret },
     });
     const messageId = sent?.key?.id ?? null;
@@ -3009,6 +3193,11 @@ server.registerTool(
           },
         ],
       };
+    }
+    // The poll must belong to the chat that was named: otherwise naming any allowlisted chat would
+    // read another chat's question, options and who voted for what.
+    if (allowedJid(entry.jid) !== allowedJid(jid)) {
+      return { isError: true, content: [{ type: "text", text: `Refused: poll ${messageId} is not in ${jid}.` }] };
     }
     return {
       content: [
@@ -3275,11 +3464,7 @@ server.registerTool(
       "Send plain text to a voice-only chat without converting it to a voice note. Useful for sharing " +
       "structured information (URLs, metadata, transcripts) where text is clearer than spoken audio.",
     inputSchema: {
-      to: z.string().describe("Recipient JID, e.g. 491701234567@s.whatsapp.net"),
-      reply_to: z
-        .string()
-        .optional()
-        .describe("Message id in THIS chat to quote as a reply (the id field from wa_recent)."),
+      ...TARGET_FIELDS,
       mention: z
         .array(z.string())
         .max(2)
@@ -3291,7 +3476,9 @@ server.registerTool(
     },
     annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
   },
-  async ({ to, text, reply_to, mention }) => {
+  async ({ to: toArg, text, reply_to, unprompted, mention }) => {
+    const { target: to, error } = targetFor({ to: toArg, reply_to, unprompted });
+    if (error) return error;
     const refusal = guardSend(to, text);
     if (refusal) return refusal;
     const sock = getSocket();
@@ -3326,12 +3513,14 @@ server.registerTool(
       "separately if something needs saying. Prefer a sticker over a meme video when the joke is " +
       "one beat rather than a scene.",
     inputSchema: {
-      to: z.string().describe("Recipient JID, e.g. 491701234567@s.whatsapp.net"),
+      ...TARGET_FIELDS,
       path: z.string().describe("Path to the .webp sticker, normally state/stickers/<name>.webp"),
     },
     annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
   },
-  async ({ to, path }) => {
+  async ({ to: toArg, reply_to, unprompted, path }) => {
+    const { target: to, error } = targetFor({ to: toArg, reply_to, unprompted });
+    if (error) return error;
     const refusal = guardCheck(to);
     if (refusal) return refusal;
     const { real, error: pathError } = resolveSendable(path);
@@ -3355,7 +3544,7 @@ server.registerTool(
     }
     const spend = guardSend(to);
     if (spend) return spend;
-    const sent = await getSocket().sendMessage(to, { sticker: buffer });
+    const sent = await sendWithQuote(getSocket(), to, reply_to, { sticker: buffer });
     appendMessage(to, {
       direction: "out",
       by: "claude",
@@ -3377,13 +3566,15 @@ server.registerTool(
       "Send a video file to an allowlisted WhatsApp JID, with an optional caption. " +
       "Refuses anything not in state/config.json's allowlist.",
     inputSchema: {
-      to: z.string().describe("Recipient JID, e.g. 491701234567@s.whatsapp.net"),
+      ...TARGET_FIELDS,
       path: z.string().describe("Absolute local path to the video file (mp4/mkv/mov etc.)"),
       caption: z.string().optional(),
     },
     annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
   },
-  async ({ to, path, caption }) => {
+  async ({ to: toArg, reply_to, unprompted, path, caption }) => {
+    const { target: to, error } = targetFor({ to: toArg, reply_to, unprompted });
+    if (error) return error;
     const refusal = guardCheck(to, caption);
     if (refusal) return refusal;
     const sock = getSocket();
@@ -3413,7 +3604,7 @@ server.registerTool(
     const fullCaption = (caption ?? "") + ATTRIBUTION;
     const spend = guardSend(to, caption);
     if (spend) return spend;
-    const sent = await sock.sendMessage(to, {
+    const sent = await sendWithQuote(sock, to, reply_to, {
       video: buffer,
       caption: fullCaption,
     });
@@ -3485,11 +3676,7 @@ server.registerTool(
       "and the session scratchpad's outbox/ folder, never state/media. The content is secret-scanned before " +
       "sending. Refuses anything not in state/config.json's allowlist.",
     inputSchema: {
-      to: z.string().describe("Recipient JID, e.g. 491701234567@s.whatsapp.net"),
-      reply_to: z
-        .string()
-        .optional()
-        .describe("Message id in THIS chat to quote as a reply (the id field from wa_recent)."),
+      ...TARGET_FIELDS,
       path: z.string().describe("Absolute local path to the document"),
       caption: z.string().optional(),
       fileName: z
@@ -3499,7 +3686,9 @@ server.registerTool(
     },
     annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
   },
-  async ({ to, path, caption, fileName, reply_to }) => {
+  async ({ to: toArg, path, caption, fileName, reply_to, unprompted }) => {
+    const { target: to, error } = targetFor({ to: toArg, reply_to, unprompted });
+    if (error) return error;
     // Everything that can refuse runs before guardSend, which is the step that spends a rate-limit slot.
     const check = guardCheck(to, [caption, fileName].filter(Boolean).join("\n") || undefined);
     if (check) return check;
@@ -3608,10 +3797,12 @@ if (!process.env.WA_NO_CONNECT) {
   // Started here rather than next to the tool registrations so importing this file for tests does
   // not start a timer, same reason the socket is behind this guard.
   //
+  seedLiveChats();
   // The line goes to inbox.log, not queueWake: a scheduled task belongs to no chat, and it must not
   // sit behind the presence debounce waiting for someone to stop typing.
   startScheduler({
     onDue: (task) => {
+      for (const jid of jidsIn(task.prompt)) markLive(jid);
       notify("info", `scheduled task due: ${task.id}`, { id: task.id, at: task.at });
       logInbox("(scheduler)", `⏰ ${task.id}`, task.prompt);
     },

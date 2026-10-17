@@ -557,9 +557,22 @@ export function threadOf(jid, messageId) {
   return withStatus(jid, ordered);
 }
 
+// Archived rows count too: a reply, a reaction or an edit aimed at a message older than the 30-day
+// archive cut used to fail with "not in this chat's log", while search and threads still found it.
 export function findMessage(jid, id) {
-  const row = getDb().prepare("SELECT json FROM messages WHERE jid = ? AND id = ? AND archived = 0").get(jid, id);
+  const row = getDb()
+    .prepare("SELECT json FROM messages WHERE jid = ? AND id = ? ORDER BY archived LIMIT 1")
+    .get(jid, id);
   return row ? withStatus(jid, [parse(row)])[0] : null;
+}
+
+// Which chats hold a message with this id. Normally one; WhatsApp ids are not guaranteed unique
+// across chats, so the caller decides what to do with more than one.
+export function chatsOfMessage(id) {
+  return getDb()
+    .prepare("SELECT DISTINCT jid FROM messages WHERE id = ?")
+    .all(id)
+    .map((r) => r.jid);
 }
 
 function getPollState() {

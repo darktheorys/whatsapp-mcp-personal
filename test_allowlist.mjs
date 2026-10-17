@@ -577,6 +577,113 @@ assert.equal(scanDocument(zipOf("word/document.xml", "<w:t>hello</w:t>"), ".docx
   );
 }
 
+// Which chat a send goes to: taken from reply_to when given, a disagreeing `to` refused, and a chat that
+// has not woken the session refused unless the call says why (owner decisions, 2026-10-17).
+{
+  const { resolveTarget, markLive, isLive, jidsIn, liveFromInboxLines, LIVE_MS } = await import("./src/server.mjs");
+  const store = await import("./src/store.mjs");
+  const A = "120363000000000101@g.us";
+  const B = "120363000000000102@g.us";
+  const OWN = "491700000000@s.whatsapp.net";
+  const chatsOf = (id) => ({ M1: [A], DUP: [A, B] })[id] ?? [];
+  const live = (jid) => jid === A;
+  const t = (args) => resolveTarget({ ownJid: OWN, chatsOf, live, ...args });
+
+  assert.equal(t({ replyTo: "M1" }).target, A, "reply_to alone gives the chat of the quoted message");
+  assert.equal(t({ to: A, replyTo: "M1" }).target, A, "a matching `to` is fine");
+  assert.match(t({ to: B, replyTo: "M1" }).error.content[0].text, /is in .*not in/, "a `to` that disagrees is refused");
+  assert.match(t({ replyTo: "NOPE" }).error.content[0].text, /not in any chat/, "an unknown id is refused");
+  assert.match(t({ replyTo: "DUP" }).error.content[0].text, /more than one chat/, "an ambiguous id needs `to`");
+  assert.equal(t({ to: B, replyTo: "DUP", unprompted: "test" }).target, B, "`to` settles an ambiguous id");
+  assert.match(t({}).error.content[0].text, /give `to`/, "no target at all is refused");
+  assert.match(t({ to: B }).error.content[0].text, /has not woken/, "a chat that did not wake the session is refused");
+  assert.match(t({ to: B, unprompted: "   " }).error.content[0].text, /has not woken/, "a blank reason does not count");
+  assert.equal(t({ to: B, unprompted: "daily-digest" }).target, B, "a stated reason lets it through");
+  assert.equal(t({ to: OWN }).target, OWN, "the owner's own DM is always open");
+  assert.equal(t({ to: A }).target, A, "a live chat needs no reason");
+
+  const C = "120363000000000103@g.us";
+  markLive(C, 1_000);
+  assert.ok(isLive(C, 1_000 + LIVE_MS), "live until the window ends");
+  assert.ok(!isLive(C, 1_000 + LIVE_MS + 1), "and not after");
+  assert.ok(!isLive("120363000000000104@g.us"), "a chat never marked is not live");
+
+  assert.deepEqual(
+    jidsIn(
+      "Open a poll in the group (120363000000000110@g.us) and DM 491700000001@s.whatsapp.net, again 120363000000000110@g.us",
+    ),
+    ["120363000000000110@g.us", "491700000001@s.whatsapp.net"],
+    "a scheduled prompt's chat ids are found, once each",
+  );
+  const now = Date.parse("2026-10-17T12:00:00.000Z");
+  const seeded = liveFromInboxLines(
+    [
+      "[2026-10-17T11:30:00.000Z] [120363000000000105@g.us] (them) X: [tag] selam",
+      "[2026-10-17T09:00:00.000Z] [120363000000000106@g.us] (them) Y: eski",
+      "[2026-10-17T11:59:00.000Z] [(scheduler)] ⏰ poll: Open a poll in 120363000000000107@g.us",
+      "not a log line",
+    ],
+    now,
+  );
+  assert.deepEqual(
+    [...seeded.keys()].sort(),
+    ["120363000000000105@g.us", "120363000000000107@g.us"],
+    "recent wakes and scheduled targets survive a restart, old ones do not",
+  );
+
+  // The store side: which chat holds an id, and archived messages are still found.
+  const D = "120363000000000108@g.us";
+  store.appendMessage(D, {
+    direction: "in",
+    from: "4915100000009@s.whatsapp.net",
+    text: "eski mesaj",
+    ts: 5,
+    id: "OLD1",
+  });
+  store.archiveOldMessages(D, 0);
+  assert.ok(store.findMessage(D, "OLD1"), "a message past the archive cut can still be replied to");
+  assert.deepEqual(store.chatsOfMessage("OLD1"), [D], "chatsOfMessage names the chat");
+  assert.deepEqual(store.chatsOfMessage("NOPE"), [], "and nothing for an unknown id");
+}
+
+// Someone else's edit or delete becomes its own row pointing at the original.
+{
+  const { protocolChangeEntry, PROTOCOL_REVOKE, PROTOCOL_MESSAGE_EDIT, SPEAKING_RATE_MIN, SPEAKING_RATE_MAX } =
+    await import("./src/server.mjs");
+  const base = { fromMe: false, ts: 99, from: "4915100000001@s.whatsapp.net", name: "Z" };
+  assert.deepEqual(
+    protocolChangeEntry({ type: PROTOCOL_REVOKE, key: { id: "T1" } }, base),
+    { direction: "in", kind: "delete", to: "T1", ts: 99, from: "4915100000001@s.whatsapp.net", name: "Z" },
+    "a delete",
+  );
+  assert.equal(
+    protocolChangeEntry({ type: PROTOCOL_MESSAGE_EDIT, key: { id: "T1" } }, { ...base, editedText: "yeni" }).text,
+    "yeni",
+    "an edit carries the new text",
+  );
+  assert.equal(
+    protocolChangeEntry({ type: PROTOCOL_REVOKE, key: { id: "T1" } }, { ...base, targetByClaude: true }),
+    null,
+    "our own edits and deletes are already stored when we send them",
+  );
+  assert.equal(protocolChangeEntry({ type: 3, key: { id: "T1" } }, base), null, "other protocol types are not rows");
+  assert.equal(protocolChangeEntry({ type: PROTOCOL_REVOKE }, base), null, "no target, nothing to store");
+  const store = await import("./src/store.mjs");
+  const E = "120363000000000109@g.us";
+  store.appendMessage(E, { direction: "in", from: base.from, text: "ilk hali", ts: 10, id: "ED1" });
+  store.appendMessage(
+    E,
+    protocolChangeEntry(
+      { type: PROTOCOL_MESSAGE_EDIT, key: { id: "ED1" } },
+      { ...base, ts: 11, editedText: "duzeltilmis" },
+    ),
+  );
+  const found = store.findMessage(E, "ED1");
+  assert.equal(found.edited, true, "the original now reads as edited");
+  assert.equal(found.editedText, "duzeltilmis", "with the new text");
+  assert.ok(SPEAKING_RATE_MIN > 0 && SPEAKING_RATE_MIN < 1 && SPEAKING_RATE_MAX > 1, "speaking speed has a sane range");
+}
+
 // Tagging people: only in a group, only people who have written in THAT chat, at most two, never everyone,
 // never a number on the do-not-tag list. The text's @Name becomes @number and the person goes in mentions.
 {

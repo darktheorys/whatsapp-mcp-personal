@@ -19,7 +19,7 @@ Local, on the owner's machine, no cloud calls. Two models behind one script, `sc
 1. Reply with one short holding line in the chat's persona ("yapiyorum", about two minutes) if the work is more than a few seconds. One line, not a stream of updates.
 2. Run the script in the background (`run_in_background: true`) so the inbox watch keeps running. Do not poll. The completion notice arrives on its own.
    For a render longer than a couple of minutes, the owner's instruction (2026-10-15) is to edit that one holding message about once a minute with the progress instead of sending new messages. Read it from the tail of `state/imggen.log` (the `N/steps` counter of the progress bar), or run a `Monitor` that prints it every 60 seconds and edit on each event with `wa_edit`. Keep it short and in the persona's voice ("%40 jsdkl"). WhatsApp only allows edits for about 15 minutes, so stop editing past that and do not start a second message. When the image is ready, send it and edit the holding line a last time to say it is done.
-3. Output must go to `<session scratchpad>/outbox/<name>.png`. The script refuses any other location. Only `outbox/` is a send source.
+3. Output must go to `<session scratchpad>/outbox/<name>.png` or `state/outbox/<name>.png`. The script refuses any other location unless `--any-out` is passed, which is for the owner's own terminal runs, never for a chat request. Only those two folders are send sources.
 4. When it finishes, send the file with `wa_send_image` to the chat that asked, and only that chat, with at most a short caption.
 5. If it fails, say so in one short line in the persona and stop. The owner's DM is the only place to talk about `state/imggen.log` or the cause.
 

@@ -14,8 +14,9 @@ guidance-distilled ones (Z-Image-Turbo, FLUX.1 dev and schnell, Kontext) accept 
 
 There is no resident service. Each call loads the model (15 to 20 seconds), renders, and exits, so nothing
 holds memory between requests. A lock file serialises calls: two image models do not fit next to the voice
-service on 32 GB, so a second request waits for the first. The result is written under a session
-scratchpad's outbox/ folder, the only scratchpad folder the send tools accept.
+service on 32 GB, so a second request waits for the first. The result is written to state/outbox/ or a
+session scratchpad's outbox/ folder, the folders the send tools accept. --any-out allows any other
+path, for runs from the terminal.
 
 The Hugging Face token is read from state/hf-token and passed to the child process through its environment
 only. It is never printed or logged. Output goes to state/imggen.log (gitignored), progress bars off.
@@ -40,6 +41,7 @@ TOKEN_FILE = REPO / "state" / "hf-token"
 LOCK_FILE = REPO / "state" / "imggen.lock"
 LOG_FILE = REPO / "state" / "imggen.log"
 TMP_ROOT = Path(f"/private/tmp/claude-{os.getuid()}")
+OUTBOX = REPO / "state" / "outbox"
 MODELS_FILE = REPO / "state" / "imggen-models.json"
 LEDGER_FILE = REPO / "state" / "models.json"
 
@@ -193,21 +195,33 @@ def last_error():
     return f": {lines[-1][:300]}" if lines else ""
 
 
-def check_out(path):
-    """The output must land in a session scratchpad's outbox/, the only scratchpad folder a send tool accepts."""
+def in_send_source(parent):
+    """True for state/outbox/ and a session scratchpad's outbox/, the folders a send tool accepts."""
+    if parent == OUTBOX.resolve():
+        return True
+    try:
+        rel = parent.relative_to(TMP_ROOT.resolve())
+    except ValueError:
+        return False
+    parts = rel.parts
+    return "scratchpad" in parts and parts[parts.index("scratchpad") + 1 :] == (
+        "outbox",
+    )
+
+
+def check_out(path, any_out=False):
+    """The output goes to a send source (state/outbox/ or a scratchpad outbox/), so a picture can only be
+    sent to a chat from where the send tools look. --any-out lifts this for the owner's own terminal
+    runs, which may write anywhere."""
     out = Path(path)
     if out.suffix.lower() != ".png":
         fail("--out must end in .png")
     parent = out.parent.resolve()
-    # try:
-    #     rel = parent.relative_to(TMP_ROOT.resolve())
-    # except ValueError:
-    #     fail(f"--out must be under {TMP_ROOT}/<session>/scratchpad/outbox/")
-    # parts = rel.parts
-    # if "scratchpad" not in parts or parts[parts.index("scratchpad") + 1 :][:1] != (
-    #     "outbox",
-    # ):
-    #     fail("--out must be inside a scratchpad outbox/ folder")
+    if not any_out and not in_send_source(parent):
+        fail(
+            "--out must be in state/outbox/ or a scratchpad outbox/ folder "
+            "(pass --any-out to write elsewhere from the terminal)"
+        )
     return parent / out.name
 
 
@@ -246,6 +260,11 @@ def main():
     )
     p.add_argument("--seed", type=int, default=int(time.time()) % 100000)
     p.add_argument(
+        "--any-out",
+        action="store_true",
+        help="allow --out outside state/outbox/ and a scratchpad outbox/ (terminal use)",
+    )
+    p.add_argument(
         "--wait",
         type=int,
         default=1800,
@@ -266,7 +285,7 @@ def main():
     if a.mode == "edit" and a.model != "z":
         fail("edit always uses Kontext, --model applies to generate only")
 
-    out = check_out(a.out)
+    out = check_out(a.out, a.any_out)
     if not (BIN / "mflux-generate").exists():
         fail(
             "the image venv is missing (state/imggen-venv), see the image-generation skill"
