@@ -55,6 +55,10 @@ Target: the friends group. Voice: see the `chat-personas` skill (`personas/perso
 4. If it fires late and it is already Friday, ask about today instead of tomorrow.
 5. When the active friends-group persona changes, update this task's prompt with `wa_schedule` so the persona named in it matches `chat-personas`.
 
+## One-off reminders
+
+A task with `once` instead of `at` is a reminder. Its prompt names the target chat (full id) and the text. When its `⏰` line arrives: acknowledge it, send the text to that chat (the chat is open for sends because the prompt names it), and stop. Acknowledging switches the task off; it never fires again. If it fired late, say so in one clause.
+
 ## Editing or adding a routine
 
 - Use `wa_schedule`. Keep the stored prompt to the target, the one-line goal and "follow the scheduled-routines skill". The procedure lives here, where it is reviewable and versioned, not in `state/schedule.json`.
