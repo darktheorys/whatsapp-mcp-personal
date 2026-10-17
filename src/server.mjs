@@ -78,6 +78,7 @@ import {
   chatsOfMessage,
   findMessage,
   forgetMemory,
+  INBOX_FILE,
   listMemories,
   receiptsFor,
   recordReceipt,
@@ -708,7 +709,7 @@ export function liveFromInboxLines(lines, now = Date.now()) {
 }
 function seedLiveChats() {
   try {
-    const buf = readFileSync(join(STATE_DIR, "inbox.log"));
+    const buf = readFileSync(INBOX_FILE);
     const tail = buf
       .subarray(Math.max(0, buf.length - 256 * 1024))
       .toString("utf8")
@@ -946,6 +947,12 @@ export function scanOutboundAll(texts) {
 // an unofficial client, so the cap is deliberately far below anything a human would hit.
 const SEND_LIMIT_PER_MIN = 20;
 const recentSends = [];
+// Tests only: an empty window, for the test that counts the limit exactly.
+export function resetSendLimitForTest() {
+  if (!process.env.WA_NO_CONNECT) throw new Error("resetSendLimitForTest is for tests only");
+  recentSends.length = 0;
+}
+
 // `consume: false` only looks: it answers "would a send be refused right now" without spending a slot.
 export function overSendLimit(consume = true) {
   const now = Date.now();
@@ -1762,7 +1769,7 @@ const pendingWake = new Map();
 // The queue mirrored to disk, so a daemon restart inside the debounce window does not swallow wake
 // lines (owner decision, 2026-10-14). The messages themselves were always safe in the store, only the
 // wake was lost. Written on every change and replayed once at startup.
-const PENDING_WAKE_FILE = join(STATE_DIR, "pending-wake.json");
+const PENDING_WAKE_FILE = process.env.WA_PENDING_WAKE_PATH ?? join(STATE_DIR, "pending-wake.json");
 function persistPendingWake() {
   try {
     const out = {};
@@ -1797,6 +1804,12 @@ function flushWake(jid) {
   pendingWake.delete(jid);
   for (const { label, text } of entry.lines) logInbox(jid, label, text);
   persistPendingWake();
+}
+
+// Tests only: write every queued wake now instead of after the debounce, so a test neither waits 10s
+// nor leaves timers running.
+export function flushAllWakesForTest() {
+  for (const jid of [...pendingWake.keys()]) flushWake(jid);
 }
 
 // Arms (or re-arms) the 10s debounce countdown for a jid with a non-empty queue. Called both when
@@ -1878,7 +1891,7 @@ async function recordProtocolChange(jid, waMessage, protocol) {
   if (entry) appendMessage(jid, entry);
 }
 
-async function handleIncoming(waMessage) {
+export async function handleIncoming(waMessage) {
   const { key } = waMessage;
   const jid = allowedJid(key.remoteJid, key.remoteJidAlt);
   if (!jid) return;
