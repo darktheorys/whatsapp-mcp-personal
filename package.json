@@ -18,7 +18,8 @@
     "format:py": "uvx ruff@0.17.0 format .",
     "format:py:check": "uvx ruff@0.17.0 format --check .",
     "lint:py": "uvx ruff@0.17.0 check .",
-    "typecheck:py": "uvx pyright@1.1.411"
+    "typecheck:py": "uvx pyright@1.1.411",
+    "install:model": "python3 scripts/install_model.py"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.30.0",

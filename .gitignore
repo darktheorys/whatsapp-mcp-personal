@@ -5,3 +5,5 @@ memory/
 .claude/settings.local.json
 __pycache__/
 .pnpm-store/
+.DS_Store
+.playwright-mcp/

@@ -12,7 +12,7 @@ Local, on the owner's machine, no cloud calls. Two models behind one script, `sc
 | `generate` | Z-Image-Turbo, 4-bit, 8 steps | about 2 minutes | 7.6 GB | pictures from a prompt, clean objects, product-style shots |
 | `edit` | FLUX.1 Kontext dev, 4-bit, 20 steps | about 11 minutes | 13.8 GB | recolouring, restyling, changing the background. Adding new objects is unreliable (a requested extra object was ignored in testing) |
 
-FLUX.1 dev (about 6 minutes) and schnell (about 1 minute) were benchmarked and are not wired in. Schnell is the fallback if two minutes is too slow.
+`generate --model NAME` also takes `dev` (FLUX.1 dev, about 6 minutes), `schnell` (about 1 minute, the fallback if two minutes is too slow) and any name the owner has added, either with `install_model.py --as NAME` (recorded in `state/models.json`) or by hand in `state/imggen-models.json` (both gitignored; `--list-models` prints them all). An entry names an mflux generate command and its options (model, base_model, steps, quantize, guidance, lora_paths, lora_scales) and nothing else. Use a name from that list only when the owner or the chat asks for it, and never invent one. A model the owner calls by a person's name is that person's likeness: use it only for that person, in a chat where they asked or the owner did.
 
 ## How a request runs
 

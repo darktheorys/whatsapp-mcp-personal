@@ -1,8 +1,20 @@
 import { execFile, execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  renameSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, extname, join, sep } from "node:path";
+import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -28,6 +40,7 @@ import {
   isEnglish,
   isIncognito,
   isMentionOnly,
+  isMentionBlocked,
   isVoiceOnly,
   loadConfig,
   loanwordRespellings,
@@ -65,6 +78,7 @@ import {
   logCommand,
   logInbox,
   messageCount,
+  normalizeForSearch,
   participantStats,
   readCommandLog,
   readContacts,
@@ -181,7 +195,10 @@ const SENTENCE_SILENCE = "0.35"; // seconds of gap after each sentence (Piper de
 // tool-result files and anything the model copies there, including a copy of something from
 // state/media, which would reopen the cross-chat forwarding hole above.
 const CLAUDE_TMP_ROOT = `/private/tmp/claude-${process.getuid()}`;
-const SENDABLE_DIRS = [MEMES_DIR, STICKERS_DIR];
+// state/outbox is where the /generate command's renders land until they are sent and removed. The
+// server writes there itself, nothing inbound ever does.
+const GENERATE_OUT_DIR = join(STATE_DIR, "outbox");
+const SENDABLE_DIRS = [MEMES_DIR, STICKERS_DIR, GENERATE_OUT_DIR];
 
 // A path is in a session outbox when, below the claude tmp root, it passes through
 // `scratchpad/outbox/`. Checked on the real path, so a symlink cannot smuggle a file in.
@@ -293,6 +310,104 @@ async function joinSegments(segments, sampleRate, renderSpeech, outWav) {
   }
 }
 
+// XTTS sometimes keeps going after the last word and says something it was never given, which a
+// listener hears as a random syllable or two at the end of every note. The note is transcribed again
+// with word timestamps, and the audio is cut just after the last word of the text that was meant.
+// Anything unexpected (no match, a match far from the end, a transcript that will not parse) leaves
+// the audio alone: an untrimmed note with a stray syllable beats a note with its last word cut off.
+
+// Compares a spoken word with a written one: lowercase, no diacritics, letters and digits only.
+const wordKey = (w) =>
+  w
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/\p{M}/gu, "")
+    .replace(/\u0131/g, "i")
+    .replace(/[^\p{L}\p{N}]/gu, "");
+
+// whisper-cli prints `[00:00:01.020 --> 00:00:01.170]   word` per word with -ml 1 -sow.
+export function parseWordTimestamps(stdout) {
+  const words = [];
+  for (const m of stdout.matchAll(/\[(\d+):(\d+):(\d+\.\d+) --> (\d+):(\d+):(\d+\.\d+)\]\s+(.+)/g)) {
+    const at = (h, mi, sec) => Number(h) * 3600 + Number(mi) * 60 + Number(sec);
+    words.push({ start: at(m[1], m[2], m[3]), end: at(m[4], m[5], m[6]), text: m[7].trim() });
+  }
+  return words;
+}
+
+// Where the intended speech ends, in seconds, or null when it cannot be told. Only the last three
+// transcribed words are considered: an identical word earlier in the note must never be mistaken for
+// the end. A match that merely starts with the intended word ("ocakta" for "ocak") means extra
+// syllables are glued on, so the cut lands proportionally inside that word.
+export function speechEndSeconds(words, text) {
+  const written = text.split(/\s+/).map(wordKey).filter(Boolean);
+  const last = written.at(-1);
+  if (!last) return null;
+  for (let i = words.length - 1; i >= Math.max(0, words.length - 3); i--) {
+    const k = wordKey(words[i].text);
+    if (!k) continue;
+    if (k === last) return words[i].end;
+    if (k.startsWith(last)) {
+      return words[i].start + (words[i].end - words[i].start) * (last.length / k.length);
+    }
+  }
+  return null;
+}
+
+async function trimTrailingBabble(wav, text) {
+  const dir = mkdtempSync(join(tmpdir(), "wa-trim-"));
+  try {
+    const limit = { timeout: 60_000, killSignal: "SIGKILL" };
+    const wav16 = join(dir, "in16k.wav");
+    await execFileAsync("ffmpeg", ["-y", "-loglevel", "error", "-i", wav, "-ar", "16000", "-ac", "1", wav16], limit);
+    const { stdout } = await execFileAsync(
+      "whisper-cli",
+      ["-m", whisperModel(), "-f", wav16, "-l", "tr", "-ml", "1", "-sow"],
+      { ...limit, encoding: "utf8" },
+    );
+    const end = speechEndSeconds(parseWordTimestamps(stdout), text);
+    if (end === null) return;
+    const total = Number(
+      (
+        await execFileAsync("ffprobe", ["-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", wav], {
+          ...limit,
+          encoding: "utf8",
+        })
+      ).stdout,
+    );
+    const cut = end + 0.12;
+    // Only a real tail is removed: nothing under a quarter second, and never more than 40% of the note.
+    if (!(total - cut > 0.25) || cut < total * 0.6) return;
+    const trimmed = join(dir, "trimmed.wav");
+    await execFileAsync(
+      "ffmpeg",
+      [
+        "-y",
+        "-loglevel",
+        "error",
+        "-i",
+        wav,
+        "-t",
+        String(cut),
+        "-af",
+        `afade=t=out:st=${Math.max(0, cut - 0.06)}:d=0.06`,
+        "-c:a",
+        "pcm_s16le",
+        trimmed,
+      ],
+      limit,
+    );
+    renameSync(trimmed, wav);
+  } catch (err) {
+    logger.warn(
+      { err: String(err?.message ?? err) },
+      "could not trim the tail of a voice note, sending it as rendered",
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
 // Writes `text` to `outWav`. The default engine is the resident XTTS-v2 service (xtts-client.mjs):
 // a more natural voice, at roughly real-time speed. If it is down, still loading or too slow, the
 // note falls back to Piper (using PIPER_VOICES[lang]) rather than failing, so a voice note is never
@@ -320,15 +435,17 @@ export async function synthWav(text, voice, rate, lang, outWav, { clone, cloneOp
     await joinSegments(
       segments,
       XTTS_SAMPLE_RATE,
-      (segment, file) =>
-        xttsRender({
+      async (segment, file) => {
+        await xttsRender({
           text: segment.text,
           lang,
           speaker: clone ? undefined : XTTS_DEFAULT_SPEAKER,
           ref: clone?.ref,
           speed: rate / segment.scale,
           outWav: file,
-        }),
+        });
+        await trimTrailingBabble(file, segment.text);
+      },
       outWav,
     );
     return;
@@ -479,6 +596,172 @@ async function speakToBuffer(text, voice, rate = speakingRate(), lang = "tr", cl
 const MAX_MEDIA_BYTES = 25 * 1024 * 1024;
 
 const ATTRIBUTION = "\n\n(_Claude_)";
+
+// Quoted replies (owner decision, 2026-10-15). A send tool can take `reply_to`, a message id from
+// wa_recent, and the new message goes out as a reply to it. The id is looked up in the log of the SAME
+// chat the message is being sent to, so another chat's message can never be quoted here: quoting copies
+// the original's text into the new message, which would be a one-call leak across chats.
+export function quoteOptions(sock, to, replyTo) {
+  if (!replyTo) return undefined;
+  const row = findMessage(to, replyTo);
+  if (!row) throw new Error(`Refused: message ${replyTo} is not in ${to}'s log, so it cannot be quoted there.`);
+  const fromMe = row.direction === "out";
+  const participant = to.endsWith("@g.us") ? (fromMe ? jidNormalizedUser(sock.user?.id) : row.from) : undefined;
+  const text = (row.text || `[${row.media?.kind ?? "message"}]`).slice(0, 300);
+  return {
+    quoted: {
+      key: { remoteJid: to, id: replyTo, fromMe, ...(participant ? { participant } : {}) },
+      message: { conversation: text },
+    },
+  };
+}
+
+// Tagging people (owner decision, 2026-10-15: use it on my own judgement, sparingly). `mention` is a list
+// of names as they show up in the chat; the text carries `@Name` where the tag belongs. A tag sends a
+// notification to that person's phone, so it is narrow on purpose: groups only, at most two people,
+// only people who have written in THIS chat (so a name can never be used to reach someone outside it),
+// never a number on the no_mention_jids list (other chatbots), and never "all".
+export const MAX_MENTIONS = 2;
+export function resolveMentions(to, names, ownJid) {
+  if (!names?.length) return [];
+  if (!to.endsWith("@g.us")) throw new Error("Refused: tagging only works in a group.");
+  if (names.length > MAX_MENTIONS) throw new Error(`Refused: at most ${MAX_MENTIONS} people per message.`);
+  const people = participantStats(to).participants;
+  const resolved = [];
+  for (const query of names) {
+    const q = normalizeForSearch(String(query).replace(/^@/, "").trim());
+    if (!q || ["all", "everyone", "herkes", "hepsi"].includes(q)) {
+      throw new Error("Refused: tagging everyone is not allowed.");
+    }
+    const matches = people.filter(
+      (p) =>
+        (p.name && normalizeForSearch(p.name) === q) ||
+        (p.who !== "(you)" && p.who.split("@")[0] === q.replace(/\D/g, "") && q.replace(/\D/g, "")),
+    );
+    if (matches.length === 0) throw new Error(`Refused: nobody called "${query}" has written in this chat.`);
+    if (matches.length > 1) throw new Error(`Refused: "${query}" matches more than one person in this chat.`);
+    const jid = matches[0].who === "(you)" ? jidNormalizedUser(ownJid) : matches[0].who;
+    if (!jid) throw new Error(`Refused: cannot work out the number for "${query}".`);
+    if (isMentionBlocked(jid)) throw new Error(`Refused: "${query}" is on the do-not-tag list.`);
+    resolved.push({ query: String(query).replace(/^@/, "").trim(), jid, digits: jid.split("@")[0] });
+  }
+  return resolved;
+}
+
+// Puts `@digits` where the text has `@Name` (WhatsApp renders the person's name from the mentions
+// list), or at the front if the text never wrote the name.
+export function applyMentions(text, resolved) {
+  let out = text;
+  for (const r of resolved) {
+    const re = new RegExp(`@${r.query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![\\p{L}\\p{N}])`, "iu");
+    out = re.test(out) ? out.replace(re, `@${r.digits}`) : `@${r.digits} ${out}`;
+  }
+  return out;
+}
+
+function sendWithQuote(sock, to, replyTo, content) {
+  return sock.sendMessage(to, content, quoteOptions(sock, to, replyTo));
+}
+
+// A long reply goes out as up to three shorter messages, cut at paragraph boundaries (or sentence
+// boundaries when it is one paragraph), the way a person types it (owner decision, 2026-10-15). Text
+// at or under SPLIT_OVER characters stays one message. A single unbroken sentence is never cut in the
+// middle.
+export const SPLIT_OVER = 300;
+export const MAX_PARTS = 3;
+export function splitForSend(text) {
+  const t = text.trim();
+  if (t.length <= SPLIT_OVER) return [t];
+  let units = t
+    .split(/\n{2,}/)
+    .map((u) => u.trim())
+    .filter(Boolean);
+  let glue = "\n\n";
+  if (units.length < 2) {
+    units = t
+      .split(/(?<=[.!?\u2026])\s+/u)
+      .map((u) => u.trim())
+      .filter(Boolean);
+    glue = " ";
+  }
+  if (units.length < 2) return [t];
+  // Up to three paragraphs are already the natural messages.
+  if (glue === "\n\n" && units.length <= MAX_PARTS) return units;
+  const target = t.length / MAX_PARTS;
+  const parts = [];
+  let cur = "";
+  for (const unit of units) {
+    if (cur && cur.length >= target && parts.length < MAX_PARTS - 1) {
+      parts.push(cur);
+      cur = unit;
+    } else {
+      cur = cur ? `${cur}${glue}${unit}` : unit;
+    }
+  }
+  if (cur) parts.push(cur);
+  return parts;
+}
+
+// What woke the session, as a short marker at the start of the wake line, so it can tell a message
+// meant for it from background chat at a glance (owner decision, 2026-10-15).
+export function triggerLabel({ fromMe, tagged, replyingToMe }) {
+  if (tagged) return "[tag]";
+  if (replyingToMe) return "[reply to you]";
+  return fromMe ? "" : "[ambient]";
+}
+
+// The chat since this server last spoke in it, for a wake in a mention-only chat. Those chats store
+// untagged messages without waking anything, so the session otherwise sees a tag with none of the
+// conversation around it. `rows` come from the same chat's log. Newest 15, oldest first, each cut short.
+export function contextBlock(rows, { beforeTs, exceptId }) {
+  const spoken = rows
+    .filter((r) => r.ts <= beforeTs && r.id !== exceptId && !["reaction", "edit", "delete"].includes(r.kind))
+    .sort((a, b) => a.ts - b.ts);
+  let lastOwn = -1;
+  spoken.forEach((r, i) => {
+    if (r.by === "claude") lastOwn = i;
+  });
+  const since = spoken.slice(lastOwn + 1).slice(-15);
+  return since
+    .map((r) => `${r.name || "?"}: ${(r.text || `[${r.media?.kind ?? "media"}]`).replace(/\s+/g, " ").slice(0, 140)}`)
+    .join(" | ");
+}
+
+// Sends `text` as one message, or as up to three when it is long (see splitForSend). Only the first part
+// quotes `replyTo`, and the attribution goes on the last. The first part has already passed guardSend
+// in the caller; every later part spends its own rate-limit slot, so a long reply costs what it sends.
+// A preview card is only built for a part that carries a link, and never for a chat that opted out.
+async function sendTextParts(sock, to, text, replyTo, mentionNames = []) {
+  const resolved = resolveMentions(to, mentionNames, sock.user?.id);
+  const tagged = applyMentions(text.endsWith(ATTRIBUTION) ? text.slice(0, -ATTRIBUTION.length) : text, resolved);
+  const parts = splitForSend(tagged);
+  let sentCount = 0;
+  for (const [i, part] of parts.entries()) {
+    if (i > 0) {
+      const refusal = guardSend(to, part);
+      if (refusal) return { sentCount, refusal };
+      // A person does not fire three messages in one breath.
+      await new Promise((r) => setTimeout(r, 500 + Math.min(1500, part.length * 6) + Math.random() * 300));
+    }
+    const fullText = i === parts.length - 1 ? part + ATTRIBUTION : part;
+    const linkPreview = hasLinkPreviewDisabled(to) ? null : await buildUrlInfo(fullText);
+    const partMentions = resolved.filter((r) => part.includes(`@${r.digits}`)).map((r) => r.jid);
+    const sent = await sendWithQuote(sock, to, i === 0 ? replyTo : undefined, {
+      text: fullText,
+      ...(linkPreview ? { linkPreview } : {}),
+      ...(partMentions.length ? { mentions: partMentions } : {}),
+    });
+    appendMessage(to, {
+      direction: "out",
+      by: "claude",
+      text: fullText,
+      ts: Date.now(),
+      id: sent?.key?.id ?? null,
+    });
+    sentCount += 1;
+  }
+  return { sentCount };
+}
 
 // Everything below is a send-side backstop. The allowlist decides *who* can be written to and
 // says nothing about *what*, and a message assembled from something the model was talked into
@@ -1014,9 +1297,265 @@ export const COMMANDS = {
   readMedia: /^\/read-(image|audio)\s+(yes|no)\s*$/i,
   verbosity: /^\/verbosity\s+(low|mid|high)\s*$/i,
   help: /^\/help\s*$/i,
+  // `/generate` takes free text, so the usual `^...$` anchoring is not enough: the attribution this
+  // server puts on its own messages would match too. The lookahead refuses anything that carries it.
+  generate: /^\/generate(?![\s\S]*\(_Claude_\))(?:\s+([\s\S]*?))?\s*$/i,
   ai: /^\/ai\s+off\s*$/i,
   incognito: /^\/incognito\s+(on|off)\s*$/i,
 };
+
+// `/generate` (owner decision, 2026-10-15): typed on the owner's own device in any allowlisted chat, the
+// server runs scripts/imggen.py itself and sends the picture back as a reply, with no session involved.
+// Like every command it is gated on `key.fromMe` where it is dispatched, so nobody else in a group can
+// start a render. The text is parsed here into a fixed set of options and handed to imggen.py as separate
+// arguments, never through a shell.
+export const GENERATE_FLAGS = ["--model", "--prompt", "--negative", "--steps", "--width", "--height", "--seed"];
+
+export function parseGenerateArgs(rest) {
+  const text = (rest ?? "")
+    .replace(/[\u201c\u201d]/g, '"')
+    .replace(/[\u2018\u2019]/g, "'")
+    .trim();
+  if (!text) return { error: "usage" };
+  const tokens = [...text.matchAll(/"([^"]*)"|'([^']*)'|(\S+)/g)].map((m) => ({
+    value: m[1] ?? m[2] ?? m[3],
+    quoted: m[3] === undefined,
+  }));
+  const opts = {};
+  if (!GENERATE_FLAGS.includes(tokens[0].value) || tokens[0].quoted) {
+    // No flags at all: the whole thing is the prompt.
+    opts["--prompt"] = tokens.map((t) => t.value).join(" ");
+  } else {
+    let flag = null;
+    for (const t of tokens) {
+      if (!t.quoted && GENERATE_FLAGS.includes(t.value)) {
+        flag = t.value;
+        opts[flag] = opts[flag] ?? "";
+      } else if (flag) {
+        opts[flag] = opts[flag] ? `${opts[flag]} ${t.value}` : t.value;
+      } else {
+        return { error: "usage" };
+      }
+    }
+  }
+  const prompt = (opts["--prompt"] ?? "").trim();
+  if (!prompt) return { error: "usage" };
+  if (prompt.length > 600) return { error: "the prompt is too long (600 characters at most)" };
+  const negative = (opts["--negative"] ?? "").trim();
+  if (negative.length > 300) return { error: "the negative prompt is too long (300 characters at most)" };
+  const model = (opts["--model"] ?? "z").trim();
+  if (!/^[a-z0-9_-]{1,40}$/.test(model)) return { error: "that is not a model name" };
+  const int = (flag, min, max, step = 1) => {
+    if (opts[flag] === undefined) return undefined;
+    const n = Number(opts[flag]);
+    if (!Number.isInteger(n) || n < min || n > max || n % step !== 0) return null;
+    return n;
+  };
+  const steps = int("--steps", 1, 60);
+  const width = int("--width", 256, 1280, 16);
+  const height = int("--height", 256, 1280, 16);
+  const seed = int("--seed", 0, 2147483647);
+  if (steps === null) return { error: "--steps must be 1 to 60" };
+  if (width === null || height === null) return { error: "--width and --height must be multiples of 16, 256 to 1280" };
+  if (seed === null) return { error: "--seed must be a whole number" };
+  return { model, prompt, negative, steps, width, height, seed };
+}
+
+// `/generate cancel` (also stop, iptal) stops every render started with /generate, running or still
+// waiting, from any chat. One person can start them, so one person can stop them all.
+export function isCancelRequest(rest) {
+  return /^(cancel|stop|iptal)$/i.test((rest ?? "").trim());
+}
+// Renders in flight, by the number /generate status uses to name them.
+const generateRegistry = new Map();
+let nextGenerateId = 1;
+
+// `/generate status` lists this chat's renders, `/generate status 7` shows render 7 as it is now: the
+// latest step image mflux saved, with how far along it is. Null when the text is not a status request.
+export function parseStatusRequest(rest) {
+  const m = /^status(?:\s+#?(\d{1,6}))?$/i.exec((rest ?? "").trim());
+  return m ? { id: m[1] === undefined ? null : Number(m[1]) } : null;
+}
+
+// Newest step image that is finished being written. mflux names them `...step<K>of<N>.png`; the highest K
+// is the latest, but a file touched in the last second may still be half written, so it is skipped
+// unless it is the only one.
+export function latestStep(files, now = Date.now()) {
+  const steps = files
+    .map((f) => ({ ...f, m: /step(\d+)of(\d+)\.png$/.exec(f.name) }))
+    .filter((f) => f.m)
+    .map((f) => ({ name: f.name, mtimeMs: f.mtimeMs, step: Number(f.m[1]), total: Number(f.m[2]) }))
+    .sort((a, b) => b.step - a.step);
+  return steps.find((f) => now - f.mtimeMs >= 1000) ?? steps.at(-1) ?? null;
+}
+
+// At most this many renders waiting or running from /generate, so a burst of commands cannot pile up
+// hours of GPU work. imggen.py itself runs one render at a time.
+const MAX_GENERATE_JOBS = 3;
+let generateJobs = 0;
+const IMGGEN_SCRIPT = fileURLToPath(new URL("../scripts/imggen.py", import.meta.url));
+const IMGGEN_PYTHON = join(STATE_DIR, "imggen-venv", "bin", "python");
+
+async function ownReact(jid, key, emoji) {
+  if (guardSend(jid)) return;
+  await getSocket()
+    ?.sendMessage(jid, { react: { text: emoji, key } })
+    .catch(() => {});
+}
+
+// A reply that quotes the owner's command. The command message is never stored (commands return before
+// the log), so the quote is built from its key and text rather than looked up.
+function quoteOwnCommand(sock, jid, key, text) {
+  const own = jidNormalizedUser(sock.user?.id);
+  return {
+    quoted: {
+      key: { remoteJid: jid, id: key.id, fromMe: true, ...(jid.endsWith("@g.us") ? { participant: own } : {}) },
+      message: { conversation: text.slice(0, 300) },
+    },
+  };
+}
+
+async function replyToCommand(jid, key, commandText, text, image = null) {
+  const sock = getSocket();
+  if (!sock || guardSend(jid, text)) return;
+  const quote = quoteOwnCommand(sock, jid, key, commandText);
+  if (!image) {
+    await sock.sendMessage(jid, { text: text + ATTRIBUTION }, quote);
+    return;
+  }
+  const { real, error } = resolveSendable(image);
+  if (error) return;
+  const sent = await sock.sendMessage(jid, { image: readFileSync(real), caption: text + ATTRIBUTION }, quote);
+  appendMessage(jid, {
+    direction: "out",
+    by: "claude",
+    text: text + ATTRIBUTION,
+    ts: Date.now(),
+    id: sent?.key?.id ?? null,
+  });
+}
+
+const minutes = (ms) => `${Math.floor(ms / 60000)}:${String(Math.floor((ms % 60000) / 1000)).padStart(2, "0")}`;
+
+// Only this chat's renders are shown here: a picture from a render started in another chat does not
+// appear in this one.
+async function generateStatus(jid, key, commandText, id) {
+  const jobs = [...generateRegistry.values()].filter((j) => j.jid === jid);
+  const describe = (job) => {
+    let step = null;
+    try {
+      step = latestStep(
+        readdirSync(job.stepsDir).map((name) => ({ name, mtimeMs: statSync(join(job.stepsDir, name)).mtimeMs })),
+      );
+    } catch {
+      /* the folder is gone: the render just finished */
+    }
+    const elapsed = minutes(Date.now() - job.startedAt);
+    const text = step
+      ? `#${job.id} ${job.model}: ${step.step}/${step.total} adim, ${elapsed}`
+      : `#${job.id} ${job.model}: henuz adim yok (sirada ya da model yukleniyor), ${elapsed}`;
+    return { text, image: step ? join(job.stepsDir, step.name) : null };
+  };
+  if (id !== null) {
+    const job = jobs.find((j) => j.id === id);
+    if (!job) return replyToCommand(jid, key, commandText, `#${id} yok ya da bitti`);
+    const { text, image } = describe(job);
+    return replyToCommand(jid, key, commandText, text, image);
+  }
+  if (jobs.length === 0) return replyToCommand(jid, key, commandText, "calisan yok");
+  const lines = jobs.map((j) => describe(j).text);
+  // The newest render's picture goes with the list.
+  const newest = describe(jobs.at(-1));
+  return replyToCommand(jid, key, commandText, lines.join("\n"), newest.image);
+}
+
+async function runGenerate(jid, key, rest, commandText) {
+  const sock = getSocket();
+  if (!sock) return;
+  const parsed = parseGenerateArgs(rest);
+  const say = async (text) => {
+    if (guardSend(jid, text)) return;
+    await sock.sendMessage(jid, { text: text + ATTRIBUTION }, quoteOwnCommand(sock, jid, key, commandText));
+  };
+  if (parsed.error === "usage") {
+    return say(
+      '/generate --model z --prompt "a red fez on a desk" --negative "blurry" [--steps N --width N --height N --seed N]',
+    );
+  }
+  if (parsed.error) return say(parsed.error);
+  if (generateJobs >= MAX_GENERATE_JOBS) return say("kuyruk dolu, biraz sonra dene");
+  generateJobs += 1;
+  const controller = new AbortController();
+  const id = nextGenerateId++;
+  const stepsDir = join(GENERATE_OUT_DIR, `steps-${id}`);
+  mkdirSync(stepsDir, { recursive: true });
+  generateRegistry.set(id, { id, jid, controller, model: parsed.model, startedAt: Date.now(), stepsDir });
+  const file = join(GENERATE_OUT_DIR, `gen-${Date.now()}-${randomBytes(3).toString("hex")}.png`);
+  await ownReact(jid, key, "\u23f3");
+  try {
+    const args = [
+      IMGGEN_SCRIPT,
+      "generate",
+      "--model",
+      parsed.model,
+      "--prompt",
+      parsed.prompt,
+      "--out",
+      file,
+      "--steps-dir",
+      stepsDir,
+    ];
+    if (parsed.negative) args.push("--negative", parsed.negative);
+    for (const [flag, value] of [
+      ["--steps", parsed.steps],
+      ["--width", parsed.width],
+      ["--height", parsed.height],
+      ["--seed", parsed.seed],
+    ]) {
+      if (value !== undefined) args.push(flag, String(value));
+    }
+    // SIGTERM, not SIGKILL: imggen.py catches it and stops its mflux child too.
+    const { stdout } = await execFileAsync(IMGGEN_PYTHON, args, {
+      timeout: 40 * 60_000,
+      killSignal: "SIGTERM",
+      signal: controller.signal,
+      encoding: "utf8",
+    }).catch((err) => ({ stdout: err.stdout ?? "", failed: err }));
+    if (controller.signal.aborted) {
+      await ownReact(jid, key, "\u{1F6D1}");
+      return;
+    }
+    const last = String(stdout).trim().split("\n").at(-1) ?? "";
+    let result = {};
+    try {
+      result = JSON.parse(last);
+    } catch {
+      /* not JSON, treated as a failure below */
+    }
+    if (!result.ok || !existsSync(file)) {
+      notify("warning", `/generate failed: ${result.error ?? "no result"}`, { jid, model: parsed.model });
+      await ownReact(jid, key, "\u274c");
+      return say(/unknown model/.test(result.error ?? "") ? "bilinmeyen model" : "olmadi");
+    }
+    const { real, error } = resolveSendable(file);
+    if (error) throw new Error(error);
+    const buffer = readFileSync(real);
+    const refusal = guardSend(jid, ATTRIBUTION);
+    if (refusal) return;
+    const caption = ATTRIBUTION.trim();
+    const sent = await sock.sendMessage(jid, { image: buffer, caption }, quoteOwnCommand(sock, jid, key, commandText));
+    appendMessage(jid, { direction: "out", by: "claude", text: caption, ts: Date.now(), id: sent?.key?.id ?? null });
+    await ownReact(jid, key, "\u2705");
+  } catch (err) {
+    logger.warn({ err: String(err?.message ?? err) }, "/generate failed");
+    await ownReact(jid, key, "\u274c");
+  } finally {
+    generateRegistry.delete(id);
+    generateJobs -= 1;
+    rmSync(file, { force: true });
+    rmSync(stepsDir, { recursive: true, force: true });
+  }
+}
 
 // "/help" -- the one command that answers into the chat instead of silently flipping a setting.
 // Lists every command form plus this chat's current settings and the global ones, so "what's this
@@ -1034,6 +1573,7 @@ function helpText(jid) {
     "/read-image yes|no — keep (or stop keeping) images/documents/stickers from this chat",
     "/read-audio yes|no — keep and transcribe (or stop) voice notes from this chat",
     "/verbosity low|mid|high — how much detail Claude's replies to this chat carry",
+    '/generate --model z --prompt "..." [--negative "..."] [--steps N --width N --height N --seed N] — the server draws an image and sends it here, no session needed',
     "/help — this message",
     "/ai off — remove this chat from the allowlist entirely (one-way, no /ai on)",
     "/incognito on|off — while on, no storage/media/wake for this chat at all, overrides wakelevel",
@@ -1288,6 +1828,30 @@ async function handleIncoming(waMessage) {
     // Unlike every command above, this one replies into the chat instead of silently flipping a
     // setting — there's nothing to flip, and a command that changes nothing needs to say
     // something or it looks like it didn't fire.
+    // Starts a render and returns at once: the picture arrives as a reply when it is done, and the
+    // command itself never reaches a session or the wake log.
+    const generateCmd = COMMANDS.generate.exec(trimmed);
+    if (generateCmd) {
+      const statusReq = parseStatusRequest(generateCmd[1]);
+      if (statusReq) {
+        logCommand(jid, "generate", "status");
+        void generateStatus(jid, key, trimmed, statusReq.id);
+        return;
+      }
+      if (isCancelRequest(generateCmd[1])) {
+        logCommand(jid, "generate", "cancel");
+        const count = generateRegistry.size;
+        for (const job of generateRegistry.values()) job.controller.abort();
+        void ownReact(jid, key, "\u{1F6D1}");
+        if (count === 0 && !guardSend(jid, "calisan yok")) {
+          void getSocket()?.sendMessage(jid, { text: "calisan yok" + ATTRIBUTION });
+        }
+        return;
+      }
+      logCommand(jid, "generate", null);
+      void runGenerate(jid, key, generateCmd[1] ?? "", trimmed);
+      return;
+    }
     if (COMMANDS.help.exec(trimmed)) {
       await getSocket()?.sendMessage(jid, { text: helpText(jid) + ATTRIBUTION });
       logCommand(jid, "help", null);
@@ -1434,7 +1998,22 @@ async function handleIncoming(waMessage) {
     // Queued, not written immediately -- see the presence-aware wake debounce above. The message
     // itself is already durably stored (appendMessage above ran before this point), so nothing
     // here affects wa_recent/wa_search; only when the Monitor-visible wake line appears is delayed.
-    queueWake(jid, label, quoted ? `(replying to "${quotedLabel}") ${logText}` : logText);
+    const tagged = /@claude/i.test(text ?? "");
+    const trigger = triggerLabel({ fromMe: Boolean(key.fromMe), tagged, replyingToMe });
+    // Mention-only chats store untagged messages without waking anything, so on a wake the session would
+    // see the tag and none of the conversation around it. Hand it what was said since it last spoke.
+    let context = "";
+    if (isMentionOnly(jid) && (tagged || replyingToMe)) {
+      const block = contextBlock(readRecent(jid, 60), {
+        beforeTs: Number(waMessage.messageTimestamp) * 1000 || Date.now(),
+        exceptId: key.id,
+      });
+      if (block) context = ` || [since your last reply] ${block}`;
+    }
+    const body = quoted ? `(replying to "${quotedLabel}") ${logText}` : logText;
+    // The message itself comes first and the context after it: the wake line is truncated for long
+    // lines, and what gets cut must be the background, never the message that needs answering.
+    queueWake(jid, label, `${trigger ? `${trigger} ` : ""}${body}${context}`);
   }
   if (!key.fromMe) {
     // `from` is the resolved group participant when set, so a name is credited to the person
@@ -1518,7 +2097,7 @@ async function handlePollVoteMessage(waMessage, pollVote) {
   const tally = saveVote(creationKey.id, decrypted.voterJid, decrypted.hashes, ts, meIds);
   // Only a poll sent to the owner's own DM wakes a session: that is how Claude asks Burak for
   // permission, and the answer has to reach the session that asked. A vote in a group poll (the
-  // weekly FitStar one) is read on request with wa_poll_results and must not wake anything.
+  // weekly attendance one) is read on request with wa_poll_results and must not wake anything.
   if (tally && meIds.includes(jidNormalizedUser(entry.jid))) {
     logInbox(entry.jid, "🗳️ poll vote", voteWakeLine(entry, tally));
   }
@@ -1536,7 +2115,7 @@ async function handlePollUpdate({ key, update }) {
   saveTally(key.id, tally);
   // Only a poll sent to the owner's own DM wakes a session: that is how Claude asks Burak for
   // permission, and the answer has to reach the session that asked. A vote in a group poll (the
-  // weekly FitStar one) is read on request with wa_poll_results and must not wake anything.
+  // weekly attendance one) is read on request with wa_poll_results and must not wake anything.
   if (entry.jid === ownJid) logInbox(entry.jid, "🗳️ poll vote", voteWakeLine(entry, tally));
 }
 
@@ -1730,11 +2309,22 @@ server.registerTool(
       "Send a text message to an allowlisted WhatsApp JID. Refuses anything not in state/config.json's allowlist.",
     inputSchema: {
       to: z.string().describe("Recipient JID, e.g. 491701234567@s.whatsapp.net"),
+      reply_to: z
+        .string()
+        .optional()
+        .describe("Message id in THIS chat to quote as a reply (the id field from wa_recent)."),
+      mention: z
+        .array(z.string())
+        .max(2)
+        .optional()
+        .describe(
+          "Groups only. Names, as shown in the chat, of up to two people to tag. Write @Name in the text where the tag goes. People who have not written in this chat are refused, so are bots and everyone-style tags.",
+        ),
       text: z.string().min(1),
     },
     annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
   },
-  async ({ to, text }) => {
+  async ({ to, text, reply_to, mention }) => {
     const refusal = guardSend(to, text);
     if (refusal) return refusal;
     const sock = getSocket();
@@ -1757,7 +2347,7 @@ server.registerTool(
           content: [{ type: "text", text: `TTS failed: ${err}` }],
         };
       }
-      const sent = await sock.sendMessage(to, {
+      const sent = await sendWithQuote(sock, to, reply_to, {
         audio: buffer,
         mimetype: "audio/mp4",
         ptt: true,
@@ -1778,22 +2368,16 @@ server.registerTool(
         ],
       };
     }
-    const fullText = text.endsWith(ATTRIBUTION) ? text : text + ATTRIBUTION;
-    // A preview card built here rather than by Baileys, which would need the optional
-    // link-preview-js peer dependency (and cheerio behind it) to do the same job. Best-effort:
-    // buildUrlInfo never throws, and a send must not fail because a link was slow or unreachable.
-    // Gated on the same per-chat setting as inbound enrichment, so "no link fetching for this chat"
-    // means one thing rather than two.
-    const linkPreview = hasLinkPreviewDisabled(to) ? null : await buildUrlInfo(fullText);
-    const sent = await sock.sendMessage(to, { text: fullText, ...(linkPreview ? { linkPreview } : {}) });
-    appendMessage(to, {
-      direction: "out",
-      by: "claude",
-      text: fullText,
-      ts: Date.now(),
-      id: sent?.key?.id ?? null,
-    });
-    return { content: [{ type: "text", text: `Sent to ${to}.` }] };
+    const { sentCount, refusal: partRefusal } = await sendTextParts(sock, to, text, reply_to, mention);
+    if (partRefusal) {
+      return {
+        ...partRefusal,
+        content: [
+          { type: "text", text: `Sent ${sentCount} part(s) to ${to}, then stopped: ${partRefusal.content[0].text}` },
+        ],
+      };
+    }
+    return { content: [{ type: "text", text: `Sent to ${to}${sentCount > 1 ? ` (${sentCount} messages)` : ""}.` }] };
   },
 );
 
@@ -1866,12 +2450,16 @@ server.registerTool(
       "Refuses anything not in state/config.json's allowlist.",
     inputSchema: {
       to: z.string().describe("Recipient JID, e.g. 491701234567@s.whatsapp.net"),
+      reply_to: z
+        .string()
+        .optional()
+        .describe("Message id in THIS chat to quote as a reply (the id field from wa_recent)."),
       path: z.string().describe("Absolute local path to the image file"),
       caption: z.string().optional(),
     },
     annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
   },
-  async ({ to, path, caption }) => {
+  async ({ to, path, caption, reply_to }) => {
     const refusal = guardCheck(to, caption);
     if (refusal) return refusal;
     const sock = getSocket();
@@ -1901,7 +2489,7 @@ server.registerTool(
     const fullCaption = (caption ?? "") + ATTRIBUTION;
     const spend = guardSend(to, caption);
     if (spend) return spend;
-    const sent = await sock.sendMessage(to, {
+    const sent = await sendWithQuote(sock, to, reply_to, {
       image: buffer,
       caption: fullCaption,
     });
@@ -1928,6 +2516,10 @@ server.registerTool(
       "per call — e.g. to reply in English for one message in an otherwise-Turkish chat.",
     inputSchema: {
       to: z.string().describe("Recipient JID, e.g. 491701234567@s.whatsapp.net"),
+      reply_to: z
+        .string()
+        .optional()
+        .describe("Message id in THIS chat to quote as a reply (the id field from wa_recent)."),
       text: z.string().min(1),
       voice: z
         .string()
@@ -1954,7 +2546,7 @@ server.registerTool(
     },
     annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
   },
-  async ({ to, text, voice, language: lang, rate, clone }) => {
+  async ({ to, text, voice, language: lang, rate, clone, reply_to }) => {
     const refusal = guardSend(to, text);
     if (refusal) return refusal;
     let cloned;
@@ -1981,7 +2573,7 @@ server.registerTool(
         content: [{ type: "text", text: `TTS failed: ${err}` }],
       };
     }
-    const sent = await sock.sendMessage(to, {
+    const sent = await sendWithQuote(sock, to, reply_to, {
       audio: buffer,
       mimetype: "audio/mp4",
       ptt: true,
@@ -2429,6 +3021,93 @@ server.registerTool(
   },
 );
 
+// A person's "About" text and profile picture (owner decision, 2026-10-15), for chats on the allowlist
+// only. Both are the person's own public-facing content, but fetching them is a request to WhatsApp, so
+// answers are cached for five minutes and a hidden or missing picture is reported rather than retried.
+// The picture lands in state/media, the inbound folder: it is never a send source, so it cannot be
+// forwarded to another chat without being copied somewhere on purpose.
+export function parseAbout(res) {
+  const first = Array.isArray(res) ? res[0] : res;
+  const st = first?.status;
+  const text = typeof st === "string" ? st : st?.status;
+  const setAt = typeof st === "object" && st ? st.setAt : first?.setAt;
+  const when = setAt ? new Date(setAt) : null;
+  return {
+    about: typeof text === "string" && text.trim() ? text : null,
+    setAt: when && !Number.isNaN(when.getTime()) ? when.toISOString() : null,
+  };
+}
+
+const PROFILE_HOST = /(^|\.)(whatsapp\.net|fbcdn\.net)$/;
+const profileCache = new Map();
+const PROFILE_TTL_MS = 5 * 60_000;
+
+async function fetchProfilePicture(sock, jid) {
+  const url = await sock.profilePictureUrl(jid, "image");
+  const parsed = new URL(url);
+  if (parsed.protocol !== "https:" || !PROFILE_HOST.test(parsed.hostname)) {
+    throw new Error("the picture is not on a WhatsApp host, not fetching it");
+  }
+  const res = await fetch(parsed, { signal: AbortSignal.timeout(15_000), redirect: "error" });
+  if (!res.ok) throw new Error(`picture download returned ${res.status}`);
+  const buf = Buffer.from(await res.arrayBuffer());
+  if (buf.length === 0 || buf.length > 5 * 1024 * 1024) throw new Error("the picture is empty or too large");
+  const file = join(MEDIA_DIR, `profile-${jid.split("@")[0].split(":")[0]}.jpg`);
+  mkdirSync(MEDIA_DIR, { recursive: true });
+  writeFileSync(file, buf, { mode: 0o600 });
+  return file;
+}
+
+server.registerTool(
+  "wa_profile",
+  {
+    title: "A person's About text and profile picture",
+    description:
+      "Fetch the About text (and when it was set) and the profile picture of an allowlisted chat: a person's " +
+      "or a group's picture, a person's About. The picture is saved under state/media and its path is " +
+      "returned, so it can be read; it is never a send source. A hidden picture or empty About comes back " +
+      "as null, which is normal. Cached for five minutes.",
+    inputSchema: { jid: z.string().describe("An allowlisted chat JID, person or group") },
+    annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
+  },
+  async ({ jid }) => {
+    if (!allowedJid(jid)) {
+      return {
+        isError: true,
+        content: [{ type: "text", text: `Refused: ${jid} is not on the allowlist (state/config.json).` }],
+      };
+    }
+    const { live, lastError } = connectionState();
+    if (!live) {
+      return {
+        isError: true,
+        content: [{ type: "text", text: `Not connected to WhatsApp: ${lastError ?? "still connecting"}.` }],
+      };
+    }
+    const cached = profileCache.get(jid);
+    if (cached && Date.now() - cached.at < PROFILE_TTL_MS) {
+      return { content: [{ type: "text", text: JSON.stringify(cached.value, null, 2) }] };
+    }
+    const sock = getSocket();
+    const value = { jid };
+    if (!jid.endsWith("@g.us")) {
+      try {
+        value.about = parseAbout(await sock.fetchStatus(jid));
+      } catch (err) {
+        value.about = { error: String(err?.message ?? err) };
+      }
+    }
+    try {
+      value.picture = await fetchProfilePicture(sock, jid);
+    } catch (err) {
+      value.picture = null;
+      value.pictureNote = String(err?.message ?? err);
+    }
+    profileCache.set(jid, { at: Date.now(), value });
+    return { content: [{ type: "text", text: JSON.stringify(value, null, 2) }] };
+  },
+);
+
 server.registerTool(
   "wa_stats",
   {
@@ -2597,31 +3276,41 @@ server.registerTool(
       "structured information (URLs, metadata, transcripts) where text is clearer than spoken audio.",
     inputSchema: {
       to: z.string().describe("Recipient JID, e.g. 491701234567@s.whatsapp.net"),
+      reply_to: z
+        .string()
+        .optional()
+        .describe("Message id in THIS chat to quote as a reply (the id field from wa_recent)."),
+      mention: z
+        .array(z.string())
+        .max(2)
+        .optional()
+        .describe(
+          "Groups only. Names, as shown in the chat, of up to two people to tag. Write @Name in the text where the tag goes. People who have not written in this chat are refused, so are bots and everyone-style tags.",
+        ),
       text: z.string().min(1),
     },
     annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
   },
-  async ({ to, text }) => {
+  async ({ to, text, reply_to, mention }) => {
     const refusal = guardSend(to, text);
     if (refusal) return refusal;
     const sock = getSocket();
-    const fullText = text.endsWith(ATTRIBUTION) ? text : text + ATTRIBUTION;
-    // A preview card built here rather than by Baileys, which would need the optional
-    // link-preview-js peer dependency (and cheerio behind it) to do the same job. Best-effort:
-    // buildUrlInfo never throws, and a send must not fail because a link was slow or unreachable.
-    // Gated on the same per-chat setting as inbound enrichment, so "no link fetching for this chat"
-    // means one thing rather than two.
-    const linkPreview = hasLinkPreviewDisabled(to) ? null : await buildUrlInfo(fullText);
-    const sent = await sock.sendMessage(to, { text: fullText, ...(linkPreview ? { linkPreview } : {}) });
-    appendMessage(to, {
-      direction: "out",
-      by: "claude",
-      text: fullText,
-      ts: Date.now(),
-      id: sent?.key?.id ?? null,
-    });
+    const { sentCount, refusal: partRefusal } = await sendTextParts(sock, to, text, reply_to, mention);
+    if (partRefusal) {
+      return {
+        ...partRefusal,
+        content: [
+          { type: "text", text: `Sent ${sentCount} part(s) to ${to}, then stopped: ${partRefusal.content[0].text}` },
+        ],
+      };
+    }
     return {
-      content: [{ type: "text", text: `Sent text to ${to} (bypassed voice-only).` }],
+      content: [
+        {
+          type: "text",
+          text: `Sent text to ${to}${sentCount > 1 ? ` (${sentCount} messages)` : ""} (bypassed voice-only).`,
+        },
+      ],
     };
   },
 );
@@ -2797,6 +3486,10 @@ server.registerTool(
       "sending. Refuses anything not in state/config.json's allowlist.",
     inputSchema: {
       to: z.string().describe("Recipient JID, e.g. 491701234567@s.whatsapp.net"),
+      reply_to: z
+        .string()
+        .optional()
+        .describe("Message id in THIS chat to quote as a reply (the id field from wa_recent)."),
       path: z.string().describe("Absolute local path to the document"),
       caption: z.string().optional(),
       fileName: z
@@ -2806,7 +3499,7 @@ server.registerTool(
     },
     annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
   },
-  async ({ to, path, caption, fileName }) => {
+  async ({ to, path, caption, fileName, reply_to }) => {
     // Everything that can refuse runs before guardSend, which is the step that spends a rate-limit slot.
     const check = guardCheck(to, [caption, fileName].filter(Boolean).join("\n") || undefined);
     if (check) return check;
@@ -2841,7 +3534,7 @@ server.registerTool(
     if (refusal) return refusal;
     const sock = getSocket();
     const fullCaption = (caption ?? "") + ATTRIBUTION;
-    const sent = await sock.sendMessage(to, {
+    const sent = await sendWithQuote(sock, to, reply_to, {
       document: buffer,
       mimetype: info.mimetype,
       fileName: name,

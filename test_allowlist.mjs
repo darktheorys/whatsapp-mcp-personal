@@ -494,6 +494,337 @@ assert.equal(scanDocument(zipOf("word/document.xml", "<w:t>hello</w:t>"), ".docx
   }
 }
 
+// Quoted replies, long-reply splitting, the wake trigger label and the since-your-last-reply block.
+{
+  const { splitForSend, SPLIT_OVER, MAX_PARTS, triggerLabel, contextBlock, quoteOptions } =
+    await import("./src/server.mjs");
+  const store = await import("./src/store.mjs");
+  assert.deepEqual(splitForSend("kisa bir mesaj"), ["kisa bir mesaj"], "short text stays one message");
+  const para = (n) => `${"kelime ".repeat(Math.ceil(120 / 7))}${n}.`;
+  const threeParas = [para(1), para(2), para(3)].join("\n\n");
+  assert.ok(threeParas.length > SPLIT_OVER);
+  assert.equal(splitForSend(threeParas).length, 3, "three paragraphs go out as three messages");
+  assert.equal(
+    splitForSend(`${threeParas}\n\n${para(4)}\n\n${para(5)}`).length <= MAX_PARTS,
+    true,
+    "never more than three",
+  );
+  const sentences = Array.from({ length: 8 }, (_, i) => `Bu ${i} numarali cumle biraz uzun ve noktayla biter.`).join(
+    " ",
+  );
+  const sParts = splitForSend(sentences);
+  assert.ok(sParts.length >= 2 && sParts.length <= MAX_PARTS, "one paragraph is cut at sentence boundaries");
+  assert.equal(sParts.join(" "), sentences, "nothing is lost or reordered");
+  assert.ok(
+    sParts.every((p) => /[.!?]$/.test(p)),
+    "no part ends mid-sentence",
+  );
+  const oneLong = "tek ".repeat(150).trim();
+  assert.deepEqual(splitForSend(oneLong), [oneLong], "one unbroken sentence is never cut in the middle");
+
+  assert.equal(triggerLabel({ fromMe: false, tagged: true, replyingToMe: false }), "[tag]");
+  assert.equal(triggerLabel({ fromMe: false, tagged: false, replyingToMe: true }), "[reply to you]");
+  assert.equal(triggerLabel({ fromMe: false, tagged: false, replyingToMe: false }), "[ambient]");
+  assert.equal(
+    triggerLabel({ fromMe: true, tagged: false, replyingToMe: false }),
+    "",
+    "the owner's plain message has no marker",
+  );
+
+  const rows = [
+    { ts: 1, id: "a", name: "A", text: "eski mesaj" },
+    { ts: 2, id: "b", by: "claude", text: "bizim yanit" },
+    { ts: 3, id: "c", name: "B", text: "sonra yazilan" },
+    { ts: 4, id: "d", name: "C", text: "", media: { kind: "image" } },
+    { ts: 5, id: "e", kind: "reaction", text: "x" },
+    { ts: 6, id: "f", name: "D", text: "etiketli mesaj" },
+  ];
+  assert.equal(
+    contextBlock(rows, { beforeTs: 6, exceptId: "f" }),
+    "B: sonra yazilan | C: [image]",
+    "only what came after our last message, without the trigger itself or reactions",
+  );
+  assert.equal(
+    contextBlock(rows.slice(0, 2), { beforeTs: 9, exceptId: "zz" }),
+    "",
+    "nothing since our last reply gives an empty block",
+  );
+
+  const QJID = "120363000000000077@g.us";
+  store.appendMessage(QJID, {
+    direction: "in",
+    from: "4915100000000@s.whatsapp.net",
+    name: "X",
+    text: "alintilacak",
+    ts: 10,
+    id: "QM1",
+  });
+  store.appendMessage(QJID, { direction: "out", by: "claude", text: "benim", ts: 11, id: "QM2" });
+  const sock = { user: { id: "491700000000:3@s.whatsapp.net" } };
+  assert.equal(quoteOptions(sock, QJID, undefined), undefined, "no reply_to means no quote");
+  const q1 = quoteOptions(sock, QJID, "QM1").quoted;
+  assert.deepEqual(
+    q1.key,
+    { remoteJid: QJID, id: "QM1", fromMe: false, participant: "4915100000000@s.whatsapp.net" },
+    "a group member's message is quoted with its sender",
+  );
+  assert.equal(q1.message.conversation, "alintilacak");
+  assert.equal(quoteOptions(sock, QJID, "QM2").quoted.key.fromMe, true, "our own message is quoted as ours");
+  assert.throws(
+    () => quoteOptions(sock, "120363000000000078@g.us", "QM1"),
+    /not in .* log/,
+    "an id from another chat cannot be quoted",
+  );
+}
+
+// Tagging people: only in a group, only people who have written in THAT chat, at most two, never everyone,
+// never a number on the do-not-tag list. The text's @Name becomes @number and the person goes in mentions.
+{
+  const { resolveMentions, applyMentions } = await import("./src/server.mjs");
+  const store = await import("./src/store.mjs");
+  const { writeFileSync: writeCfg, readFileSync: readCfg } = await import("node:fs");
+  const MG = "120363000000000088@g.us";
+  const OTHER = "120363000000000089@g.us";
+  store.appendMessage(MG, {
+    direction: "in",
+    from: "4915100000001@s.whatsapp.net",
+    name: "Mert",
+    text: "a",
+    ts: 1,
+    id: "MG1",
+  });
+  store.appendMessage(MG, {
+    direction: "in",
+    from: "4915100000002@s.whatsapp.net",
+    name: "Selin",
+    text: "b",
+    ts: 2,
+    id: "MG2",
+  });
+  store.appendMessage(MG, {
+    direction: "in",
+    from: "4915100000003@s.whatsapp.net",
+    name: "Bot",
+    text: "c",
+    ts: 3,
+    id: "MG3",
+  });
+  store.appendMessage(MG, { direction: "out", name: "Burak", text: "d", ts: 4, id: "MG4" });
+  store.appendMessage(OTHER, {
+    direction: "in",
+    from: "4915100000009@s.whatsapp.net",
+    name: "Elsewhere",
+    text: "e",
+    ts: 5,
+    id: "OT1",
+  });
+  const own = "491700000000:3@s.whatsapp.net";
+  assert.deepEqual(resolveMentions(MG, [], own), [], "no names, no tags");
+  const r = resolveMentions(MG, ["mert", "@Selin"], own);
+  assert.deepEqual(
+    r.map((x) => x.jid),
+    ["4915100000001@s.whatsapp.net", "4915100000002@s.whatsapp.net"],
+    "case-insensitive names resolve to their numbers",
+  );
+  assert.equal(
+    resolveMentions(MG, ["Burak"], own)[0].jid,
+    "491700000000@s.whatsapp.net",
+    "the owner resolves to his own number",
+  );
+  assert.throws(
+    () => resolveMentions(MG, ["Elsewhere"], own),
+    /nobody called/,
+    "someone who only wrote in another chat cannot be tagged",
+  );
+  assert.throws(() => resolveMentions(MG, ["Mert", "Selin", "Bot"], own), /at most 2/, "three people is too many");
+  assert.throws(() => resolveMentions(MG, ["all"], own), /everyone/, "everyone is refused");
+  assert.throws(() => resolveMentions(MG, ["herkes"], own), /everyone/, "in Turkish too");
+  assert.throws(
+    () => resolveMentions("491700000099@s.whatsapp.net", ["Mert"], own),
+    /only works in a group/,
+    "a DM cannot tag",
+  );
+  // The do-not-tag list is read from the config file on every call.
+  const cfgPath = process.env.WA_CONFIG_PATH;
+  const before = readCfg(cfgPath, "utf8");
+  writeCfg(cfgPath, JSON.stringify({ ...JSON.parse(before), no_mention_jids: ["4915100000003@s.whatsapp.net"] }));
+  try {
+    assert.throws(() => resolveMentions(MG, ["Bot"], own), /do-not-tag list/, "a listed bot is never tagged");
+    assert.ok(resolveMentions(MG, ["Mert"], own).length === 1, "others still work");
+  } finally {
+    writeCfg(cfgPath, before);
+  }
+  assert.equal(
+    applyMentions("selam @Mert nasilsin", [r[0]]),
+    "selam @4915100000001 nasilsin",
+    "@Name becomes @number in place",
+  );
+  assert.equal(
+    applyMentions("selam nasilsin", [r[0]]),
+    "@4915100000001 selam nasilsin",
+    "a tag the text never wrote goes at the front",
+  );
+  assert.equal(
+    applyMentions("@Mertcan bir sey", [r[0]]),
+    "@4915100000001 @Mertcan bir sey",
+    "a longer word that starts with the name is not the name",
+  );
+}
+
+// A profile's About text arrives in a few shapes depending on the library version.
+{
+  const { parseAbout } = await import("./src/server.mjs");
+  assert.deepEqual(
+    parseAbout([{ id: "x", status: { status: "merhaba", setAt: "2026-10-01T10:00:00.000Z" } }]),
+    { about: "merhaba", setAt: "2026-10-01T10:00:00.000Z" },
+    "array with a status object",
+  );
+  assert.deepEqual(
+    parseAbout({ status: "yalniz metin" }),
+    { about: "yalniz metin", setAt: null },
+    "a plain string status",
+  );
+  assert.deepEqual(parseAbout([{ status: { status: "  " } }]), { about: null, setAt: null }, "a blank About is null");
+  assert.deepEqual(parseAbout(undefined), { about: null, setAt: null }, "nothing returned is null, not a crash");
+}
+
+// /generate: the options are parsed into a fixed set, never passed through a shell, and the server's own
+// messages can never trigger it.
+{
+  const {
+    parseGenerateArgs,
+    isCancelRequest,
+    parseStatusRequest,
+    latestStep,
+    COMMANDS: C,
+  } = await import("./src/server.mjs");
+  assert.deepEqual(parseGenerateArgs(""), { error: "usage" }, "no arguments shows the usage");
+  assert.deepEqual(
+    parseGenerateArgs("a red fez on a desk"),
+    {
+      model: "z",
+      prompt: "a red fez on a desk",
+      negative: "",
+      steps: undefined,
+      width: undefined,
+      height: undefined,
+      seed: undefined,
+    },
+    "no flags at all means the whole text is the prompt, default model z",
+  );
+  const full = parseGenerateArgs(
+    `--model burak --prompt 'a fez, on a desk' --negative "blurry text" --steps 12 --width 512 --height 768 --seed 7`,
+  );
+  assert.deepEqual(
+    full,
+    {
+      model: "burak",
+      prompt: "a fez, on a desk",
+      negative: "blurry text",
+      steps: 12,
+      width: 512,
+      height: 768,
+      seed: 7,
+    },
+    "quoted values and every flag parse",
+  );
+  assert.equal(
+    parseGenerateArgs("--prompt a red fez --negative blurry").prompt,
+    "a red fez",
+    "an unquoted prompt runs until the next flag",
+  );
+  assert.equal(
+    parseGenerateArgs("--prompt \u201csmart quotes\u201d --steps 4").prompt,
+    "smart quotes",
+    "phone keyboard quotes work",
+  );
+  assert.match(
+    parseGenerateArgs("--prompt x --model ../../bin/sh").error,
+    /not a model name/,
+    "a path is not a model name",
+  );
+  assert.match(parseGenerateArgs("--prompt x --model Bad").error, /not a model name/, "capitals are not allowed");
+  assert.match(parseGenerateArgs("--prompt x --steps 500").error, /steps/, "too many steps");
+  assert.match(parseGenerateArgs("--prompt x --width 500").error, /multiples of 16/, "not a multiple of 16");
+  assert.match(parseGenerateArgs("--prompt x --width 4096").error, /multiples of 16/, "too large");
+  assert.match(parseGenerateArgs("--prompt x --seed -1").error, /seed/, "negative seed");
+  assert.match(parseGenerateArgs("--prompt " + "a".repeat(601)).error, /too long/, "prompt length is capped");
+  assert.deepEqual(parseGenerateArgs("--steps 4"), { error: "usage" }, "options without a prompt is the usage");
+  assert.equal(
+    parseGenerateArgs("--prompt x; rm -rf /").prompt,
+    "x; rm -rf /",
+    "shell characters are just prompt text",
+  );
+  for (const word of ["cancel", "stop", "iptal", " Cancel ", "STOP"]) {
+    assert.equal(isCancelRequest(word), true, `"${word}" cancels`);
+  }
+  for (const text of ["cancel culture", "a red fez", "", undefined, "--prompt cancel"]) {
+    assert.equal(isCancelRequest(text), false, `"${text}" does not cancel`);
+  }
+  assert.ok(C.generate.exec("/generate cancel"), "the cancel form goes through the same command");
+  assert.deepEqual(parseStatusRequest("status"), { id: null }, "bare status lists the renders");
+  assert.deepEqual(parseStatusRequest(" Status 7 "), { id: 7 }, "status with a number names one render");
+  assert.deepEqual(parseStatusRequest("status #12"), { id: 12 }, "a leading # is fine");
+  for (const text of ["status of the world", "statuses", "a red fez", "", undefined, "status 1 2", "status abc"]) {
+    assert.equal(parseStatusRequest(text), null, `"${text}" is not a status request`);
+  }
+  const f = (name, age) => ({ name, mtimeMs: 100000 - age });
+  assert.equal(
+    latestStep([f("seed_1_step0of4.png", 5000), f("seed_1_step2of4.png", 3000), f("seed_1_step1of4.png", 4000)], 100000)
+      ?.step,
+    2,
+    "the highest step is the latest",
+  );
+  assert.equal(
+    latestStep([f("seed_1_step1of4.png", 4000), f("seed_1_step2of4.png", 200)], 100000)?.step,
+    1,
+    "a file written in the last second is skipped",
+  );
+  assert.equal(latestStep([f("seed_1_step0of4.png", 200)], 100000)?.step, 0, "unless it is the only one");
+  assert.equal(
+    latestStep([f("seed_1_composite.png", 9000), f("final.png", 9000)], 100000),
+    null,
+    "other files are not steps",
+  );
+  assert.deepEqual(
+    latestStep([f("a_step3of8.png", 9000)], 100000),
+    { name: "a_step3of8.png", mtimeMs: 91000, step: 3, total: 8 },
+    "total is read from the name",
+  );
+
+  assert.ok(C.generate.exec("/generate"), "the bare command matches (shows the usage)");
+  assert.ok(C.generate.exec("/generate --prompt 'multi\nline'"), "a multi-line prompt matches");
+  assert.equal(C.generate.exec("/generate --prompt x\n\n(_Claude_)"), null, "our own attribution never triggers it");
+  assert.equal(C.generate.exec("please /generate --prompt x"), null, "it must start the message");
+}
+
+// The voice-note tail trim. XTTS sometimes adds syllables after the last word, so the cut point is the end
+// of the last intended word in a word-timestamped transcript, found only among the last three words.
+{
+  const { parseWordTimestamps, speechEndSeconds } = await import("./src/server.mjs");
+  const out =
+    "[00:00:00.000 --> 00:00:00.010]  \n[00:00:00.010 --> 00:00:00.500]   Korkma,\n[00:00:06.670 --> 00:00:07.680]   ocak.\n";
+  const words = parseWordTimestamps(out);
+  assert.equal(words.length, 2, "one entry per line that has a word, the blank leading line is skipped");
+  assert.deepEqual(words[1], { start: 6.67, end: 7.68, text: "ocak." }, "times and text parse");
+  assert.equal(speechEndSeconds(words, "Korkma, ocak."), 7.68, "the end of the last intended word");
+  assert.equal(speechEndSeconds(words, "Korkma, OCAK"), 7.68, "case and punctuation do not matter");
+  const glued = [{ start: 4, end: 5, text: "ocakta." }];
+  assert.ok(
+    Math.abs(speechEndSeconds(glued, "son ocak.") - (4 + 1 * (4 / 6))) < 1e-9,
+    "extra syllables glued on a word cut proportionally inside it",
+  );
+  assert.equal(speechEndSeconds(words, "Korkma, bambaşka"), null, "no match leaves the audio alone");
+  // An earlier identical word must not be mistaken for the end when the real last word was misheard.
+  const early = [
+    { start: 0, end: 1, text: "ocak" },
+    { start: 1, end: 2, text: "bir" },
+    { start: 2, end: 3, text: "iki" },
+    { start: 3, end: 4, text: "üç" },
+  ];
+  assert.equal(speechEndSeconds(early, "ocak"), null, "only the last three words are considered");
+}
+
 // wa_edit/wa_delete must not touch Burak's own phone-typed messages, which are `direction: "out"`
 // exactly like Claude's — the `by` tag is the only thing separating them.
 const { guardOwnMessage } = await import("./src/server.mjs");
@@ -607,6 +938,7 @@ for (const [name, re] of Object.entries(CMDS)) {
     help: "/help",
     ai: "/ai off",
     incognito: "/incognito on",
+    generate: "/generate --prompt x",
   }[name];
   assert.ok(re.exec(sample), `${name} matches its own command form`);
   assert.equal(re.exec(sample + ATTR), null, `${name} cannot match a message carrying the (_Claude_) attribution`);

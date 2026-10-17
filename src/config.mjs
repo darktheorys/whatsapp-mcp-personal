@@ -139,6 +139,9 @@ function defaultConfig() {
     // "/speaking voice-only" chats: every reply wa_send sends to this chat auto-routes through TTS
     // and goes out as a voice note instead of text.
     voice_only_jids: [],
+    // JIDs that must never be tagged (@-mentioned) in a message: other chatbots, so a tag cannot start
+    // a bot-to-bot exchange. Hand-edited, global across chats.
+    no_mention_jids: [],
     // Display name for the owner's own messages in logs/prompts -- not currently exposed via any
     // in-chat command, hand-edit if it needs to change.
     owner_name: "Me",
@@ -232,6 +235,7 @@ export function loadConfig() {
     no_link_preview_jids: Array.isArray(raw.no_link_preview_jids) ? raw.no_link_preview_jids : [],
     mention_only_jids: Array.isArray(raw.mention_only_jids) ? raw.mention_only_jids : [],
     voice_only_jids: Array.isArray(raw.voice_only_jids) ? raw.voice_only_jids : [],
+    no_mention_jids: Array.isArray(raw.no_mention_jids) ? raw.no_mention_jids : [],
     owner_name: typeof raw.owner_name === "string" ? raw.owner_name : "Me",
     speaking_rate: typeof raw.speaking_rate === "number" ? raw.speaking_rate : 1.15,
     // An unknown tier falls back to "low" rather than throwing: a typo in a hand-edited config
@@ -391,6 +395,14 @@ export function hasImageDisabled(jid) {
 export function hasVoiceDisabled(jid) {
   const { no_voice_jids } = loadConfig();
   return no_voice_jids.includes(jid);
+}
+
+// See no_mention_jids in defaultConfig. Compared on the number part, so a device suffix or a
+// phone-versus-lid form of the same JID does not slip past.
+export function isMentionBlocked(jid) {
+  const digits = (j) => String(j).split("@")[0].split(":")[0];
+  const { no_mention_jids } = loadConfig();
+  return no_mention_jids.some((j) => digits(j) === digits(jid));
 }
 
 // See no_link_preview_jids in defaultConfig: the only per-chat setting that governs a request

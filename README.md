@@ -181,6 +181,72 @@ to a session scratchpad's `outbox/` folder, which is the only scratchpad folder 
 The Hugging Face token is read from `state/hf-token` and handed to the render process through its
 environment only.
 
+### Installing another model
+
+`scripts/install_model.py` downloads a model from Hugging Face. It is for you to run, nothing in a chat
+can start it:
+
+```bash
+python3 scripts/install_model.py owner/name           # shows what it would fetch, asks, then fetches
+python3 scripts/install_model.py owner/name --yes     # skip the question
+python3 scripts/install_model.py owner/name --include "*.safetensors" "*.json"
+python3 scripts/install_model.py --list               # what it has installed (state/models.json)
+```
+
+Before downloading it prints the licence tag, whether the repo is gated, the file count and total size,
+and whether the weights are a safe format. It refuses a repo whose weights are only pickle files
+(`.bin`, `.pt`, `.pkl`, `.ckpt`), because loading one runs code from the file (override with
+`--allow-pickle` after reading the repo), and it refuses a download that would leave under 5 GB free.
+It uses the token in `state/hf-token`. Weights go to the normal Hugging Face cache, or to `state/models/`
+with `--local-dir`. To use it for images, give it a name when you install it and `scripts/imggen.py` finds it in
+`state/models.json` by that name:
+
+```bash
+python3 scripts/install_model.py owner/name --as burak     # reads LoRA or full model, base and weights file from the repo
+python3 scripts/install_model.py owner/name --as burak --base dev --steps 20 --quantize 4   # or say it yourself
+python3 scripts/imggen.py generate --model burak --prompt "..." --out ...
+```
+
+The install reads from the repo's Hub tags and card data whether it is a LoRA or a full model, which
+architecture it is built on (`dev`, `schnell`, `krea-dev`) and which file holds a LoRA's weights, and prints
+that before it downloads. `--base`, `--lora`, `--full` and `--lora-file` override it, and it stops and asks
+when it cannot tell. `state/models.json` is append-only: a name is never reused or replaced, and
+`install_model.py --seed-existing` records the models `imggen.py` already used (once, nothing rewritten).
+The built-in names (`z`, `dev`, `schnell`) cannot be redefined.
+One limit the install cannot see: `mflux` only applies a LoRA whose weight names it recognises (`lora_A`/`lora_B`,
+`lora_up`/`lora_down`). A LoRA saved in another layout installs fine and then fails at render time with
+"No LoRA layers were applied"; `imggen.py` prints that error line. Or write the settings by hand in `state/imggen-models.json`
+(gitignored, wins over an install record), keyed by the name you will pass as `--model`. An entry names an mflux generate command and its options and nothing else, so the file
+cannot be used to run anything else:
+
+```json
+{ "burak": { "command": "mflux-generate", "model": "owner/name", "base_model": "dev",
+             "quantize": 4, "steps": 20, "lora_paths": ["state/models/burak.safetensors"],
+             "lora_scales": [1.0] } }
+```
+
+Then `python3 scripts/imggen.py generate --model burak --prompt "..." --out ...`. `--list-models` prints the
+names. The model has to be built on an architecture mflux supports (`mflux-capabilities` lists them)
+
+### A local chat window for a language model
+
+`scripts/llm_chat.py` opens a small chat page in your browser for a model you have downloaded, so nothing
+needs the terminal after it starts. It is for trying a model, not part of the WhatsApp system.
+
+```bash
+python3 -m venv state/llm-venv && state/llm-venv/bin/pip install mlx-lm        # once
+python3 scripts/install_model.py mlx-community/gemma-4-e4b-it-4bit              # once, about 4.8 GB
+python3 scripts/llm_chat.py                                                      # opens http://127.0.0.1:8765
+python3 scripts/llm_chat.py --model mlx-community/gemma-4-12B-it-4bit --port 9000 --no-open
+```
+
+The page has a system prompt, temperature, max tokens and a thinking switch (off by default: a "thinking"
+model otherwise spends its whole budget reasoning before it answers). Everything stays on the machine: the
+page loads nothing from the internet, the server listens on 127.0.0.1 only, the model is loaded offline from
+the Hugging Face cache, and the server answers only requests whose Host and Origin are its own, so another
+tab in your browser cannot use it (mlx-lm's own HTTP server would let it). It handles one request at a time.
+With Gemma 4 E4B 4-bit it needs about 4.4 GB and runs at about 48 tokens a second on an M1 Pro.
+
 ## Voice: speaking and listening
 
 Both directions run entirely offline, no API keys:
@@ -417,6 +483,32 @@ command. Unlike every other per-chat setting, this is a **one-way door on purpos
 in a brand new chat (see Setup above). The confirmation message is sent directly through the
 socket rather than through `wa_send`/`guardSend`, since by the time it'd go out the chat is no
 longer allowlisted and `guardSend` would refuse its own confirmation.
+
+## /generate
+
+Typed on your own phone in any allowlisted chat, `/generate` makes the server draw a picture and send it
+back as a reply to your command. No Claude session is involved: the server runs `scripts/imggen.py` itself
+and the command never reaches the wake log.
+
+```
+/generate a red fez on a desk
+/generate --model z --prompt "a red fez on a desk" --negative "blurry, text" --steps 8 --width 768 --height 768 --seed 7
+```
+
+`--model` is a name from `python3 scripts/imggen.py --list-models` (default `z`). `--steps` is 1 to 60,
+`--width` and `--height` multiples of 16 from 256 to 1280, the prompt up to 600 characters. The prompt may
+be quoted or run until the next flag. The command message gets a clock while it renders, then a check mark,
+or a cross if it failed (the chat only sees "olmadi", the reason goes to the log and the MCP notices). At
+most three renders wait or run at once, one at a time on the GPU. Like every command it only fires from
+your own device (`key.fromMe`), so nobody else in a group can start a render, and the regex refuses any
+message that carries the `(_Claude_)` attribution so the server's own output can never trigger it.
+`--negative` is passed to every model, but only the ones that use classifier-free guidance act on it.
+
+`/generate status` lists this chat's renders with how far along each is, and sends the newest one's latest
+step image; `/generate status 7` does the same for render 7 (a picture from a render started in another chat
+is never shown here). The step images come from mflux's `--stepwise-image-output-dir` and are deleted when
+the render ends. `/generate cancel` (or `stop`, `iptal`) stops every render started with `/generate`, running or still waiting,
+from any chat: each command message gets a stop sign, and the render and its GPU process are ended.
 
 ## /incognito
 
