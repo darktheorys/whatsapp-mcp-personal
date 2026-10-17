@@ -4,10 +4,10 @@ import { DatabaseSync } from "node:sqlite";
 
 import { STATE_DIR } from "./config.mjs";
 
-const POLL_STATE_FILE = join(STATE_DIR, "poll-state.json");
+const POLL_STATE_FILE = process.env.WA_POLL_STATE_PATH ?? join(STATE_DIR, "poll-state.json");
 const ARCHIVE_AGE_DAYS = 30;
-const INBOX_FILE = join(STATE_DIR, "inbox.log");
-const CONTACTS_FILE = join(STATE_DIR, "contacts.json");
+export const INBOX_FILE = process.env.WA_INBOX_PATH ?? join(STATE_DIR, "inbox.log");
+const CONTACTS_FILE = process.env.WA_CONTACTS_PATH ?? join(STATE_DIR, "contacts.json");
 // Overridable so tests get a throwaway database instead of the real message history.
 const DB_PATH = process.env.WA_DB_PATH ?? join(STATE_DIR, "messages.db");
 

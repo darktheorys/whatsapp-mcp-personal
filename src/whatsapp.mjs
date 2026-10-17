@@ -92,6 +92,13 @@ export function getSocket() {
   return sock;
 }
 
+// Tests only: a fake socket that records sends, so handleIncoming can be driven end to end without
+// connecting. Refused outside WA_NO_CONNECT, where it would replace the live connection.
+export function setSocketForTest(fake) {
+  if (!process.env.WA_NO_CONNECT) throw new Error("setSocketForTest is for tests only");
+  sock = fake;
+}
+
 // The honest answer to "is this up?" — `live` is false whenever a disconnect hasn't been followed
 // by a successful reconnect, and `lastError` says why. Cleared only by a real `connection: open`.
 export function connectionState() {

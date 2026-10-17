@@ -20,6 +20,14 @@ process.env.WA_VOICES_DIR = join(voiceDir, "voices");
 process.env.WA_XTTS_SOCK = join(voiceDir, "x.sock");
 process.env.WA_DAEMON_TOKEN = join(voiceDir, "token");
 writeFileSync(process.env.WA_DAEMON_TOKEN, "t".repeat(64) + "\n");
+// The files handleIncoming writes besides the database: the wake log the live session tails, contacts,
+// the read cursor and the pending wake queue. A test writing to the real inbox.log would wake the real
+// session with fake messages.
+const stateDir = mkdtempSync(join(tmpdir(), "wa-state-"));
+process.env.WA_INBOX_PATH = join(stateDir, "inbox.log");
+process.env.WA_CONTACTS_PATH = join(stateDir, "contacts.json");
+process.env.WA_POLL_STATE_PATH = join(stateDir, "poll-state.json");
+process.env.WA_PENDING_WAKE_PATH = join(stateDir, "pending-wake.json");
 
 // Imported late: CONFIG_PATH is resolved at module load, so the env var must be set first.
 const { allowedJid, hasImageDisabled, isMentionOnly } = await import("./src/config.mjs");
@@ -2057,7 +2065,87 @@ assert.deepEqual(unansweredChats([STATS], 1 * H), [], "answering it takes it off
   assert.equal(noteArrived("never-pending"), false, "an ordinary message cancels nothing");
 }
 
+// handleIncoming end to end, with a fake socket: owner-only commands, the mention-only gate, the wake
+// line, incognito, and other people's edits. Nothing here can reach the real state/ files (see the
+// WA_*_PATH variables at the top) or a real connection.
+{
+  const { setSocketForTest } = await import("./src/whatsapp.mjs");
+  const { handleIncoming, flushAllWakesForTest, isLive } = await import("./src/server.mjs");
+  const store = await import("./src/store.mjs");
+  writeFileSync(cfg, JSON.stringify({ allowlist: [DM, GROUP], mention_only_jids: [GROUP] }));
+  const sent = [];
+  let n = 0;
+  setSocketForTest({
+    user: { id: "491700000000:5@s.whatsapp.net" },
+    sendMessage: async (jid, content, options) => {
+      sent.push({ jid, content, options });
+      return { key: { id: `FAKE${++n}` } };
+    },
+  });
+  let seq = 0;
+  const msg = (jid, text, { fromMe = false, participant, pushName = "Selin", extra = {} } = {}) => ({
+    key: { remoteJid: jid, id: `IT${++seq}`, fromMe, ...(participant ? { participant } : {}) },
+    messageTimestamp: Math.floor(Date.now() / 1000),
+    pushName,
+    message: { conversation: text, ...extra },
+  });
+  const member = "4915100000555@s.whatsapp.net";
+
+  // The owner's command replies, through the guards, and is stored.
+  await handleIncoming(msg(DM, "/memory", { fromMe: true }));
+  assert.equal(sent.length, 1, "the owner's /memory gets a reply");
+  assert.match(sent[0].content.text, /kayitli bir sey yok/);
+  assert.ok(store.findMessage(DM, "FAKE1"), "the reply is in the log");
+
+  // Someone else typing a command is just a message: no reply, stored as text.
+  await handleIncoming(msg(GROUP, "/memory", { participant: member }));
+  assert.equal(sent.length, 1, "a group member cannot run commands");
+  assert.equal(store.readRecent(GROUP, 5).at(-1).text, "/memory", "it is stored like any message");
+
+  // Mention-only: an untagged message wakes nothing, a tagged one does, and the wake reaches inbox.log.
+  await handleIncoming(msg(GROUP, "selam millet", { participant: member }));
+  assert.ok(!isLive(GROUP), "an untagged message in a mention-only group wakes nothing");
+  await handleIncoming(msg(GROUP, "@claude bir bakar misin", { participant: member }));
+  assert.ok(isLive(GROUP), "a tag wakes the session");
+  flushAllWakesForTest();
+  const inbox = readFileSync(process.env.WA_INBOX_PATH, "utf8");
+  assert.match(
+    inbox,
+    /\[120363001234567890@g\.us\].*\[tag\] @claude bir bakar misin/,
+    "the wake line names the chat and the tag",
+  );
+  assert.ok(
+    !inbox.includes("selam millet ||") && !/\] \(them\) Selin: selam millet/.test(inbox),
+    "the untagged one never became its own wake",
+  );
+
+  // Incognito: nothing is stored while it is on.
+  await handleIncoming(msg(DM, "/incognito on", { fromMe: true }));
+  const before = store.messageCount(DM);
+  await handleIncoming(msg(DM, "bunu kimse gormesin"));
+  assert.equal(store.messageCount(DM), before, "an incognito chat stores nothing");
+  await handleIncoming(msg(DM, "/incognito off", { fromMe: true }));
+
+  // Someone else's edit lands as an edit of the original.
+  const original = msg(GROUP, "yarin 19:00", { participant: member });
+  await handleIncoming(original);
+  await handleIncoming({
+    key: { remoteJid: GROUP, id: `IT${++seq}`, fromMe: false, participant: member },
+    messageTimestamp: Math.floor(Date.now() / 1000),
+    message: {
+      protocolMessage: { type: 14, key: { id: original.key.id }, editedMessage: { conversation: "yarin 20:00" } },
+    },
+  });
+  const edited = store.findMessage(GROUP, original.key.id);
+  assert.equal(edited.editedText, "yarin 20:00", "the stored message reads as edited");
+
+  setSocketForTest(null);
+  writeFileSync(cfg, JSON.stringify({ allowlist: [DM, GROUP] }));
+}
+
 // Runs last: it deliberately exhausts the window, so anything after it would see a full budget.
+// Starts from an empty window: earlier sections (the end-to-end one) send through the guard too.
+(await import("./src/server.mjs")).resetSendLimitForTest();
 let sent = 0;
 while (!overSendLimit()) sent++;
 assert.equal(sent, 20, "rate limit allows exactly 20 sends per minute, then refuses");
