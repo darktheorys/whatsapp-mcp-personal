@@ -4,15 +4,17 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A minimal, self-contained MCP server (stdio transport) that lets a Claude Code session read and
-send WhatsApp messages on one real number, via Baileys (an unofficial WhatsApp Web protocol
-client). Everything — code, auth keys, message logs, config — lives under this repo; nothing is
-read from or written to any other project or `~`.
+A minimal, self-contained MCP server (stdio transport, or a launchd daemon behind a stdio shim)
+that lets a Claude Code session read and send WhatsApp messages on one real number, via Baileys
+(an unofficial WhatsApp Web protocol client). Everything — code, auth keys, message logs, config —
+lives under this repo; nothing is read from or written to any other project or `~`.
 
 ## Commands
 
 ```bash
-pnpm install                      # installs deps; postinstall runs scripts/setup-voice.sh (macOS-only, no-op-safe)
+pnpm install                      # installs deps; postinstall runs setup-voice.sh and setup-text-extract.sh (macOS-only, no-op-safe)
+pnpm setup:text                   # re-run scripts/setup-text-extract.sh (builds state/bin/extract-text for OCR/PDF text)
+pnpm install:model                # python3 scripts/install_model.py, Hugging Face model installer (owner runs it, never a chat)
 node src/pair.mjs <digits>        # one-time device pairing (country code + number, no +); run directly, not via MCP
 pnpm start                        # node src/server.mjs — normally launched by Claude Code as an MCP server, not run directly
 pnpm test                         # node test_allowlist.mjs — the entire test suite, one file, run top to bottom
@@ -21,6 +23,10 @@ pnpm lint                         # oxlint over the same paths
 pnpm format:py / format:py:check  # ruff format over the Python scripts (ruff.toml, run through uvx)
 pnpm lint:py / typecheck:py       # ruff check and pyright over scripts/ and .claude/skills (pyrightconfig.json)
 bash scripts/setup-voice.sh [tier]  # re-run voice setup directly; pass low/mid/high to fetch one whisper model
+bash scripts/install-daemon.sh [--uninstall]  # launchd agent for src/daemon.mjs (owner runs it, writes ~/Library/LaunchAgents)
+bash scripts/restart-daemon.sh    # reload src/ in daemon mode
+bash scripts/install-xtts.sh [--uninstall]    # launchd agent for scripts/xtts_service.py (needs state/xtts-venv and the daemon token)
+bash scripts/add-voice.sh <name> <audio> --consent "..." --allow <jid> [--default <jid>]  # register a cloned voice
 ```
 
 There is no per-test filtering — `test_allowlist.mjs` is a single sequential script (allowlist
@@ -28,7 +34,13 @@ matching, command regexes, secret scanning, sendable-path checks, SQLite store r
 limiting). Add new assertions to it rather than creating a second test file. It sets
 `WA_CONFIG_PATH`/`WA_DB_PATH`/`WA_NO_CONNECT` env vars *before* importing `src/config.mjs` /
 `src/server.mjs`, since those modules resolve paths and open a WhatsApp socket at import time —
-new test code that needs a fresh config/db must follow the same import-order pattern.
+new test code that needs a fresh config/db must follow the same import-order pattern. The other
+state files are redirected the same way, all into temp dirs: `WA_INBOX_PATH`, `WA_CONTACTS_PATH`,
+`WA_POLL_STATE_PATH`, `WA_PENDING_WAKE_PATH`, `WA_SCHEDULE_PATH`, `WA_POLLS_PATH`, `WA_VOICES_DIR`,
+`WA_XTTS_SOCK`, `WA_DAEMON_TOKEN` (and `WA_DAEMON_SOCK` exists for the daemon socket). A new
+module-load-time state path needs its own override here too, or the test writes into the real
+`state/`. `WA_NO_CONNECT` also unlocks `setSocketForTest` and `resetSendLimitForTest`, which throw
+without it.
 
 Register the server with Claude Code from whichever project should be able to drive WhatsApp:
 
@@ -61,11 +73,32 @@ tools" and "Meme Tools" → "When the Gist has no match" sections for the full w
 
 ## Architecture
 
-Four files under `src/`, each importable independently and wired together in `server.mjs`:
+Fifteen modules under `src/`, each importable independently and wired together in `server.mjs`.
+The core four (`config`, `whatsapp`, `store`, `server`) and the larger helpers are described in
+detail below. The rest, one line each:
+
+- **`daemon.mjs`**: launchd entry point. Sets `WA_TRANSPORT=socket`, then imports `server.mjs`.
+- **`daemon-transport.mjs`**: the daemon's unix socket server: token auth (hashed, constant-time
+  compare), one client at a time, the SDK's own `StdioServerTransport` over the socket stream.
+- **`shim.mjs`**: the stdio proxy Claude Code launches in daemon mode. Holds no WhatsApp state,
+  replays `initialize` after a daemon restart, fails in-flight requests instead of hanging them.
+- **`xtts-client.mjs`**: one JSON line over `state/xtts.sock` to `scripts/xtts_service.py`, with the
+  daemon token. Rejects at once when the socket is missing, which is the caller's cue to use Piper.
+- **`voices.mjs`**: cloned voices from `state/voices/voices.json`. `resolveClone` refuses a voice in
+  any chat its `allowed_jids` does not list (`"*"` there means any allowlisted chat, opt-in per
+  voice), and a reference clip outside `state/voices/`.
+  `defaultCloneFor` picks a chat's `default_jids` voice.
+- **`speech-markup.mjs`**: `[pause]`, `[slow]`, `[fast]` and ellipsis beats in voice-note text,
+  parsed into segments that `server.mjs` renders and joins with real silence.
+- **`doc-scan.mjs`**: pulls text out of pdf and office files for the outbound secret scan. Fails
+  closed: anything it cannot read throws and the send is refused.
+- **`pair.mjs`**: one-time pairing, see the end of this section.
 
 - **`config.mjs`** — reads/writes `state/config.json` (allowlist + per-chat settings:
-  `no_image_jids`, `no_voice_jids`, `mention_only_jids`, `voice_only_jids`, plus global
-  `speaking_rate`/`s2t_tier`). `allowedJid(...jids)` is the single gate every inbound/outbound path
+  `no_image_jids`, `no_voice_jids`, `mention_only_jids`, `voice_only_jids`, `english_jids`,
+  `verbosity_jids`, `incognito_jids`, `no_link_preview_jids`, `no_mention_jids`, plus global
+  `speaking_rate`/`s2t_tier`/`t2s_tier`). Also owns `STATE_DIR`, most `state/` path constants (the daemon socket and token, the XTTS
+socket, the voices dir) and `PIPER_VOICES`. `allowedJid(...jids)` is the single gate every inbound/outbound path
   checks — it takes multiple candidate JIDs because WhatsApp addresses the same chat two ways (the
   phone-number JID and a privacy-preserving `@lid` form), and a message can arrive under either.
 - **`whatsapp.mjs`** — owns the one Baileys socket (`sock`) and reconnect logic. The pino logger is
@@ -87,7 +120,12 @@ Four files under `src/`, each importable independently and wired together in `se
   is the authoritative "is this actually usable" check — it tracks `lastError` separately from the
   socket object because a logged-out socket keeps `.user` set and looks alive to a naive check.
   WhatsApp allows exactly one live socket per linked device; if another process takes over
-  (`connectionReplaced`), this process exits deliberately rather than idling as a dead MCP server.
+  (`connectionReplaced`), this process exits deliberately rather than idling as a dead MCP server
+  (in daemon mode it stays up with `lastError` set instead, see Daemon mode). A decryption drop that
+  names a message id is only reported after `RECOVERY_WAIT_MS` (30 s, in `server.mjs`) without the
+  resent copy arriving, since Baileys asks the phone to resend and it often does.
+  Delivery and read receipts are forwarded through `onReceipt` into the `receipts` table, and
+  nothing here ever sends one.
   Also subscribes to presence updates (`presenceSubscribe`) for every allowlisted jid on connect and
   forwards `presence.update` events via the `onPresence` callback — `server.mjs`'s
   `handlePresenceUpdate` uses this purely to debounce the wake signal (see "Event-driven wake" in
@@ -110,7 +148,11 @@ Four files under `src/`, each importable independently and wired together in `se
   against a chain that leaves the log and against a message claiming to reply to itself.
   Nothing is ever mutated: an edit or delete is its own row pointing at the original
   via `to_id`, and reads derive `edited`/`deleted` status at query time (`withStatus`) rather than
-  rewriting the original row. `state/inbox.log` is a separate plain-text file (not in SQLite) — a
+  rewriting the original row. Edits and deletes by *other* people are stored the same way
+  (`protocolChangeEntry` in `server.mjs`). Three more tables share the file: `command_log` (every
+  in-chat command and every `unprompted` send reason, read by `wa_audit_log`), `memories` (per-chat
+  notes for `wa_memory`, `/memory`, `/forget`, every read keyed by jid) and `receipts` (highest
+  status per message and reader). `state/inbox.log` is a separate plain-text file (not in SQLite): a
   `Monitor` tails it to wake a Claude session on new messages, and "tail a database" isn't a thing.
 - **`server.mjs`** — the MCP server: registers all `wa_*` tools, plus the inbound message/reaction
   handlers (`handleIncoming`, `handleReaction`) passed into `startWhatsApp`. Every tool carries MCP
@@ -120,8 +162,12 @@ Four files under `src/`, each importable independently and wired together in `se
   MCP logging notifications via `notify()`, because `state/baileys.log` is denied to Claude Code's
   own Read tool and was therefore invisible to the one reader who could act on it. This is also where all
   the send-side guardrails live (see Security below) and where in-chat slash commands
-  (`/wakelevel`, `/speaking`, `/speaking-speed`, `/s2t-tier`, `/read-image`, `/read-audio`) are
-  parsed and applied.
+  (`COMMANDS`: `/wakelevel`, `/speaking`, `/speaking-speed`, `/s2t-tier`, `/t2s-tier`, `/language`,
+  `/read-image`, `/read-audio`, `/verbosity`, `/help`, `/generate` (with `status` and `cancel`),
+  `/ai off`, `/incognito`, `/memory`, `/forget N`) are parsed and applied. TTS lives here too:
+  `synthWav` tries the resident XTTS service first, falls back to Piper, uses macOS `say` when a
+  voice name is given, and never falls back for an explicitly requested clone. `encodeVoiceNote`
+  turns every voice note into AAC with ffmpeg.
 
   **`extractContent` ends in a catch-all, and that is load-bearing.** WhatsApp's proto defines
   around sixty message types; this file renders a dozen. Every other one used to return `null`, and
@@ -169,7 +215,10 @@ Four files under `src/`, each importable independently and wired together in `se
   optional `days` array, because a mis-parsed cron field fails silently and that is the exact
   failure being fixed. `lastRun` stores the *occurrence* a task ran for, not the wall-clock time it
   fired, which is what makes catch-up (run a missed 10:03 digest at 10:40) and the no-double-fire
-  guard the same mechanism. Managed through the `wa_schedule` tool.
+  guard the same mechanism. A one-off task has `once` (`"YYYY-MM-DDTHH:MM"` local) instead of `at`,
+  and `ackTask` switches it off after it fired. A fired task rewrites its wake line every 20 minutes
+  until acknowledged. No tasks ship: without `state/schedule.json`, `loadSchedule` returns `[]`.
+  Managed through the `wa_schedule` tool.
 
 `pair.mjs` is a separate, one-time entry point run directly in a terminal (never through Claude
 Code) — it's the only file allowed to use `console.log`.
@@ -177,8 +226,9 @@ Code) — it's the only file allowed to use `console.log`.
 ### Critical: stdout is the MCP protocol channel
 
 MCP over stdio uses stdout for JSON-RPC. **Never add `console.log` (or anything else writing to
-stdout) in `server.mjs`, `store.mjs`, `config.mjs`, or `whatsapp.mjs`** — it corrupts the protocol
-stream. Use `process.stderr.write` or the `state/baileys.log` pino logger instead.
+stdout) in `server.mjs`, `store.mjs`, `config.mjs`, `whatsapp.mjs`, any other module they import, or
+`shim.mjs`**. It corrupts the protocol stream (the shim's stdout is the client's channel too). Use
+`process.stderr.write` or the `state/baileys.log` pino logger instead.
 
 ### Security model (multiple independent layers, not one gate)
 

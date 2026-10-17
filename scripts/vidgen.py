@@ -4,7 +4,8 @@
     python3 scripts/vidgen.py --prompt "a cat walking on a roof at sunset" --out state/outbox/cat.mp4
     python3 scripts/vidgen.py --image photo.jpg --prompt "the person waves" --out state/outbox/wave.mp4
 
---model is a folder under state/models/ (install one with scripts/install_model.py --local-dir NAME) or a
+--model is a folder under state/models/ (install one with scripts/install_model.py --local-dir
+state/models/NAME) or a
 Hugging Face repo that is already in the cache. Nothing is downloaded unless --online is passed, so a
 typo cannot start a multi-gigabyte fetch. The default is state/models/ltx-video.
 
@@ -14,8 +15,8 @@ frames cost memory and time quickly, so raise them one step at a time.
 
 There is no resident service. A call loads the model, renders and exits, so nothing stays in memory. A lock
 file shared with imggen.py serialises calls, because an image model and a video model do not fit together
-next to the voice service. The result is an mp4. Only state/outbox/ and a session scratchpad's outbox/ are
-send sources, so write there if the result is meant for a chat.
+next to the voice service. The result is an mp4, written to state/outbox/ or a session scratchpad's
+outbox/ (the send sources), same rule as imggen.py. --any-out allows any other path, for terminal runs.
 
 The Hugging Face token is read from state/hf-token and passed through the environment only. It is never
 printed. Prints one JSON line: {"ok": true, "out": ..., "seconds": ...} or {"ok": false, "error": ...}.
@@ -36,7 +37,23 @@ TOKEN_FILE = REPO / "state" / "hf-token"
 LOCK_FILE = REPO / "state" / "imggen.lock"
 LOG_FILE = REPO / "state" / "vidgen.log"
 MODELS_DIR = REPO / "state" / "models"
+OUTBOX = REPO / "state" / "outbox"
+TMP_ROOT = Path(f"/private/tmp/claude-{os.getuid()}")
 DEFAULT_MODEL = "ltx-video"
+
+
+def in_send_source(parent):
+    """True for state/outbox/ and a session scratchpad's outbox/, the folders a send tool accepts."""
+    if parent == OUTBOX.resolve():
+        return True
+    try:
+        rel = parent.relative_to(TMP_ROOT.resolve())
+    except ValueError:
+        return False
+    parts = rel.parts
+    return "scratchpad" in parts and parts[parts.index("scratchpad") + 1 :] == (
+        "outbox",
+    )
 
 
 def fail(message, code=1) -> NoReturn:
@@ -88,11 +105,21 @@ def main():
         default=1800,
         help="seconds to wait for another render to finish",
     )
+    p.add_argument(
+        "--any-out",
+        action="store_true",
+        help="allow --out outside state/outbox/ and a scratchpad outbox/ (terminal use)",
+    )
     a = p.parse_args()
 
     out = Path(a.out)
     if out.suffix.lower() != ".mp4":
         fail("--out must end in .mp4")
+    if not a.any_out and not in_send_source(out.parent.resolve()):
+        fail(
+            "--out must be in state/outbox/ or a scratchpad outbox/ folder "
+            "(pass --any-out to write elsewhere from the terminal)"
+        )
     if a.width % 32 or a.height % 32:
         fail("--width and --height must be multiples of 32")
     if a.frames % 8 != 1:

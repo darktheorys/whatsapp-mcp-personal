@@ -19,9 +19,10 @@ Nothing is written to `~`, nothing reads from any other repo.
   reaction back arrives as an empty emoji and is recorded as `removed: true`.
 - A caption is logged even when its download fails or the file exceeds the cap, so the words
   survive whatever happens to the file.
-- No cloud calls of any kind, for anything. Transcription (whisper.cpp) and voice replies (Piper,
-  falling back to macOS `say`) both run fully on-device — no API key, no per-use cost, no data
-  leaving the machine.
+- No cloud calls of any kind, for anything. Transcription (whisper.cpp) and voice replies (XTTS-v2,
+  falling back to Piper, or macOS `say` when a voice name is given) all run on-device. No API key,
+  no per-use cost, no data leaving the machine. The one exception is fetching link titles, see
+  "Links get their titles".
 - An explicit allowlist (`state/config.json`) is the only thing that lets a chat in. Anything
   else is silently ignored on the way in and refused on the way out.
 - **Event-driven wake, not pull-only.** `handleIncoming` appends one line per inbound message to
@@ -39,9 +40,11 @@ Nothing is written to `~`, nothing reads from any other repo.
   out. Presence is not persisted anywhere — purely an ephemeral wake-timing signal for now. A
   5-minute ceiling (independent of the 10s debounce — a continuously-composing signal that never
   stops can't defer it) guarantees the wake fires eventually no matter what.
-- Only runs while the Claude Code session using it is open, same as any other local MCP server.
-  **One live socket per linked device** — if two sessions both connect, the second kicks the first
-  off; see "Multiple sessions" below.
+- Two ways to run it. In stdio mode the server is a child of the Claude Code session and only runs
+  while that session is open, like any other local MCP server. In daemon mode it runs on its own
+  under launchd and keeps the WhatsApp connection up across sessions and `/mcp` reconnects (see
+  "Daemon mode"). **One live socket per linked device** either way: if two processes connect, the
+  second kicks the first off. See "Multiple sessions" below.
 
 ## Starting a session
 
@@ -120,7 +123,10 @@ The MCP server needs an absolute path, which is what `$(pwd)` expands to. If you
 somewhere else, substitute the full path to this repo's `src/server.mjs`.
 
 New tools only take effect after an `/mcp` reconnect in Claude Code (the server process needs a
-restart to load new code) — this applies every time `src/*.mjs` changes.
+restart to load new code). This applies every time `src/*.mjs` changes.
+
+That is stdio mode. Daemon mode registers `src/shim.mjs` instead and restarts with a script, not
+`/mcp`. See "Daemon mode" below.
 
 ### 5. Voice (optional)
 
@@ -131,9 +137,45 @@ macOS), downloads the whisper and Piper models into `state/`, and creates the Pi
 step is a no-op if it's already done, and a failure in one step doesn't fail the others or the
 install. Re-run it directly any time with `bash scripts/setup-voice.sh`.
 
-Swap `tr_TR-dfki-medium` for any other voice from
-[huggingface.co/rhasspy/piper-voices](https://huggingface.co/rhasspy/piper-voices/tree/main) —
-just update `PIPER_MODEL` in `src/server.mjs` to match.
+Swap `tr_TR-dfki-medium` (or the English `en_US-hfc_male-medium`) for any other voice from
+[huggingface.co/rhasspy/piper-voices](https://huggingface.co/rhasspy/piper-voices/tree/main), then
+update `PIPER_VOICES` in `src/config.mjs` to match. It maps each language and `/t2s-tier` value to
+a file in `state/piper-models/`.
+
+Piper is the fallback voice. The default is XTTS-v2, which is not part of `pnpm install` because it
+needs its own Python environment and holds a model in memory. Set it up once, after the daemon is
+installed (it authenticates with the daemon's token):
+
+```bash
+python3 -m venv state/xtts-venv
+state/xtts-venv/bin/pip install coqui-tts torch torchaudio torchcodec 'transformers<5'
+bash scripts/install-xtts.sh               # launchd agent running scripts/xtts_service.py
+bash scripts/install-xtts.sh --uninstall   # back to Piper only
+```
+
+The service takes about 80 seconds to load the model and then answers at roughly real time, over a
+unix socket (`state/xtts.sock`, mode 0600, every request carrying the token from
+`state/daemon.token`). The socket only exists once the model is loaded, so while it is starting,
+stopped or too slow, voice notes fall back to Piper and nothing fails. Its log is `state/xtts.log`.
+The install script accepts Coqui's non-commercial model licence (CPML) for you, so only use it
+where that licence fits.
+
+**Cloned voices** are optional and added by hand with `scripts/add-voice.sh`:
+
+```bash
+bash scripts/add-voice.sh <name> <audio-file> --consent "<whose voice, that they agreed, when>" \
+     --allow <jid> [--allow <jid> ...] [--default <jid> ...]
+```
+
+It converts the first 28 seconds of the file to a 24 kHz mono wav in `state/voices/<name>.wav` and
+registers it in `state/voices/voices.json`. `--consent` and at least one `--allow` chat are
+required, and the script refuses without them. A voice can only be used in the chats its `--allow`
+list names (a chat not listed, including any group, is a refusal at send time). Writing `"*"`
+into a voice's `allowed_jids` by hand opens it to every allowlisted chat, so only do that on purpose. `--default` makes it
+the voice Claude's own notes use in that chat, and has to be one of the allowed chats. Under 6
+seconds of audio gives a weak clone, 20 to 30 seconds of clean speech is best. The server reads
+`voices.json` on every send, so no restart is needed. Only clone your own voice, or the voice of
+someone who has agreed to it.
 
 ### 6. Image and PDF text (optional)
 
@@ -164,9 +206,11 @@ rules for pictures of real people are in `.claude/skills/image-generation/SKILL.
 
 ## Image generation
 
-`scripts/imggen.py` makes an image from a prompt or edits a photo. It is called by a session, not by a
-chat command: someone asks for a picture, the session sends a one-line holding message, runs the
-script in the background, looks at the result and sends it with `wa_send_image`.
+`scripts/imggen.py` makes an image from a prompt or edits a photo. It runs two ways. Usually a session
+calls it: someone asks for a picture, the session sends a one-line holding message, runs the script in
+the background, looks at the result and sends it with `wa_send_image`. The owner can also start a render
+straight from the phone with the `/generate` chat command (see "/generate" below), where the server runs
+the script itself and no session is involved. Editing a photo is only available through a session.
 
 | Mode       | Model                         | Time on an M1 Pro | Peak memory | Use it for                                        |
 | ---------- | ----------------------------- | ----------------- | ----------- | ------------------------------------------------- |
@@ -176,10 +220,11 @@ script in the background, looks at the result and sends it with `wa_send_image`.
 
 There is no resident service. Each call loads the model (15 to 20 seconds), renders and exits, so
 nothing holds memory between requests, and a lock file makes a second request wait for the first
-because two image models do not fit next to the voice service on 32 GB. The result has to be written
-to a session scratchpad's `outbox/` folder, which is the only scratchpad folder the send tools accept.
-The Hugging Face token is read from `state/hf-token` and handed to the render process through its
-environment only.
+because two image models do not fit next to the voice service on 32 GB. `--out` has to be in
+`state/outbox/` or a session scratchpad's `outbox/` folder, the places the send tools accept, and the
+script refuses any other path. `--any-out` lifts that for your own runs from a terminal. `/generate`
+renders land in `state/outbox/` and are deleted when the render ends, sent or not. The Hugging Face token is read from
+`state/hf-token` and handed to the render process through its environment only.
 
 ### Installing another model
 
@@ -247,22 +292,58 @@ the Hugging Face cache, and the server answers only requests whose Host and Orig
 tab in your browser cannot use it (mlx-lm's own HTTP server would let it). It handles one request at a time.
 With Gemma 4 E4B 4-bit it needs about 4.4 GB and runs at about 48 tokens a second on an M1 Pro.
 
+## Video generation
+
+`scripts/vidgen.py` makes a short clip from a prompt, or from a start image plus a prompt, with
+LTX-Video through `diffusers`, on-device. Like image generation it is not part of `pnpm install` and has
+its own environment, `state/vidgen-venv` (the script re-runs itself with that venv's Python and stops if
+it is missing). Models are folders under `state/models/`, installed with
+`python3 scripts/install_model.py <owner/name> --local-dir state/models/<name>`. The default is
+`state/models/ltx-video`.
+
+```bash
+python3 scripts/vidgen.py --prompt "a cat walking on a roof at sunset" --out state/outbox/cat.mp4
+python3 scripts/vidgen.py --image photo.jpg --prompt "the person waves" --out state/outbox/wave.mp4
+```
+
+`--model` also takes a Hugging Face repo id, but only one already in the cache: the script runs offline
+unless `--online` is passed, so a typo cannot start a multi-gigabyte download. Width and height are
+multiples of 32 and `--frames` is 8n+1. The defaults (512x320, 49 frames at 24 fps, about two seconds) are
+what a 32 GB M1 Pro handles. It shares the image generator's lock file (`state/imggen.lock`), so an image
+render and a video render never run at once, and waits up to `--wait` seconds (default 1800) for the
+other to finish. `--out` must end in `.mp4` and, like `imggen.py`, must be in `state/outbox/` or a scratchpad
+`outbox/` (the folders `wa_send_video` accepts) unless `--any-out` is passed from the terminal. It prints one
+JSON line, and the render's own output goes to `state/vidgen.log`.
+
 ## Voice: speaking and listening
 
 Both directions run entirely offline, no API keys:
 
-- **Speaking** — `wa_send_voice` defaults to
-  [Piper](https://github.com/rhasspy/piper) (`state/piper-venv`, an isolated `uv` venv — see
-  Setup below), using a Turkish or English neural voice depending on the chat's `/language`
-  setting (see below), from
-  [huggingface.co/rhasspy/piper-voices](https://huggingface.co/rhasspy/piper-voices) —
-  noticeably better quality than the built-in macOS voices. Pass a `voice` name (any installed
-  macOS `say` voice — check with `say -v '?'`) to fall back to `say` for other
-  languages/genders; if you don't have one for your language yet, install it via **System
-  Settings → Accessibility → Spoken Content → System Voice → Manage Voices...**. Either path
-  converts to `.m4a` with `afconvert` and sends as a WhatsApp voice note (`ptt: true`).
-  `wa_send_audio` sends an already-made audio file the same way, for anything not produced by
-  either TTS path.
+- **Speaking**: `wa_send_voice` picks an engine in this order.
+  1. A `voice` name (any installed macOS `say` voice, check with `say -v '?'`) uses `say`, for
+     other languages and genders. If you don't have one for your language yet, install it via
+     **System Settings → Accessibility → Spoken Content → System Voice → Manage Voices...**.
+  2. A `clone` name uses that cloned voice through XTTS, and only in the chats the voice allows
+     (see Setup step 5). A requested clone never falls back: if it cannot be rendered, the call
+     fails rather than sending the words in someone else's voice.
+  3. Otherwise the chat's default clone, if `--default` gave it one, and then the resident XTTS-v2
+     service (`scripts/xtts_service.py`) with its stock speaker, in Turkish or English depending on
+     the chat's `/language` setting. Both of these fall back to Piper when XTTS is down, still
+     loading or too slow.
+  4. [Piper](https://github.com/rhasspy/piper) (`state/piper-venv`, an isolated `uv` venv, see
+     Setup) with a Turkish or English voice from
+     [huggingface.co/rhasspy/piper-voices](https://huggingface.co/rhasspy/piper-voices).
+
+  XTTS sometimes keeps talking after the last word, so each XTTS segment is transcribed again with
+  word timestamps and cut just after the last intended word. Whatever the engine, the result is
+  encoded to AAC (`.m4a`) with `ffmpeg` and sent as a WhatsApp voice note (`ptt: true`).
+  `wa_send_audio` sends an already-made audio file the same way, for anything not produced by a
+  TTS path.
+
+  Voice text can carry delivery markup (`src/speech-markup.mjs`): `[pause]` or `[pause 800]` for a
+  silence (500 ms by default, at most 3 s), `[slow]...[/slow]` and `[fast]...[/fast]` for a drawn-out
+  or rushed span, and `...` or `…` for a short beat. It only means something in a voice note, a text
+  message would show the brackets.
 - **Listening** — every incoming voice note is downloaded and piped through
   [`whisper.cpp`](https://github.com/ggerganov/whisper.cpp) (`brew install whisper-cpp`) using the
   model for the current `/s2t-tier` (see below; `ggml-small.bin` by default, from
@@ -301,9 +382,20 @@ needs a session to be running.**
 ]
 ```
 
-Two tasks ship by default: the daily AI digest at 10:03, and a weekly review on Sunday evenings
-that calls `wa_stats` with `compare: true` and reports which chats went quiet or busy against the
-previous week, lopsided conversation-starter ratios, and anything left unanswered.
+Nothing ships by default. Without `state/schedule.json` the schedule is empty, and tasks are added
+with `wa_schedule`. Typical ones are a daily digest, or a weekly review that calls `wa_stats` with
+`compare: true` and reports which chats went quiet or busy against the previous week, lopsided
+conversation-starter ratios, and anything left unanswered.
+
+A fired task keeps writing its wake line every 20 minutes, within its catch-up window, until a
+session calls `wa_schedule_ack` with its id. A wake that arrived while no session was listening is
+then not lost for the day.
+
+**One-off reminders** use `once` instead of `at`: a local date and time, `"YYYY-MM-DDTHH:MM"` (for
+example `"2026-10-23T18:00"`). It fires at that moment, and once a session acknowledges it, it
+switches itself off for good instead of coming back the next day. A task has either `at` or `once`,
+never both. Put the target chat's full id in the prompt: the chats a due task's prompt names count
+as live for the wrong-chat guard (see "Which chat a send goes to").
 
 Manage it with `wa_schedule` (`action: "list" | "set" | "remove"`). `lastRun` records the
 *occurrence* a task ran for rather than the moment it fired, so a catch-up run at 10:40 still counts
@@ -338,7 +430,7 @@ sender who controls the host learns their message landed even if you never open 
 Links from chat members are untrusted input, so the fetcher refuses anything resolving to a private,
 loopback, link-local or carrier-NAT address (cloud metadata endpoints included), allows only
 http/https, and re-checks every redirect hop by hand rather than letting `fetch` follow them past
-the check. Capped at two links per message, 6s and 256KB each.
+the check. Capped at two links per message, 6s and 768 KB each.
 
 ## Nothing arrives silently
 
@@ -357,6 +449,18 @@ the failure and moves on — the message never reaches this server at all. That'
 on your phone. The server now watches its own log stream for those failures and writes a
 `⚠️ inbound message lost` line into `state/inbox.log`, so a session wakes and tells you at the time
 instead of you discovering it days later. Bursts are throttled to one report a minute with a count.
+
+Not every decryption failure is a loss. Baileys asks the phone to resend a message it could not
+decrypt, and the copy often arrives a few seconds later under the same id. So a failure that names a
+message id is reported only if that id has not arrived within 30 seconds (`RECOVERY_WAIT_MS`). If it
+arrives, it is stored normally and nothing is reported. A failure without an id (a whole batch) is
+reported at once.
+
+**Edits and deletes by other people.** These arrive as protocol messages pointing at the original,
+and used to be dropped as plumbing, so the stored text stayed the original forever. Each one is now
+a row of its own (`kind` `edit` or `delete`, `to` the original's id), the same shape this server
+writes for its own edits. Reads show the original as edited or deleted. They never wake a session,
+and nothing is stored for a chat with `/incognito` on.
 
 ## Reading images and documents
 
@@ -384,8 +488,9 @@ trigger this — no one else can flip it for you):
   instead of text, transparently (`wa_send` checks the mode and routes itself; nothing else needs
   to know).
 - `/speaking text-only` — back to normal (the default for any chat not in the list).
-- `/language en` — this chat's outgoing voice notes use the English Piper voice instead of Turkish
-  (`en_US-hfc_male-medium` vs. `tr_TR-dfki-medium`). Opt-in, persisted as `english_jids` in
+- `/language en`: this chat's outgoing voice notes are spoken in English instead of Turkish
+  (XTTS's English, and the `en_US-hfc_male-medium` Piper voice instead of `tr_TR-dfki-medium` when
+  it falls back). Opt-in, persisted as `english_jids` in
   `state/config.json` — almost every allowlisted chat is Turkish, so the setting only needs to
   name the exception. `/language tr` clears it. Incoming voice notes are unaffected: whisper's
   `-l auto` already adapts per clip regardless of this setting. `wa_send_voice` also takes an
@@ -397,7 +502,7 @@ above), same `fromMe`-only rule, persisted as `speaking_rate` in `state/config.j
 `1.15`, a bit faster than either engine's native pace):
 
 - `/speaking-speed 1.15` — sets the default speed multiplier: `1.0` is native pace, `>1` faster,
-  `<1` slower. Applies to both Piper (`--length-scale`) and `say` (`-r`).
+  `<1` slower. Applies to every engine: XTTS (its speed), Piper (`--length-scale`) and `say` (`-r`).
 - Passing `rate` directly to `wa_send_voice` overrides this default for that one call only.
 
 **Transcription tier**, global, same `fromMe`-only rule, persisted as `s2t_tier` in
@@ -414,7 +519,8 @@ model that looks valid). Switching tiers takes effect on the next voice note, no
 
 **TTS voice tier**, global, same `fromMe`-only rule, persisted as `t2s_tier` in `state/config.json`
 (default `low`), decoupled from `s2t_tier` — wanting a fast transcript and a good-sounding reply
-are independent preferences. In practice it currently has nothing to bite on: both
+are independent preferences. It only picks the Piper voice, XTTS ignores it. In practice it
+currently has nothing to bite on: both
 [`tr_TR-dfki-medium`](https://huggingface.co/rhasspy/piper-voices/tree/main/tr/tr_TR) and
 [`en_US-hfc_male-medium`](https://huggingface.co/rhasspy/piper-voices/tree/main/en/en_US/hfc_male)
 only ship one quality tier each on Hugging Face, so every `/t2s-tier` value maps to the same file
@@ -525,44 +631,137 @@ recorded** in `command_log` (see Security notes) even while content is hidden �
 incognito was turned on/off for a jid, and when, is exactly the one thing that should survive
 regardless of what incognito otherwise suppresses.
 
+## Per-chat memory
+
+Short notes about people and a chat (preferences, facts, running jokes) live in a `memories` table
+in `state/messages.db`, written with `wa_memory`. Every note belongs to one chat: `list` and
+`forget` only ever see that chat's notes, so what is known in one chat never surfaces in another. A
+note can be about a named person in that chat or about the chat itself. Notes are capped at 300
+characters each and 200 per chat, a repeated note (ignoring case) is not stored twice, and the text
+goes through the same secret scan as an outgoing message.
+
+From your own phone, in the chat itself:
+
+- `/memory` lists this chat's notes, numbered.
+- `/forget 12` deletes note 12. A number from another chat deletes nothing.
+
+## Which chat a send goes to
+
+The allowlist says who may be written to. It cannot tell a reply meant for one chat from the same
+text sent to another allowlisted chat by a wrong id. Two checks in `resolveTarget`
+(`src/server.mjs`) close that, on every send tool:
+
+- **`reply_to` alone is enough.** Every send tool takes `reply_to`, a message id from `wa_recent`,
+  and the message goes out as a quoted reply to it. `to` is then optional: the chat is taken from the
+  quoted message, so it cannot be mistyped. A `to` that disagrees with the quoted message's chat is
+  refused, and nothing is sent.
+- **A send to a chat that has not woken the session is refused.** A chat counts as live for 90
+  minutes after something in it woke the session (a wake queued for it) or after a scheduled task
+  whose prompt names its id came due. A send anywhere else is refused unless the call passes
+  `unprompted` with a reason (a scheduled task's id, or the owner's instruction). The reason is
+  written to `command_log`, so `wa_audit_log` shows it. The owner's own DM is always open.
+
+The live list is kept in memory and rebuilt from the tail of `state/inbox.log` when the server
+starts, so a restart does not refuse a reply to a wake that came in just before it.
+
+## Delivery and read receipts
+
+Receipts for messages this account sent go into their own `receipts` table rather than the message
+log, since a group read receipt arrives once per member and as message rows they would flood every
+read of the chat. In a DM that is delivered, read or played, and in a group who read it. Only the
+highest status per reader is kept. `wa_receipts` reads them for one message. Receipts only come from
+people who have read receipts switched on, so a missing "read" does not prove a message was not
+read. This server never sends read receipts itself, since read state syncs to your phone and would
+clear your own unread badges.
+
 ## Multiple sessions
 
-WhatsApp/Baileys allows exactly one live socket per linked device. Each Claude Code
-session/window that has this MCP server configured spawns its own independent process — normal
-for stdio MCP — so two sessions open at once will fight over the connection: whichever connects
-last wins, and the other's socket dies (logged as `connectionReplaced` in `state/baileys.log`,
-and the process exits so a stale one is never silently squatting on the connection). If your
-active session's `wa_send`/`wa_react` starts throwing `Connection Closed`, call `wa_connect` to
-reclaim the socket in-process — no `/mcp` reload needed. The durable fix is behavioral: keep this
-MCP server connected in only one session at a time.
+WhatsApp/Baileys allows exactly one live socket per linked device. In stdio mode each Claude Code
+session/window that has this MCP server configured spawns its own independent process, so two
+sessions open at once will fight over the connection: whichever connects last wins, and the
+other's socket dies (logged as `connectionReplaced` in `state/baileys.log`, and the process exits
+so a stale one is never silently squatting on the connection). If your active session's
+`wa_send`/`wa_react` starts throwing `Connection Closed`, call `wa_connect` to reclaim the socket
+in-process, no `/mcp` reload needed. In stdio mode the durable fix is behavioral: keep this MCP
+server connected in only one session at a time. Daemon mode removes the problem, since only the
+daemon ever holds the socket.
+
+## Daemon mode
+
+Optional, and the preferred way to run it. `src/daemon.mjs` runs the same server under launchd and
+speaks MCP over a unix socket instead of stdio. Claude Code launches `src/shim.mjs`, a small stdio
+proxy that forwards every message to the daemon. The point is that the WhatsApp socket no longer
+dies with every `/mcp` reconnect or closed session. Baileys only delivers to a live socket, so each
+restart in stdio mode was a window where messages were lost.
+
+```bash
+bash scripts/install-daemon.sh              # writes a launchd agent, starts it, prints the next step
+claude mcp remove whatsapp-personal && claude mcp add whatsapp-personal -- node "$(pwd)/src/shim.mjs"
+bash scripts/restart-daemon.sh              # after editing anything under src/
+bash scripts/install-daemon.sh --uninstall  # stop it and go back to stdio
+```
+
+Run the install script yourself in a terminal: it writes to `~/Library/LaunchAgents`, outside what
+Claude Code's tools may touch. It prints the exact `claude mcp add` line with absolute paths. The
+daemon logs to `state/daemon.log`.
+
+How it fits together:
+
+- The daemon listens on `state/daemon.sock` (mode 0600, inside the 0700 `state/`), and a client
+  must first send the token from `state/daemon.token`, which the daemon creates on first start.
+- One client at a time. A new authenticated connection replaces the old one, and the daemon writes
+  a `client replaced` line to `state/inbox.log`.
+- When the daemon restarts, the shim reconnects and replays the client's own `initialize` so Claude
+  Code never notices. Requests in flight at that moment get an error instead of hanging. No `/mcp`
+  is needed after `restart-daemon.sh` unless `src/shim.mjs` itself changed.
+- The tools, guards and scheduler are the same code as in stdio mode. One behaviour differs: when
+  another process takes the WhatsApp connection over, the daemon does not exit (launchd would only
+  start it straight back into the same fight). It stays up, tool calls fail visibly, and
+  `wa_connect` reclaims the connection.
+- The XTTS voice service authenticates with the same token, which is why it is installed after the
+  daemon.
 
 ## Tools
 
+Every send tool also takes `reply_to` and `unprompted`, and with `reply_to` the `to` is optional (see
+"Which chat a send goes to"). They are written `to?` below and not repeated in each row.
+
 | Tool                | Does                                                                                                                                       |
 | ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
-| `wa_status`         | Connection state, own linked JID, allowlist, logged-message counts.                                                                        |
-| `wa_audit_log`      | `{ jid?, limit? }` — recent in-chat commands that fired (setting + new value, never message content); records even under `/incognito`.     |
-| `wa_groups`         | Groups this number is in, with their JIDs. The only way to learn a group JID.                                                              |
+| `wa_status`         | Connection state (with the problem, if any), own linked JID, allowlist, logged-message counts, transcription tier and model, and the chats with English, verbosity or incognito set. |
+| `wa_audit_log`      | `{ jid?, limit? }`: recent in-chat commands that fired (setting and new value, never message content), plus `unprompted` send reasons. Records even under `/incognito`. |
+| `wa_groups`         | Groups this number is in, with their JIDs and member counts. The only way to learn a group JID.                                            |
 | `wa_contacts`       | jid → display name, derived only from logged messages for allowlisted chats.                                                               |
-| `wa_send`           | `{ to, text }` — sends only if `to` is on the allowlist. Auto-routes to a spoken voice note if the chat is in `/speaking voice-only` mode. |
-| `wa_send_text_only` | `{ to, text }` — sends text to a voice-only chat without converting to voice. Useful for structured data (URLs, metadata, transcripts).    |
-| `wa_send_image`     | `{ to, path, caption? }` — sends a local image file, from a sendable directory only (see Security notes).                                  |
-| `wa_send_video`     | `{ to, path, caption? }` — sends a local video file (MP4 format) with optional caption, from a sendable directory only.                    |
-| `wa_send_document`  | `{ to, path, caption?, fileName? }` — sends a pdf/docx/xlsx/pptx/csv/txt/md from a sendable directory only. Every format is secret-scanned, pdf and office files after decompressing them. |
-| `wa_send_voice`     | `{ to, text, voice?, language?, rate? }` — speaks `text` (Piper by default, or a macOS `say` voice) and sends it as a voice note.          |
-| `wa_send_audio`     | `{ to, path }` — sends an already-made audio file as a voice note.                                                                         |
-| `wa_react`          | `{ jid, messageId, emoji }` — reacts to a specific logged message; empty `emoji` removes a reaction.                                       |
-| `wa_edit`           | `{ jid, messageId, text }` — rewrites a message **Claude sent**; refuses anything else. WhatsApp allows ~15 min and marks it edited.       |
-| `wa_delete`         | `{ jid, messageId }` — delete-for-everyone on a message **Claude sent**; refuses anything else. Leaves WhatsApp's "deleted" placeholder.   |
-| `wa_connect`        | Reclaims the WhatsApp socket in this process without an `/mcp` reload — see "Multiple sessions".                                           |
-| `wa_recent`         | `{ jid?, limit?, all? }` — recent logged messages for one allowed chat. Omitting `jid` returns per-chat unread counts only, never text.    |
-| `wa_search`         | `{ jid, query, limit? }` — substring search over one chat's active + archived messages, case- and diacritic-insensitive (`seker` finds `şeker`). |
-| `wa_stats`          | `{ jid?, days?, compare?, unanswered?, unansweredHours? }` — volume, reply times, activity by hour/weekday, who starts conversations. `compare` measures the equally-long window before `days` and reports the change. Counts only, never text, so it is safe across all chats at once. |
-| `wa_send_poll`      | `{ to, name, values, selectableCount? }` — creates a poll. Returns a message id; votes can only be read back for polls sent this way (see below). |
-| `wa_poll_results`   | `{ jid, messageId }` — current vote tally for a poll `wa_send_poll` created. |
-| `wa_schedule_ack`   | `{ id }` — tells the server a session picked a scheduled task up, so it stops re-writing the wake line every 20 minutes. |
-| `wa_thread`         | `{ jid, messageId }` — the whole reply chain around a message, in time order: what it replied to, and everything that replied to it. Spans archived messages. |
-| `wa_schedule`       | `{ action, id?, at?, days?, prompt?, enabled?, catchUpMinutes? }` — recurring tasks the **server** fires, surviving restarts and sessions. See "Scheduled work" below. |
+| `wa_profile`        | `{ jid }`: an allowlisted person's About text and profile picture, or a group's picture. The picture is saved under `state/media` (never a send source). Cached five minutes. |
+| `wa_send`           | `{ to?, text, mention? }`: sends text. A long text (over 300 characters) goes out as up to three messages split at paragraphs or sentences. Auto-routes to a spoken voice note if the chat is in `/speaking voice-only` mode. `mention` tags up to two people by name, in groups only (see below). |
+| `wa_send_text_only` | `{ to?, text, mention? }`: sends text to a voice-only chat without converting to voice. Useful for structured data (URLs, metadata, transcripts). |
+| `wa_send_image`     | `{ to?, path, caption? }`: sends a local image file, from a sendable directory only (see Security notes).                                  |
+| `wa_send_video`     | `{ to?, path, caption? }`: sends a local video file (mp4/mkv/mov) with an optional caption, from a sendable directory only.                |
+| `wa_send_sticker`   | `{ to?, path }`: sends a 512x512 WebP sticker, normally from `state/stickers/`. No caption.                                                |
+| `wa_send_document`  | `{ to?, path, caption?, fileName? }`: sends a pdf/docx/xlsx/pptx/csv/txt/md from a sendable directory only. Every format is secret-scanned, pdf and office files after decompressing them. |
+| `wa_send_voice`     | `{ to?, text, voice?, language?, rate?, clone? }`: speaks `text` and sends it as a voice note. XTTS-v2 by default, falling back to Piper; a macOS `say` voice with `voice`; a cloned voice with `clone`, only in the chats that voice allows and never with a fallback. |
+| `wa_send_audio`     | `{ to?, path }`: sends an already-made audio file as a voice note.                                                                          |
+| `wa_send_poll`      | `{ to?, name, values, selectableCount? }`: creates a poll. Returns a message id; votes can only be read back for polls sent this way.      |
+| `wa_send_location`  | `{ to?, latitude, longitude, name?, address? }`: sends a map pin.                                                                          |
+| `wa_send_contact`   | `{ to?, name, phone }`: sends a contact card, only for a number that has written in the target chat or is the owner's, so a number from another chat is never passed on. |
+| `wa_poll_results`   | `{ jid, messageId }`: current vote tally for a poll `wa_send_poll` created.                                                                |
+| `wa_react`          | `{ jid, messageId, emoji }`: reacts to a specific logged message; empty `emoji` removes a reaction.                                        |
+| `wa_edit`           | `{ jid, messageId, text }`: rewrites a message **Claude sent**; refuses anything else. WhatsApp allows ~15 min and marks it edited.        |
+| `wa_delete`         | `{ jid, messageId }`: delete-for-everyone on a message **Claude sent**; refuses anything else. Leaves WhatsApp's "deleted" placeholder.    |
+| `wa_receipts`       | `{ jid, messageId }`: delivery and read receipts for a message this account sent (see "Delivery and read receipts").                     |
+| `wa_recent`         | `{ jid?, limit?, all? }`: recent logged messages for one allowed chat. Omitting `jid` returns per-chat unread counts only, never text.     |
+| `wa_search`         | `{ jid, query, limit? }`: substring search over one chat's active and archived messages, case- and diacritic-insensitive (`seker` finds `şeker`). |
+| `wa_thread`         | `{ jid, messageId }`: the whole reply chain around a message, in time order: what it replied to, and everything that replied to it. Spans archived messages. |
+| `wa_stats`          | `{ jid?, days?, compare?, unanswered?, unansweredHours?, participants? }`: volume, reply times, activity by hour/weekday, who starts conversations. `compare` measures the equally-long window before `days` and reports the change. `participants` breaks a group down per sender. Counts only, never text, so it is safe across all chats at once. |
+| `wa_memory`         | `{ action, jid, about?, text?, id? }`: `add`, `list` or `forget` notes for one chat (see "Per-chat memory").                             |
+| `wa_schedule`       | `{ action, id?, at?, once?, days?, prompt?, enabled?, catchUpMinutes? }`: recurring tasks and one-off reminders the **server** fires, surviving restarts and sessions. See "Scheduled work". |
+| `wa_schedule_ack`   | `{ id }`: tells the server a session picked a scheduled task up, so it stops re-writing the wake line every 20 minutes (and switches a one-off off). |
+| `wa_connect`        | Reclaims the WhatsApp socket in this process without an `/mcp` reload. See "Multiple sessions".                                           |
+
+**Tagging** (`mention` on `wa_send` and `wa_send_text_only`): names as shown in the chat, at most two
+per message, with `@Name` in the text where each tag goes. Groups only. A name must match exactly one
+person who has written in that chat, so a name can never reach someone outside it. "Everyone"-style
+tags and numbers on the `no_mention_jids` list in `state/config.json` are refused.
 
 ## YouTube / video tools
 
@@ -705,20 +904,45 @@ between sources and backs off; don't remove those delays.
 Chains into the rest: `scroll.py` to find something → yt-dlp skill's `download_video.py` to fetch →
 `watch_video.py` to view it → `trim_video.py` → index into `state/memes/description.md`.
 
+## Tests
+
+`pnpm test` runs `test_allowlist.mjs`, one sequential script, and does not connect to WhatsApp.
+Before importing anything from `src/`, it points the state files the modules resolve at load time
+into temp directories, so a test run cannot write into your real config, log or database. That is
+done through environment variables meant only for tests:
+
+| Variable                 | Replaces                    |
+| ------------------------ | --------------------------- |
+| `WA_CONFIG_PATH`         | `state/config.json`         |
+| `WA_DB_PATH`             | `state/messages.db`         |
+| `WA_INBOX_PATH`          | `state/inbox.log`           |
+| `WA_CONTACTS_PATH`       | `state/contacts.json`       |
+| `WA_POLL_STATE_PATH`     | `state/poll-state.json`     |
+| `WA_PENDING_WAKE_PATH`   | `state/pending-wake.json`   |
+| `WA_SCHEDULE_PATH`       | `state/schedule.json`       |
+| `WA_POLLS_PATH`          | `state/polls.json`          |
+| `WA_VOICES_DIR`          | `state/voices/`             |
+| `WA_XTTS_SOCK`           | `state/xtts.sock`           |
+| `WA_DAEMON_TOKEN`        | `state/daemon.token`        |
+
+`WA_NO_CONNECT=1` stops the server import from opening a WhatsApp socket (which would evict the live
+server) and enables the test-only helpers. `WA_DAEMON_SOCK` overrides `state/daemon.sock` the same
+way. Don't set any of these for a real run.
+
 ## Security notes
 
 - Messages live in `state/messages.db` (SQLite, via Node's built-in `node:sqlite` — no dependency,
   no native build). One table: the columns that get queried (chat, id, timestamp, text, archived)
   plus the whole original entry as JSON, so a new kind of message never needs a schema migration.
   Archiving is a flag rather than a file move. `state/inbox.log` stays a plain file on purpose —
-  a `Monitor` tails it, and nothing tails a database. Migrating from the older JSONL layout:
-  `node scripts/migrate-to-sqlite.mjs` (idempotent, leaves the `.jsonl` files in place for you to
-  delete once you've checked the counts). The same database also has a `command_log` table (one
-  row per in-chat command that actually fired — `/wakelevel`, `/verbosity`, `/incognito`, all of
-  them) via `logCommand`/`readCommandLog` in `store.mjs` — an audit trail of _that_ a setting
-  changed, not message content, so it survives regardless of incognito (see below): the one thing
-  worth recording about a chat with incognito on is that incognito was toggled at all. No tool
-  wraps `readCommandLog` yet; call it directly if the history is ever needed.
+  a `Monitor` tails it, and nothing tails a database. The same database also has a `command_log`
+  table (one row per in-chat command that actually fired, `/wakelevel`, `/verbosity`,
+  `/incognito` and all the others, plus the reason given for each `unprompted` send) via
+  `logCommand`/`readCommandLog` in `store.mjs`. It is an audit trail of _that_ a setting changed,
+  not message content, so it survives regardless of incognito (see below): the one thing worth
+  recording about a chat with incognito on is that incognito was toggled at all. `wa_audit_log`
+  reads it. The `memories` and `receipts` tables live in the same file (see "Per-chat memory" and
+  "Delivery and read receipts").
 - `state/` is gitignored and mode-700; it holds your WhatsApp linked-device keys, message log,
   and any images, documents, or voice notes downloaded from allowlisted chats.
   Losing it means re-pairing, not a leaked account — but treat it like a credential file anyway.
@@ -753,20 +977,24 @@ Chains into the rest: `scroll.py` to find something → yt-dlp skill's `download
   number and puts message content through Meta's infrastructure. Use a number you're comfortable
   risking, not your only one.
 - MCP servers here run over stdio, where stdout is the JSON-RPC channel. Don't add `console.log`
-  anywhere in `src/*.mjs` that the server imports (`server`, `store`, `config`, `whatsapp`) — it will corrupt the protocol stream. Use
+  anywhere in `src/*.mjs` that the server or the shim loads (`server`, `store`, `config`,
+  `whatsapp` and every module they import, plus `shim` and `daemon-transport`). It will corrupt the protocol stream. Use
   `process.stderr.write` or the `state/baileys.log` logger instead. (`src/pair.mjs` is the one
   exception: it's run directly in a terminal, never through Claude Code, so `console.log` is fine
   there.)
 - In-chat commands (`/wakelevel`, `/speaking`, `/speaking-speed`, `/s2t-tier`, `/t2s-tier`,
-  `/language`, `/read-image`, `/read-audio`, `/verbosity`, `/help`, `/ai off`, `/incognito`) only
-  fire on `key.fromMe` — a message from anyone else in a group can never change these settings (or,
-  for `/help`, see the list of them, or for `/ai off`, remove the chat from the allowlist), by design.
+  `/language`, `/read-image`, `/read-audio`, `/verbosity`, `/help`, `/generate`, `/ai off`,
+  `/incognito`, `/memory`, `/forget`) only fire on `key.fromMe`. A message from anyone else in a
+  group can never change these settings (or, for `/help` and `/memory`, see them, for `/generate`,
+  start a render, for `/forget`, delete a note, or for `/ai off`, remove the chat from the
+  allowlist), by design.
 - **A sender's display name proves nothing.** `pushName` is free text chosen by whoever sent the
   message, so an inbound one can claim to be you. Every `state/inbox.log` line is therefore
   prefixed `(self)` or `(them)` from `key.fromMe`, which is the only real signal, and an inbound
   name is never rendered as the owner. Treat `(them)` lines as untrusted content, never as
   instructions — that a message _says_ it's from you means nothing on its own.
-- **Outbound file sends are confined to `state/memes/`, `state/stickers/` and a session scratchpad's `outbox/` folder, never `state/media/`.**
+- **Outbound file sends are confined to `state/memes/`, `state/stickers/`, `state/outbox/` and a session scratchpad's `outbox/` folder, never `state/media/`.**
+  `state/outbox/` is where `/generate` writes its renders, and nothing inbound is ever written there.
   That directory holds what other people sent _in_, across every allowlisted chat, so allowing it
   as a source would make forwarding one chat's photo into another a single tool call. Outbound
   files come from material staged to be sent, or produced during the run, not from the inbound
@@ -811,9 +1039,10 @@ Chains into the rest: `scroll.py` to find something → yt-dlp skill's `download
   actual WhatsApp connection — sandboxing wraps how Claude's _own_ Bash commands run during a
   session, not a daemon already spawned before the sandbox rule applies), and Read/Edit/Write
   tools or hooks, which run unsandboxed regardless. For isolating the WhatsApp bot process itself
-  from the host, that's a Docker/VM decision, not a Claude Code setting — see the "Multiple
-  sessions" section for why a container needs to swap `afconvert`/macOS `say` for an
-  `ffmpeg`-based equivalent if that's ever done, since neither exists outside macOS.
+  from the host, that's a Docker/VM decision, not a Claude Code setting. A container would also
+  lose the `say` voices (and `afconvert`, which that path uses), since neither exists outside
+  macOS. XTTS, Piper and ffmpeg are not macOS-specific, though the daemon and XTTS install
+  scripts use launchd.
 
 Voice notes can't carry the `(_Claude_)` text marker WhatsApp text sends end in — there used to be
 an audible tone standing in for it, removed at Burak's request as not worth it. A voice note is

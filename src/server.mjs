@@ -250,7 +250,7 @@ export function resolveSendable(path) {
     });
   if (!ok) {
     return {
-      error: `${path} is outside the sendable directories (state/memes, state/stickers, the session scratchpad's outbox/ folder). state/media holds what other chats sent you and is never a send source`,
+      error: `${path} is outside the sendable directories (state/memes, state/stickers, state/outbox, the session scratchpad's outbox/ folder). state/media holds what other chats sent you and is never a send source`,
     };
   }
   return { real };
@@ -2773,8 +2773,9 @@ server.registerTool(
     title: "Send a WhatsApp voice message",
     description:
       "Speak text (free, offline, no API key) and send it as a WhatsApp voice note. Use for a change " +
-      "of pace instead of always texting. Defaults to Piper's Turkish neural voice; pass a macOS " +
-      "`say` voice name (see `say -v '?'`) to use that instead, for other languages/genders. " +
+      "of pace instead of always texting. Defaults to the local XTTS voice (Piper if that service is " +
+      "down); pass a macOS `say` voice name (see `say -v '?'`) to use that instead, or `clone` for a " +
+      "cloned voice. " +
       "`language` defaults to this chat's usual language (set with /language) but can be overridden " +
       "per call — e.g. to reply in English for one message in an otherwise-Turkish chat.",
     inputSchema: {
@@ -3768,8 +3769,8 @@ server.registerTool(
     title: "Send a WhatsApp document",
     description:
       "Send a document (pdf, docx, xlsx, pptx, csv, txt, md) from a local file path to an allowlisted " +
-      "WhatsApp JID, with an optional caption. Same source rule as images: only state/memes, state/stickers " +
-      "and the session scratchpad's outbox/ folder, never state/media. The content is secret-scanned before " +
+      "WhatsApp JID, with an optional caption. Same source rule as images: only state/memes, state/stickers, " +
+      "state/outbox and the session scratchpad's outbox/ folder, never state/media. The content is secret-scanned before " +
       "sending. Refuses anything not in state/config.json's allowlist.",
     inputSchema: {
       ...TARGET_FIELDS,
