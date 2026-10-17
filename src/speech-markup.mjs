@@ -1,4 +1,4 @@
-// Delivery markup for voice notes. Piper (the default Turkish voice) has no SSML and no emotion
+// Delivery markup for voice notes. Piper (now the fallback behind XTTS) has no SSML and no emotion
 // control: punctuation and a fixed gap after each sentence are all the prosody it offers. A joke
 // lives in its timing, so this adds the two things that can be done without a new model, and does
 // them outside the model: silence of a chosen length, and a slower or faster span.
