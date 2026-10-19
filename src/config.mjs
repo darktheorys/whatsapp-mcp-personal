@@ -18,7 +18,7 @@ export const STICKERS_DIR = join(STATE_DIR, "stickers");
 export const TMP_DIR = join(STATE_DIR, "tmp");
 // Overridable so the allowlist test can run against a throwaway config instead of your real one.
 export const CONFIG_PATH = process.env.WA_CONFIG_PATH ?? join(STATE_DIR, "config.json");
-export const LOG_PATH = join(STATE_DIR, "baileys.log");
+export const LOG_PATH = process.env.WA_LOG_PATH ?? join(STATE_DIR, "baileys.log");
 // The daemon/shim pair (src/daemon.mjs, src/shim.mjs). Kept inside state/, which is mode 0700, so
 // the socket is reachable only by this user, and the token is denied to Claude Code's own tools.
 export const DAEMON_SOCK_PATH = process.env.WA_DAEMON_SOCK ?? join(STATE_DIR, "daemon.sock");

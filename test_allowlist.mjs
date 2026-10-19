@@ -28,6 +28,7 @@ process.env.WA_INBOX_PATH = join(stateDir, "inbox.log");
 process.env.WA_CONTACTS_PATH = join(stateDir, "contacts.json");
 process.env.WA_POLL_STATE_PATH = join(stateDir, "poll-state.json");
 process.env.WA_PENDING_WAKE_PATH = join(stateDir, "pending-wake.json");
+process.env.WA_LOG_PATH = join(stateDir, "baileys.log");
 
 // Imported late: CONFIG_PATH is resolved at module load, so the env var must be set first.
 const { allowedJid, hasImageDisabled, isMentionOnly } = await import("./src/config.mjs");
