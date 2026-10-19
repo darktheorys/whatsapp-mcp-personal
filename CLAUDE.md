@@ -37,7 +37,7 @@ limiting). Add new assertions to it rather than creating a second test file. It 
 new test code that needs a fresh config/db must follow the same import-order pattern. The other
 state files are redirected the same way, all into temp dirs: `WA_INBOX_PATH`, `WA_CONTACTS_PATH`,
 `WA_POLL_STATE_PATH`, `WA_PENDING_WAKE_PATH`, `WA_SCHEDULE_PATH`, `WA_POLLS_PATH`, `WA_VOICES_DIR`,
-`WA_XTTS_SOCK`, `WA_DAEMON_TOKEN` (and `WA_DAEMON_SOCK` exists for the daemon socket). A new
+`WA_XTTS_SOCK`, `WA_DAEMON_TOKEN`, `WA_LOG_PATH` (and `WA_DAEMON_SOCK` exists for the daemon socket). A new
 module-load-time state path needs its own override here too, or the test writes into the real
 `state/`. `WA_NO_CONNECT` also unlocks `setSocketForTest` and `resetSendLimitForTest`, which throw
 without it.
