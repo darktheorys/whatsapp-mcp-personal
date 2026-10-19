@@ -1473,7 +1473,7 @@ export function parseGenerateArgs(rest) {
   if (prompt.length > 600) return { error: "the prompt is too long (600 characters at most)" };
   const negative = (opts["--negative"] ?? "").trim();
   if (negative.length > 300) return { error: "the negative prompt is too long (300 characters at most)" };
-  const model = (opts["--model"] ?? "z").trim();
+  const model = (opts["--model"] ?? "qwen").trim();
   if (!/^[a-z0-9_-]{1,40}$/.test(model)) return { error: "that is not a model name" };
   const int = (flag, min, max, step = 1) => {
     if (opts[flag] === undefined) return undefined;
@@ -1620,7 +1620,7 @@ async function runGenerate(jid, key, rest, commandText) {
   const say = (text) => commandReply(jid, text, quoteOwnCommand(sock, jid, key, commandText));
   if (parsed.error === "usage") {
     return say(
-      '/generate --model z --prompt "a red fez on a desk" --negative "blurry" [--steps N --width N --height N --seed N]',
+      '/generate --model qwen --prompt "a red fez on a desk" --negative "blurry" [--steps N --width N --height N --seed N]',
     );
   }
   if (parsed.error) return say(parsed.error);
@@ -1714,7 +1714,7 @@ function helpText(jid) {
     "/read-image yes|no — keep (or stop keeping) images/documents/stickers from this chat",
     "/read-audio yes|no — keep and transcribe (or stop) voice notes from this chat",
     "/verbosity low|mid|high — how much detail Claude's replies to this chat carry",
-    '/generate --model z --prompt "..." [--negative "..."] [--steps N --width N --height N --seed N] — the server draws an image and sends it here, no session needed',
+    '/generate --model qwen --prompt "..." [--negative "..."] [--steps N --width N --height N --seed N] — the server draws an image and sends it here, no session needed',
     "/generate status [id] — progress of this chat's renders, with the latest step; /generate cancel stops them",
     "/memory — what is remembered about this chat and its people, numbered",
     "/forget N — drop memory #N from this chat",

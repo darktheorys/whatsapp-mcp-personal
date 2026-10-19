@@ -9,10 +9,10 @@ Local, on the owner's machine, no cloud calls. Two models behind one script, `sc
 
 | Mode | Model | Time on an M1 Pro | Peak memory | Good at |
 | --- | --- | --- | --- | --- |
-| `generate` | Z-Image-Turbo, 4-bit, 8 steps | about 2 minutes | 7.6 GB | pictures from a prompt, clean objects, product-style shots |
+| `generate` | Qwen-Image 2.1, 4-bit, 30 steps | 7 to 10 minutes | not measured | pictures from a prompt, clean objects, product-style shots, text in images |
 | `edit` | FLUX.1 Kontext dev, 4-bit, 20 steps | about 11 minutes | 13.8 GB | recolouring, restyling, changing the background. Adding new objects is unreliable (a requested extra object was ignored in testing) |
 
-`generate --model NAME` also takes `dev` (FLUX.1 dev, about 6 minutes), `schnell` (about 1 minute, the fallback if two minutes is too slow) and any name the owner has added, either with `install_model.py --as NAME` (recorded in `state/models.json`) or by hand in `state/imggen-models.json` (both gitignored; `--list-models` prints them all). An entry names an mflux generate command and its options (model, base_model, steps, quantize, guidance, lora_paths, lora_scales) and nothing else. Use a name from that list only when the owner or the chat asks for it, and never invent one. A model the owner calls by a person's name is that person's likeness: use it only for that person, in a chat where they asked or the owner did.
+Only `qwen` and Kontext are installed (the owner removed the others on 2026-10-19). The script works offline unless `--online` is passed, so a model that is not on disk fails at once instead of downloading. `generate --model NAME` also knows `z` (Z-Image-Turbo), `dev` (FLUX.1 dev) and `schnell`, which need the owner to install them first, and any name the owner has added, either with `install_model.py --as NAME` (recorded in `state/models.json`) or by hand in `state/imggen-models.json` (both gitignored; `--list-models` prints them all). An entry names an mflux generate command and its options (model, base_model, steps, quantize, guidance, lora_paths, lora_scales) and nothing else. Use a name from that list only when the owner or the chat asks for it, and never invent one. A model the owner calls by a person's name is that person's likeness: use it only for that person, in a chat where they asked or the owner did.
 
 ## How a request runs
 
@@ -57,4 +57,4 @@ state/imggen-venv/bin/pip install mflux
 printf '%s' '<huggingface token>' > state/hf-token && chmod 600 state/hf-token
 ```
 
-The Kontext weights are gated on Hugging Face, so the owner's account must have accepted the model's licence. The first run of each mode downloads the weights (roughly 10 GB for Z-Image-Turbo, about 30 GB for Kontext), which takes several minutes. Keep the token out of messages, logs and commits.
+The Kontext weights are gated on Hugging Face, so the owner's account must have accepted the model's licence. A fresh install downloads the weights once with `--online` (about 9 GB for Qwen-Image, about 30 GB for Kontext), which takes several minutes. Keep the token out of messages, logs and commits.

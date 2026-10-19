@@ -214,7 +214,7 @@ the script itself and no session is involved. Editing a photo is only available 
 
 | Mode       | Model                         | Time on an M1 Pro | Peak memory | Use it for                                        |
 | ---------- | ----------------------------- | ----------------- | ----------- | ------------------------------------------------- |
-| `generate` | Z-Image-Turbo, 4-bit          | about 2 minutes   | 7.6 GB      | pictures from a prompt, stickers, product shots   |
+| `generate` | Qwen-Image 2.1, 4-bit         | 7 to 10 minutes   | not measured | pictures from a prompt, stickers, product shots   |
 | `generate --model dev` | FLUX.1 dev, 4-bit | about 6 minutes   | 13.7 GB     | photorealistic scenes                             |
 | `edit`     | FLUX.1 Kontext dev, 4-bit     | about 11 minutes  | 13.8 GB     | recolouring and restyling a photo                 |
 
@@ -598,7 +598,7 @@ and the command never reaches the wake log.
 
 ```
 /generate a red fez on a desk
-/generate --model z --prompt "a red fez on a desk" --negative "blurry, text" --steps 8 --width 768 --height 768 --seed 7
+/generate --model qwen --prompt "a red fez on a desk" --negative "blurry, text" --steps 30 --width 768 --height 768 --seed 7
 ```
 
 `--model` is a name from `python3 scripts/imggen.py --list-models` (default `z`). `--steps` is 1 to 60,
