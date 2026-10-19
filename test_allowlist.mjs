@@ -818,7 +818,7 @@ assert.equal(scanDocument(zipOf("word/document.xml", "<w:t>hello</w:t>"), ".docx
   assert.deepEqual(
     parseGenerateArgs("a red fez on a desk"),
     {
-      model: "z",
+      model: "qwen",
       prompt: "a red fez on a desk",
       negative: "",
       steps: undefined,

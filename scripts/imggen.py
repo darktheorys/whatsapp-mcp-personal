@@ -4,8 +4,8 @@
     python3 scripts/imggen.py generate --prompt "a red fez on a desk" --out <scratchpad>/outbox/fez.png
     python3 scripts/imggen.py edit --image <photo> --prompt "make the fez blue" --out <scratchpad>/outbox/fez2.png
 
-generate  Z-Image-Turbo by default, 4-bit, 8 steps, 768px. About 2 minutes on an M1 Pro, 7.6 GB peak.
-          --model picks another: dev, schnell, or a name from state/imggen-models.json (--list-models).
+generate  Qwen-Image 2.1 by default, 4-bit, 30 steps, 768px. --model picks another: z, dev, schnell,
+          or a name from state/imggen-models.json (--list-models).
 edit      FLUX.1 Kontext dev, 4-bit, 20 steps. About 11 minutes, 13.8 GB peak. Colour and style changes work
           well, adding new objects is unreliable.
 
@@ -20,6 +20,8 @@ path, for runs from the terminal.
 
 The Hugging Face token is read from state/hf-token and passed to the child process through its environment
 only. It is never printed or logged. Output goes to state/imggen.log (gitignored), progress bars off.
+Nothing is downloaded unless --online is passed, so picking a model that is not on disk fails at once instead
+of starting a 30 GB fetch.
 Prints one JSON line: {"ok": true, "out": ..., "seconds": ...} or {"ok": false, "error": ...}.
 """
 
@@ -44,6 +46,7 @@ TMP_ROOT = Path(f"/private/tmp/claude-{os.getuid()}")
 OUTBOX = REPO / "state" / "outbox"
 MODELS_FILE = REPO / "state" / "imggen-models.json"
 LEDGER_FILE = REPO / "state" / "models.json"
+DEFAULT_MODEL = "qwen"
 
 # Models `generate` can use, by name (--model NAME). More can be added without touching this file: put
 # them in state/imggen-models.json (gitignored, hand-edited), or install them with
@@ -59,6 +62,11 @@ LEDGER_FILE = REPO / "state" / "models.json"
 # used to run something else. `model` is a Hugging Face repo or a local folder, `base_model` says which
 # architecture a third-party model is built on (schnell, dev, ...), see install_model.py for fetching one.
 BUILTIN_MODELS = {
+    "qwen": {
+        "command": "mflux-generate-qwen-2.1",
+        "model": "mlx-community/Qwen-Image-2.1-mflux-q4",
+        "steps": 30,
+    },
     "z": {"command": "mflux-generate-z-image-turbo", "quantize": 4, "steps": 8},
     "dev": {"command": "mflux-generate", "model": "dev", "quantize": 4, "steps": 20},
     "schnell": {
@@ -235,8 +243,8 @@ def main():
     p.add_argument("--image", help="source photo for edit")
     p.add_argument(
         "--model",
-        default="z",
-        help="generate only: a model name, z (default), dev, schnell, or one from "
+        default=DEFAULT_MODEL,
+        help="generate only: a model name, qwen (default), z, dev, schnell, or one from "
         "state/imggen-models.json. See --list-models.",
     )
     p.add_argument("--list-models", action="store_true", help="print the model names")
@@ -260,6 +268,9 @@ def main():
     )
     p.add_argument("--seed", type=int, default=int(time.time()) % 100000)
     p.add_argument(
+        "--online", action="store_true", help="allow downloading a missing model"
+    )
+    p.add_argument(
         "--any-out",
         action="store_true",
         help="allow --out outside state/outbox/ and a scratchpad outbox/ (terminal use)",
@@ -282,7 +293,7 @@ def main():
         p.error("mode, --prompt and --out are required (or --list-models)")
     if a.mode == "generate" and a.model not in models:
         fail(f"unknown model '{a.model}'. Known: {', '.join(sorted(models))}")
-    if a.mode == "edit" and a.model != "z":
+    if a.mode == "edit" and a.model != DEFAULT_MODEL:
         fail("edit always uses Kontext, --model applies to generate only")
 
     out = check_out(a.out, a.any_out)
@@ -324,6 +335,8 @@ def main():
     env = dict(os.environ)
     env["HF_TOKEN"] = TOKEN_FILE.read_text().strip()
     env["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
+    if not a.online:
+        env["HF_HUB_OFFLINE"] = "1"
 
     LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
     lock = open(LOCK_FILE, "w")
