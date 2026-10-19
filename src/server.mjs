@@ -2334,7 +2334,8 @@ async function handlePollVoteMessage(waMessage, pollVote) {
 async function handleReceipt({ key, status, who }) {
   const jid = allowedJid(key.remoteJid, key.remoteJidAlt);
   if (!jid || isIncognito(jid) || !key.id || !findMessage(jid, key.id)) return;
-  const reader = who ? await resolveSender(who) : "";
+  // Normalised: a receipt names the reader's device (number:0@...), and the same person must count once.
+  const reader = who ? jidNormalizedUser(await resolveSender(who)) : "";
   recordReceipt(jid, key.id, jid.endsWith("@g.us") ? reader : "", status);
 }
 
