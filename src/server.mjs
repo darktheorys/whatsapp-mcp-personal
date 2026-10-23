@@ -3,6 +3,7 @@ import { randomBytes } from "node:crypto";
 import {
   copyFileSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   readdirSync,
   mkdtempSync,
@@ -367,8 +368,10 @@ export function speechEndSeconds(words, text) {
 // bunun") and a dropped word both lower it. 1 is exact, an empty transcript is 0.
 // Numbers are left out on both sides: the text spells them ("iki bin yirmi iki", "yüzde seksen")
 // and whisper writes digits ("2022", "%80"), which are the same words, not a bad take.
+// Whole words only, with the few endings a spelled number takes ("sekseni", "yüzde", "ikinci"):
+// a bare prefix match also swallowed "önce", "önemli", "onlar" and "birlikte".
 const NUMBER_WORD =
-  /^(sifir|bir|iki|uc|dort|bes|alti|yedi|sekiz|dokuz|on|yirmi|otuz|kirk|elli|altmis|yetmis|seksen|doksan|yuz|yuzde|bin|milyon|milyar)/;
+  /^(sifir|bir|iki|uc|dort|bes|alti|yedi|sekiz|dokuz|on|yirmi|otuz|kirk|elli|altmis|yetmis|seksen|doksan|yuz|yuzde|bin|milyon|milyar)(i|si|de|da|nci|inci|uncu)?$/;
 const isNumberish = (k) => /\d/.test(k) || NUMBER_WORD.test(k);
 export function speechMatchScore(words, text) {
   const want = text
@@ -468,7 +471,15 @@ async function renderXttsChecked(request, lang, verify) {
   let attempts = 0;
   for (let take = 1; take <= (verify ? MAX_TAKES : 1); take++) {
     const file = take === 1 ? request.outWav : `${request.outWav}.take${take}.wav`;
-    await xttsRender({ ...request, outWav: file });
+    try {
+      await xttsRender({ ...request, outWav: file });
+    } catch (err) {
+      // The first take failing is a real failure. A retry failing is not: there is already a usable
+      // take, and losing it would fail the whole note (or send it to Piper) over an optional redo.
+      if (take === 1) throw err;
+      rmSync(file, { force: true });
+      break;
+    }
     attempts = take;
     const score = await trimTrailingBabble(file, request.text, lang);
     if (best === null || (score ?? 1) > (best.score ?? 1)) {
@@ -522,8 +533,14 @@ export async function synthWav(
     report.push({ text: request.text, ...result });
   };
   if (segments.some((s) => s.voice)) {
+    const spanSegments = split ? splitSentences(segments) : segments;
+    if (spanSegments.length > 2 * MAX_SEGMENTS) {
+      throw new Error(
+        `the text has ${spanSegments.length} parts once split into sentences, split it into shorter notes`,
+      );
+    }
     await joinSegments(
-      split ? splitSentences(segments) : segments,
+      spanSegments,
       XTTS_SAMPLE_RATE,
       async (segment, file) => {
         const span = segment.voice;
@@ -549,6 +566,11 @@ export async function synthWav(
     return report;
   }
   const xttsSegments = split ? splitSentences(segments) : segments;
+  // The part limit is checked before sentences are split, so it is checked again here: a single
+  // very long text would otherwise become dozens of sentences, each with up to three takes.
+  if (xttsSegments.length > 2 * MAX_SEGMENTS) {
+    throw new Error(`the text has ${xttsSegments.length} parts once split into sentences, split it into shorter notes`);
+  }
   try {
     await joinSegments(
       xttsSegments,
@@ -574,6 +596,7 @@ export async function synthWav(
       throw new Error(`the cloned voice is unavailable (${err.message}), not falling back to another voice`);
     }
     logger.warn({ err: String(err.message ?? err) }, "xtts unavailable, using piper for this voice note");
+    report.length = 0; // whatever XTTS managed before failing is not in the note that goes out
   }
   await joinSegments(
     segments,
@@ -3146,16 +3169,22 @@ server.registerTool(
             voices: job.resolved.voices,
           },
         );
-        copyFileSync(tmp, out);
+        // Never write through something that is not a plain file (a symlink planted in the outbox),
+        // and only put the file in place once it is known to be readable audio.
+        if (existsSync(out) && !lstatSync(out).isFile()) throw new Error(`${out} exists and is not a regular file`);
+        const seconds = Number(
+          execFileSync("ffprobe", ["-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", tmp], {
+            encoding: "utf8",
+          }).trim(),
+        );
+        const part = `${out}.part`;
+        copyFileSync(tmp, part);
+        renameSync(part, out);
         const scores = report.map((r) => r.score).filter((x) => typeof x === "number");
         results.push({
           name: job.name,
           path: out,
-          seconds: Number(
-            execFileSync("ffprobe", ["-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", out], {
-              encoding: "utf8",
-            }).trim(),
-          ),
+          seconds,
           score: scores.length ? Math.round(Math.min(...scores) * 100) / 100 : null,
           takes: report.reduce((n, r) => n + r.takes, 0),
         });
