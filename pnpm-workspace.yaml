@@ -30,3 +30,19 @@ minimumReleaseAgeExclude:
   # (not a 0-day release), so the risk profile is much milder than the entries above.
   - tinypool
 
+# Security floors for transitive dependencies (pnpm audit, 2026-10-23). Each is the oldest patched
+# release that has already cleared the 30-day wait, so none of these needed an exception above.
+# Fixes that only exist in younger releases are left out on purpose (MCP SDK >=1.31, hono >=4.13.11,
+# ip-address >=10.7.4, sharp >=0.35.5): the SDK and hono ones are in HTTP and OAuth code this server
+# never runs (it speaks MCP over stdio or a unix socket), and they get picked up once they are 30
+# days old. Drop an entry here when the parent package ships the fixed version itself.
+overrides:
+  proxy-addr: 2.0.8
+  fast-uri: 3.1.8
+  ip-address: 10.7.2
+  qs: 6.16.0
+  hono: 4.13.8
+  "@hono/node-server": 1.19.17
+  music-metadata: 11.16.0
+  sharp: 0.35.4
+
