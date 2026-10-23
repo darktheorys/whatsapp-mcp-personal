@@ -1816,9 +1816,9 @@ assert.deepEqual(unansweredChats([STATS], 1 * H), [], "answering it takes it off
   assert.deepEqual(
     parseSpeechMarkup("Merhaba [pause 700] dünya"),
     [
-      { type: "speech", text: "Merhaba", scale: 1 },
+      { type: "speech", text: "Merhaba", scale: 1, voice: null },
       { type: "pause", ms: 700 },
-      { type: "speech", text: "dünya", scale: 1 },
+      { type: "speech", text: "dünya", scale: 1, voice: null },
     ],
     "an explicit pause splits the speech",
   );
@@ -1850,6 +1850,31 @@ assert.deepEqual(unansweredChats([STATS], 1 * H), [], "answering it takes it off
     parseSpeechMarkup("[slow]tamam[/slow]. [pause 400] .").map((p) => p.type),
     ["speech"],
     "a chunk of punctuation alone is dropped rather than handed to Piper, which fails on it",
+  );
+  // Several voices in one note: [voice NAME] spans, a clone by name or a macOS voice as say:NAME.
+  const dialogue = parseSpeechMarkup(
+    "Bir gün [voice kral]Üşümüyor musun?[/voice] [pause 400] [voice say:Cem (Enhanced)]Alışığım[/voice] son",
+  );
+  assert.deepEqual(
+    dialogue.map((p) => (p.type === "speech" ? `${p.voice}:${p.text}` : "pause")),
+    ["null:Bir gün", "kral:Üşümüyor musun?", "pause", "say:Cem (Enhanced):Alışığım", "null:son"],
+    "each span is read in its own voice and the rest in the note's voice",
+  );
+  assert.equal(
+    parseSpeechMarkup("[voice GOLLUM]bizim[/voice]")[0].voice,
+    "gollum",
+    "a clone name is lowercased, as voices.json keys are",
+  );
+  assert.equal(parseSpeechMarkup("[voice a]bir iki").at(-1).voice, "a", "an unclosed span runs to the end");
+  assert.equal(
+    stripSpeechMarkup("[voice kral]Üşümüyor musun?[/voice] dedi"),
+    "Üşümüyor musun? dedi",
+    "voice tags are stripped like the other markup",
+  );
+  assert.match(
+    parseSpeechMarkup("[voice ../etc/x]bu")[0].text,
+    /\[voice/,
+    "a name that is not a voice name is not a tag, so the caller can refuse it",
   );
 }
 
@@ -1911,6 +1936,43 @@ assert.deepEqual(unansweredChats([STATS], 1 * H), [], "answering it takes it off
     "a reference path that leaves the voices directory is refused",
   );
 
+  // [voice NAME] spans in one note get the same per-chat check as a whole-note clone, before any send.
+  const { resolveVoiceSpans } = await import("./src/server.mjs");
+  writeFileSync(
+    join(dir, "voices.json"),
+    JSON.stringify({
+      alice: { ref: "alice.wav", allowed_jids: ["31600000000@s.whatsapp.net"] },
+      anyone: { ref: "alice.wav", allowed_jids: ["*"] },
+    }),
+  );
+  const dm = "31600000000@s.whatsapp.net";
+  const group = "120363000000000001@g.us";
+  assert.ok(
+    resolveVoiceSpans("[voice alice]selam[/voice] [voice anyone]naber[/voice]", dm).voices.alice,
+    "spans with voices allowed in the chat resolve to their clips",
+  );
+  assert.match(
+    resolveVoiceSpans("[voice anyone]naber[/voice] [voice alice]selam[/voice]", group).error,
+    /not allowed/,
+    "one span with a voice not allowed in the chat refuses the whole note",
+  );
+  assert.match(
+    resolveVoiceSpans("[voice nobody]x[/voice]", dm).error,
+    /no cloned voice/,
+    "an unknown voice is refused",
+  );
+  assert.match(
+    resolveVoiceSpans("[voice ../x]bu[/voice]", dm).error,
+    /malformed/,
+    "a malformed tag is refused, not read aloud",
+  );
+  assert.deepEqual(
+    resolveVoiceSpans("[voice say:Yelda]merhaba[/voice]", group).voices,
+    {},
+    "a macOS voice needs no clone",
+  );
+  assert.deepEqual(resolveVoiceSpans("düz metin", group).voices, {}, "plain text has no spans");
+
   // The client against a fake service: it sends the token, a refusal rejects, a hang times out.
   const sockPath = process.env.WA_XTTS_SOCK;
   let seen = null;
@@ -1949,6 +2011,18 @@ assert.deepEqual(unansweredChats([STATS], 1 * H), [], "answering it takes it off
     synthWav("merhaba", undefined, 1, "tr", join(dir, "out.wav"), { clone: { ref: join(dir, "alice.wav") } }),
     /not falling back to another voice/,
     "a clone with the service down fails instead of speaking in a different voice",
+  );
+  // A voice span renders only with a clip resolveVoiceSpans approved, and never falls back to Piper.
+  await assert.rejects(
+    synthWav("[voice ghost]merhaba[/voice]", undefined, 1, "tr", join(dir, "out.wav"), { voices: {} }),
+    /not approved for this chat/,
+    "a span whose voice was not approved for the chat is refused",
+  );
+  await assert.rejects(
+    synthWav("[voice alice]merhaba[/voice]", undefined, 1, "tr", join(dir, "out.wav"), {
+      voices: { alice: join(dir, "alice.wav") },
+    }),
+    "a multi-voice note with the service down fails rather than switching engines",
   );
 }
 

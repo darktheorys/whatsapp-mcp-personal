@@ -88,8 +88,9 @@ detail below. The rest, one line each:
   any chat its `allowed_jids` does not list (`"*"` there means any allowlisted chat, opt-in per
   voice), and a reference clip outside `state/voices/`.
   `defaultCloneFor` picks a chat's `default_jids` voice.
-- **`speech-markup.mjs`**: `[pause]`, `[slow]`, `[fast]` and ellipsis beats in voice-note text,
-  parsed into segments that `server.mjs` renders and joins with real silence.
+- **`speech-markup.mjs`**: `[pause]`, `[slow]`, `[fast]`, `[voice NAME]` spans and ellipsis beats in
+  voice-note text, parsed into segments that `server.mjs` renders (each in its own voice) and joins
+  with real silence. `resolveVoiceSpans` checks every clone in a span against the chat first.
 - **`doc-scan.mjs`**: pulls text out of pdf and office files for the outbound secret scan. Fails
   closed: anything it cannot read throws and the send is refused.
 - **`pair.mjs`**: one-time pairing, see the end of this section.

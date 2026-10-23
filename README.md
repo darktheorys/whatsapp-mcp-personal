@@ -342,8 +342,11 @@ Both directions run entirely offline, no API keys:
 
   Voice text can carry delivery markup (`src/speech-markup.mjs`): `[pause]` or `[pause 800]` for a
   silence (500 ms by default, at most 3 s), `[slow]...[/slow]` and `[fast]...[/fast]` for a drawn-out
-  or rushed span, and `...` or `…` for a short beat. It only means something in a voice note, a text
-  message would show the brackets.
+  or rushed span, and `...` or `…` for a short beat. `[voice NAME]...[/voice]` reads a span in a
+  cloned voice and `[voice say:NAME]...[/voice]` in a macOS one, so a dialogue fits in one note. Every
+  clone named in a span is checked against the chat like a whole-note `clone`, before anything is
+  sent, and a note with spans never falls back to Piper. It only means something in a voice note, a
+  text message would show the brackets.
 - **Listening** — every incoming voice note is downloaded and piped through
   [`whisper.cpp`](https://github.com/ggerganov/whisper.cpp) (`brew install whisper-cpp`) using the
   model for the current `/s2t-tier` (see below; `ggml-small.bin` by default, from
