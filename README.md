@@ -411,9 +411,9 @@ An inbound message containing a URL has the page's title and site appended to it
 text is appended to an image:
 
 ```
-dayı şuna bak https://x.com/sleimmm/status/2099988085198970951?s=48
-[link: x.com] @sleimmm
-Napolyon itüye gelemiyor [video]
+şuna bak https://x.com/example/status/1234567890
+[link: x.com] @example
+post text from the page [video]
 ```
 
 So a history full of opaque `x.com/.../status/2099…` strings becomes searchable by what the links
@@ -769,7 +769,7 @@ tags and numbers on the `no_mention_jids` list in `state/config.json` are refuse
 ## YouTube / video tools
 
 There is no `yt-dlp-mcp` (or any other) MCP server for video search/download wired into this repo,
-and per Burak (2026-08-16) there will not be one — don't reach for one or suggest connecting one.
+and by owner decision (2026-08-16) there will not be one — don't reach for one or suggest connecting one.
 The working path, used throughout this repo's actual sessions, is entirely local:
 
 - **Finding a video on YouTube specifically**: `.claude/skills/yt-dlp/scripts/search_videos.py "query" --limit N`
@@ -779,9 +779,8 @@ The working path, used throughout this repo's actual sessions, is entirely local
   with duration up front, so filtering for "kısa" (short) is a glance at the output instead of
   downloading a candidate to find out it's a 6-minute compilation. Pass `--json` for structured
   output. `WebSearch` is still the better first move when the query is about a _scene/quote_ that
-  might live on YouTube, TikTok, or elsewhere and you don't know which yet (see
-  [[whatsapp-yt-dlp-meme-fallback]] for the search patterns that have worked for Turkish meme/scene
-  clips specifically) — the two are complementary, not redundant.
+  might live on YouTube, TikTok, or elsewhere and you don't know which yet — the two are
+  complementary, not redundant.
 - **Metadata without downloading, given a URL already in hand**:
   `.claude/skills/yt-dlp/scripts/video_info.py <url>` — same idea as above, for a single known URL
   rather than a fresh search. A fixed-argument wrapper, not a raw `yt-dlp` call — raw `yt-dlp` is

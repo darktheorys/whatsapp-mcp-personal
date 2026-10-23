@@ -512,9 +512,9 @@ export function chatStats(jid, sinceMs = null, untilMs = null) {
 //
 // `name` is pushName — free text the sender chooses — so it is reported as a label and never used
 // as an identity. The jid is the identity.
-// WhatsApp addresses the same person differently per linked device: `491781596339@s.whatsapp.net`
-// and `491781596339:0@s.whatsapp.net` are one human, and counting them separately split a real
-// group member into a 212-message participant and a 1-message ghost.
+// WhatsApp addresses the same person differently per linked device: `4915100000000@s.whatsapp.net`
+// and `4915100000000:0@s.whatsapp.net` are one human, and counting them separately split one group
+// member into a busy participant and a one-message ghost.
 //
 // Done with a local replace rather than Baileys' jidNormalizedUser on purpose: this module has no
 // Baileys import and should not gain one — pulling the whole protocol library into the store to
