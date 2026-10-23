@@ -34,6 +34,17 @@ const TOKEN = new RegExp(
 // empty of speech unless the input was. `voice` is null outside a [voice] span, otherwise the name
 // as written ("gollum" or "say:Yelda").
 export function parseSpeechMarkup(input) {
+  return parseAll(input).slice(0, MAX_SEGMENTS);
+}
+
+// How many segments the text really has. Past MAX_SEGMENTS parseSpeechMarkup drops the rest, which
+// is fine for a stray run of beats but would cut the end off a dialogue, so callers refuse instead.
+export function speechSegmentCount(input) {
+  return parseAll(input).length;
+}
+export { MAX_SEGMENTS };
+
+function parseAll(input) {
   const text = String(input ?? "").replace(/…|\.{3,}/g, ` [pause ${ELLIPSIS_PAUSE_MS}] `);
   const parts = [];
   let scale = 1;
@@ -55,7 +66,8 @@ export function parseSpeechMarkup(input) {
     } else if (match[2]) {
       scale = SCALES[match[2].toLowerCase()];
     } else if (match[4]) {
-      voice = match[4].startsWith("say:") ? match[4] : match[4].toLowerCase();
+      // A clone name is lowercased like voices.json keys, a macOS voice keeps its case ("Yelda").
+      voice = /^say:/i.test(match[4]) ? `say:${match[4].slice(4)}` : match[4].toLowerCase();
     } else if (token === "[/voice]") {
       voice = null;
     } else {
@@ -73,7 +85,7 @@ export function parseSpeechMarkup(input) {
   // A pause with nothing to separate it from is silence at the very start or end of the note.
   while (merged[0]?.type === "pause") merged.shift();
   while (merged[merged.length - 1]?.type === "pause") merged.pop();
-  return merged.slice(0, MAX_SEGMENTS);
+  return merged;
 }
 
 // Plain spoken text with the markup removed, for engines that cannot use it and for anywhere the
