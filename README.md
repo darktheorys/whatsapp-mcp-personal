@@ -744,6 +744,7 @@ Every send tool also takes `reply_to` and `unprompted`, and with `reply_to` the 
 | `wa_send_document`  | `{ to?, path, caption?, fileName? }`: sends a pdf/docx/xlsx/pptx/csv/txt/md from a sendable directory only. Every format is secret-scanned, pdf and office files after decompressing them. |
 | `wa_send_voice`     | `{ to?, text, voice?, language?, rate?, clone? }`: speaks `text` and sends it as a voice note. XTTS-v2 by default, falling back to Piper; a macOS `say` voice with `voice`; a cloned voice with `clone`, only in the chats that voice allows and never with a fallback. |
 | `wa_send_audio`     | `{ to?, path }`: sends an already-made audio file as a voice note.                                                                          |
+| `wa_render_voice`   | `{ text, name, voice?, clone?, language?, rate? }`: speaks `text` into `state/outbox/NAME.wav` without sending, for narration under a video (see the sound-design skill). Only clones allowed in every chat (`"*"`), since a file can go anywhere. |
 | `wa_send_poll`      | `{ to?, name, values, selectableCount? }`: creates a poll. Returns a message id; votes can only be read back for polls sent this way.      |
 | `wa_send_location`  | `{ to?, latitude, longitude, name?, address? }`: sends a map pin.                                                                          |
 | `wa_send_contact`   | `{ to?, name, phone }`: sends a contact card, only for a number that has written in the target chat or is the owner's, so a number from another chat is never passed on. |
