@@ -77,6 +77,12 @@ reveal, image and closing, lines per slide with an optional other voice and effe
 
 `check_av.py MEDIA --script lines.txt` is the before-sending check on its own, for anything else.
 
+Format: 16:9 (960x540) by default, or vertical 9:16 (720x1280, for reels and stories) with
+`"aspect": "9:16"` in the storyboard. `pps.py build NAME.json --aspect 16:9` (or `9:16`) overrides
+it for one build and writes `NAME-16x9.mp4` / `NAME-9x16.mp4`, so both versions come from the same
+voice files. A vertical deck uses larger text and wraps long lines instead of shrinking them.
+`"lang": "en"` turns the opening "sound on" line English.
+
 Do not ship the same deck every time (owner, 2026-10-23: "the style is good, but colours, sizes
 etc. can change"). `pps.py` gives every slide its own look, picked from the deck's name: gradient
 direction, radial, stripes or checker backgrounds, palette, text size, left or centred text, WordArt

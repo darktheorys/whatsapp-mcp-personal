@@ -5,6 +5,8 @@ before-sending check.
 
     pps.py lines STORYBOARD.json    # prints the `lines` list to pass to wa_render_voice
     pps.py build STORYBOARD.json    # after rendering: slides, timeline, mix, video, check report
+    pps.py build STORYBOARD.json --aspect 16:9   # or 9:16: override the storyboard's format; the
+                                                 # video is then <name>-16x9.mp4 / <name>-9x16.mp4
 
 The voice render is the one step a script cannot do (it goes through the WhatsApp server's
 wa_render_voice tool). Line files are state/outbox/<name>-<slide>-<line>.wav.
@@ -14,6 +16,8 @@ STORYBOARD.json:
   "name": "lira",                                  # file prefix, lowercase
   "voice": "6",                                    # default narrator voice (an approved clone)
   "bed": {"mood": "happy", "bpm": 108},
+  "aspect": "9:16",                                # optional, default 16:9 (9:16 is 720x1280)
+  "lang": "en",                                    # optional, language of the "sound on" line
   "slides": [
     {"style": "title", "title": "LİRAMIZ NEDEN ERİYOR?", "sub": "a smaller line",
      "lines": ["Sevgili dostlar, ..."]},
@@ -50,6 +54,30 @@ except ImportError:
     sys.exit(1)
 
 W, H = 960, 540
+# Slide layouts are written for a 540-high frame. A vertical (9:16) deck draws the same layout
+# into a 720x1280 frame, stretched by YS and centred by YOFF, so the text sits mid-screen where a
+# phone shows it. set_aspect() switches these.
+YS, YOFF, FS = 1.0, 0, 1.0  # FS scales text sizes
+SOUND_ON = {
+    "tr": "!!! BİLGİSAYARINIZIN SESİNİ AÇINIZ !!!",
+    "en": "!!! TURN YOUR SOUND ON !!!",
+}
+
+
+def set_aspect(aspect):
+    global W, H, YS, YOFF, FS
+    if aspect == "9:16":
+        W, H, YS, FS = 720, 1280, 1.5, 1.5
+        YOFF = int((H - 540 * YS) / 2)
+    elif aspect != "16:9":
+        raise SystemExit(json.dumps({"ok": False, "error": "aspect is 16:9 or 9:16"}))
+
+
+def Y(y):
+    """A y position from the 540-high layout, placed in the current frame."""
+    return int(YOFF + y * YS)
+
+
 FONTS = Path("/System/Library/Fonts/Supplemental")
 COMIC = str(FONTS / "Comic Sans MS Bold.ttf")
 IMPACT = str(FONTS / "Impact.ttf")
@@ -100,7 +128,8 @@ def lerp(a, b, k):
 def background(kind, top, bottom):
     """The slide's backdrop. pps files were never uniform: plain gradients, but also stripes,
     checkerboards and radial glows, often all in one deck."""
-    img = Image.new("RGB", (W, H), bottom)  # the outer colour fills whatever a pattern leaves open
+    # The outer colour fills whatever a pattern leaves open.
+    img = Image.new("RGB", (W, H), bottom)
     d = ImageDraw.Draw(img)
     if kind == "radial":
         cx, cy, far = W / 2, H / 2, math.hypot(W / 2, H / 2)
@@ -151,7 +180,34 @@ WORDART_SCHEMES = {
 }
 
 
+def wrap(d, text, font_path, size, max_w):
+    """Greedy word wrap at `size`. Only a vertical deck wraps: a 16:9 deck keeps one line per
+    entry and shrinks it instead, the way the old slides looked."""
+    if FS == 1.0:
+        return [text]
+    font = ImageFont.truetype(font_path, size)
+    rows, row = [], ""
+    for word in text.split():
+        cand = f"{row} {word}".strip()
+        if row and d.textlength(cand, font=font) > max_w:
+            rows.append(row)
+            row = word
+        else:
+            row = cand
+    return rows + ([row] if row else [])
+
+
 def wordart(d, text, y, size, wave=12, scheme="rainbow", tilt=0.0):
+    size = int(size * FS)
+    rows = wrap(d, text, IMPACT, size, W - 60)
+    for row in rows[:-1]:
+        _wordart_row(d, row, y, size, wave, scheme, tilt)
+        y += int(size * 1.1)
+    size = _wordart_row(d, rows[-1], y, size, wave, scheme, tilt)
+    return y + int(size * 1.25)  # the first free y below the art
+
+
+def _wordart_row(d, text, y, size, wave, scheme, tilt):
     font, size = fit(d, text, IMPACT, size, W - 60)
     colors = WORDART_SCHEMES.get(scheme, RAINBOW)
     widths = [d.textlength(ch, font=font) for ch in text]
@@ -172,7 +228,9 @@ def wordart(d, text, y, size, wave=12, scheme="rainbow", tilt=0.0):
 
 
 def body(d, lines, y, size=40, fill=(255, 255, 255), stroke=(0, 0, 90), align="center"):
-    for line in lines:
+    size = int(size * FS)
+    rows = [row for entry in lines for row in wrap(d, entry, COMIC, size, W - 100)]
+    for line in rows:
         font, s = fit(d, line, COMIC, size, W - 100)
         w = d.textlength(line, font=font)
         x = {"left": 60, "right": W - 60 - w}.get(align, (W - w) / 2)
@@ -186,6 +244,7 @@ def decor(d, kind, n, seed, avoid=(170, 470)):
     if kind == "none":
         return
     r = random.Random(seed)
+    avoid = (Y(avoid[0]), Y(avoid[1]))
     for _ in range(n):
         x, y, s = r.randint(10, W - 10), r.randint(10, H - 10), r.randint(6, 16)
         if avoid[0] < y < avoid[1] and 60 < x < W - 60:
@@ -258,7 +317,7 @@ def look_for(slide, seed):
     return look
 
 
-def draw_slide(slide, i, out, seed="deck"):
+def draw_slide(slide, i, out, seed="deck", lang="tr"):
     if slide.get("style") == "image":
         Image.open(slide["image"]).convert("RGB").resize((W, H)).save(out)
         return
@@ -267,33 +326,35 @@ def draw_slide(slide, i, out, seed="deck"):
     img = background(lk["bg"], top, bottom)
     d = ImageDraw.Draw(img, "RGBA")
     if lk["panel"]:  # a translucent box behind the text, the "text frame" look
-        d.rounded_rectangle([40, 120, W - 40, H - 40], radius=24, fill=(0, 0, 0, 90))
+        d.rounded_rectangle([40, Y(120), W - 40, Y(500)], radius=24, fill=(0, 0, 0, 90))
     k, style = lk["scale"], slide.get("style", "text")
     art = dict(scheme=lk["scheme"], wave=lk["wave"], tilt=lk["tilt"])
     if style == "title":
         decor(d, lk["decor"], 16, i)
-        wordart(d, slide["title"], 130, int(72 * k), **art)
+        y = wordart(d, slide["title"], Y(130), int(72 * k), **art)
         if slide.get("sub"):
-            body(d, [slide["sub"]], 290, int(30 * k), lk["head"], (120, 0, 0))
+            y = body(
+                d, [slide["sub"]], max(y, Y(290)), int(30 * k), lk["head"], (120, 0, 0)
+            )
         body(
             d,
-            ["!!! BİLGİSAYARINIZIN SESİNİ AÇINIZ !!!"],
-            410,
+            [SOUND_ON.get(lang, SOUND_ON["tr"])],
+            max(y + 20, Y(410)),
             28,
             (255, 255, 255),
             (160, 0, 0),
         )
     elif style in ("wordart", "reveal", "closing"):
         decor(d, lk["decor"], 20 if style != "wordart" else 10, i)
-        y = 90 if slide.get("body") else 190
-        wordart(
+        y = Y(90 if slide.get("body") else 190)
+        y = wordart(
             d, slide["title"], y, int((80 if style == "wordart" else 66) * k), **art
         )
         if slide.get("body"):
-            body(
+            y = body(
                 d,
                 slide["body"],
-                270,
+                max(y, Y(270)),
                 int(38 * k),
                 stroke=lk["stroke"],
                 align=lk["align"],
@@ -302,12 +363,12 @@ def draw_slide(slide, i, out, seed="deck"):
             body(
                 d,
                 [slide["sub"]],
-                360 if style == "closing" else 420,
+                max(y + 20, Y(360 if style == "closing" else 420)),
                 32,
                 (255, 255, 200),
             )
     else:
-        y = 50
+        y = Y(50)
         if slide.get("heading"):
             y = (
                 body(
@@ -318,7 +379,7 @@ def draw_slide(slide, i, out, seed="deck"):
         y = body(
             d,
             slide.get("body", []),
-            max(y, 140),
+            max(y, Y(140)),
             int(40 * k),
             stroke=lk["stroke"],
             align=lk["align"],
@@ -327,7 +388,7 @@ def draw_slide(slide, i, out, seed="deck"):
             body(
                 d,
                 [slide["note"]],
-                max(y + 30, 400),
+                max(y + 30, Y(400)),
                 32,
                 (255, 230, 200),
                 (120, 0, 0),
@@ -389,7 +450,7 @@ def py(script, *args):
 
 
 def build(sb):
-    work = REPO / "state" / "tmp" / f"pps-{sb['name']}"
+    work = REPO / "state" / "tmp" / f"pps-{sb.get('out', sb['name'])}"
     work.mkdir(parents=True, exist_ok=True)
     specs = line_specs(sb)
     missing = [s["name"] for s in specs if not (OUTBOX / f"{s['name']}.wav").exists()]
@@ -482,7 +543,7 @@ def build(sb):
     mixed = py("mix.py", work / "timeline.json", work / "soundtrack.wav")
 
     for i, slide in enumerate(slides):
-        draw_slide(slide, i, work / f"s{i}.png", sb["name"])
+        draw_slide(slide, i, work / f"s{i}.png", sb["name"], sb.get("lang", "tr"))
     show = {
         "audio": str(work / "soundtrack.wav"),
         "fade": 0.5,
@@ -504,7 +565,7 @@ def build(sb):
         ],
     }
     (work / "slides.json").write_text(json.dumps(show, indent=1))
-    out = OUTBOX / f"{sb['name']}.mp4"
+    out = OUTBOX / f"{sb.get('out', sb['name'])}.mp4"
     py("slideshow.py", work / "slides.json", out)
 
     (work / "script.txt").write_text("\n".join(s["text"] for s in specs))
@@ -529,11 +590,20 @@ def build(sb):
 
 
 def main():
-    if len(sys.argv) != 3 or sys.argv[1] not in ("lines", "build"):
+    args = sys.argv[1:]
+    aspect = None
+    if len(args) == 4 and args[2] == "--aspect":
+        aspect = args.pop()
+        args.pop()
+    if len(args) != 2 or args[0] not in ("lines", "build"):
         print(__doc__)
         sys.exit(2)
-    path = Path(sys.argv[2])
+    path = Path(args[1])
     sb = json.loads(path.read_text())
+    set_aspect(aspect or sb.get("aspect", "16:9"))
+    # A forced format gets its own file, so both versions can sit side by side.
+    if aspect:
+        sb["out"] = f"{sb['name']}-{aspect.replace(':', 'x')}"
     if (
         not str(sb.get("name", "")).replace("-", "").isalnum()
         or sb["name"] != sb["name"].lower()
