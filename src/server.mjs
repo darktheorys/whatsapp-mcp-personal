@@ -430,16 +430,42 @@ async function trimTrailingBabble(wav, text, lang = "tr") {
 //
 // Delivery markup (speech-markup.mjs) adds chosen pauses and slow/fast spans on every engine, by
 // rendering segments separately and joining them with silence.
-export async function synthWav(text, voice, rate, lang, outWav, { clone, cloneOptional } = {}) {
-  if (voice) {
-    const aiff = `${outWav}.aiff`;
-    execFileSync("say", ["-v", voice, "-r", String(Math.round(DEFAULT_SAY_WPM * rate)), "-o", aiff, toSayText(text)]);
-    execFileSync("afconvert", [aiff, outWav, "-d", "LEI16", "-f", "WAVE"]);
-    rmSync(aiff, { force: true });
+//
+// [voice NAME] spans put several voices in one note. `voices` maps each clone name in the text to the
+// reference clip resolveVoiceSpans approved for this chat. A note with spans has no Piper fallback: a
+// dialogue where one part silently comes out in the wrong voice is wrong in the same way a clone that
+// falls back is.
+export async function synthWav(text, voice, rate, lang, outWav, { clone, cloneOptional, voices = {} } = {}) {
+  const parsed = parseSpeechMarkup(text);
+  const segments = parsed.length ? parsed : [{ type: "speech", text, scale: 1, voice: null }];
+  if (segments.some((s) => s.voice)) {
+    await joinSegments(
+      segments,
+      XTTS_SAMPLE_RATE,
+      async (segment, file) => {
+        const span = segment.voice;
+        if (span?.startsWith("say:")) return sayRender(segment.text, span.slice(4), rate / segment.scale, file);
+        if (!span && voice) return sayRender(segment.text, voice, rate / segment.scale, file);
+        const ref = span ? voices[span] : clone?.ref;
+        if (span && !ref) throw new Error(`the "${span}" voice was not approved for this chat`);
+        await xttsRender({
+          text: segment.text,
+          lang,
+          speaker: ref ? undefined : XTTS_DEFAULT_SPEAKER,
+          ref,
+          speed: rate / segment.scale,
+          outWav: file,
+        });
+        await trimTrailingBabble(file, segment.text, lang);
+      },
+      outWav,
+    );
     return;
   }
-  const parsed = parseSpeechMarkup(text);
-  const segments = parsed.length ? parsed : [{ type: "speech", text, scale: 1 }];
+  if (voice) {
+    sayRender(toSayText(text), voice, rate, outWav);
+    return;
+  }
   try {
     await joinSegments(
       segments,
@@ -473,6 +499,32 @@ export async function synthWav(text, voice, rate, lang, outWav, { clone, cloneOp
     (segment, file) => piperRender(segment.text, lang, rate, segment.scale, file),
     outWav,
   );
+}
+
+// One macOS `say` render to a wav. `rate` is the multiplier on say's own default pace.
+function sayRender(text, name, rate, outWav) {
+  const aiff = `${outWav}.aiff`;
+  execFileSync("say", ["-v", name, "-r", String(Math.round(DEFAULT_SAY_WPM * rate)), "-o", aiff, text]);
+  execFileSync("afconvert", [aiff, outWav, "-d", "LEI16", "-f", "WAVE"]);
+  rmSync(aiff, { force: true });
+}
+
+// Checks the [voice NAME] spans in a voice note's text before anything is spent on it. Every clone
+// named goes through resolveClone for this chat, the same check a whole-note clone gets, so a span
+// cannot carry a voice into a chat its owner did not list. A tag that does not parse is refused
+// rather than read out loud. -> { voices: { name: ref } } or { error }.
+export function resolveVoiceSpans(text, to) {
+  const segments = parseSpeechMarkup(text);
+  if (segments.some((s) => s.type === "speech" && /\[\/?voice\b/i.test(s.text))) {
+    return { error: "a [voice] tag is malformed: use [voice NAME] or [voice say:NAME], closed by [/voice]" };
+  }
+  const voices = {};
+  for (const name of new Set(segments.map((s) => s.voice).filter((v) => v && !v.startsWith("say:")))) {
+    const resolved = resolveClone(name, to);
+    if (resolved.error) return { error: resolved.error };
+    voices[name] = resolved.ref;
+  }
+  return { voices };
 }
 
 // One Piper call. `scale` stretches this render's length (1.35 slow, 0.8 fast) on top of the chat's
@@ -586,13 +638,21 @@ function respellLoanwords(text) {
 // (no `voice`) path — callers resolve it from the chat's default (isEnglish) unless overridden.
 // Loanword respelling only applies for `lang === "tr"` -- an English word read by the English
 // voice doesn't need Turkish-orthography help.
-async function speakToBuffer(text, voice, rate = speakingRate(), lang = "tr", clone, cloneOptional = false) {
+async function speakToBuffer(
+  text,
+  voice,
+  rate = speakingRate(),
+  lang = "tr",
+  clone,
+  cloneOptional = false,
+  voices = {},
+) {
   const dir = mkdtempSync(join(tmpdir(), "wa-tts-"));
   try {
     const wav = join(dir, "out.wav");
     const clean = stripEmoji(text);
     const spoken = lang === "tr" ? respellLoanwords(clean) : clean;
-    await synthWav(spoken, voice, rate, lang, wav, { clone, cloneOptional });
+    await synthWav(spoken, voice, rate, lang, wav, { clone, cloneOptional, voices });
     return encodeVoiceNote(wav);
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -2589,6 +2649,8 @@ server.registerTool(
   async ({ to: toArg, text, reply_to, unprompted, mention }) => {
     const { target: to, error } = targetFor({ to: toArg, reply_to, unprompted });
     if (error) return error;
+    const spans = isVoiceOnly(to) ? resolveVoiceSpans(text, to) : { voices: {} };
+    if (spans.error) return { isError: true, content: [{ type: "text", text: `Refused: ${spans.error}.` }] };
     const refusal = guardSend(to, text);
     if (refusal) return refusal;
     const sock = getSocket();
@@ -2604,6 +2666,7 @@ server.registerTool(
           isEnglish(to) ? "en" : "tr",
           defaultCloneFor(to),
           true,
+          spans.voices,
         );
       } catch (err) {
         return {
@@ -2776,7 +2839,9 @@ server.registerTool(
       "Speak text (free, offline, no API key) and send it as a WhatsApp voice note. Use for a change " +
       "of pace instead of always texting. Defaults to the local XTTS voice (Piper if that service is " +
       "down); pass a macOS `say` voice name (see `say -v '?'`) to use that instead, or `clone` for a " +
-      "cloned voice. " +
+      "cloned voice. Several voices fit in one note: wrap a part in [voice NAME]...[/voice] for a " +
+      "cloned voice or [voice say:NAME]...[/voice] for a macOS one (each clone is checked against " +
+      "this chat like `clone` is), and the rest is read in the note's own voice. " +
       "`language` defaults to this chat's usual language (set with /language) but can be overridden " +
       "per call — e.g. to reply in English for one message in an otherwise-Turkish chat.",
     inputSchema: {
@@ -2818,6 +2883,8 @@ server.registerTool(
       cloned = resolveClone(clone, to);
       if (cloned.error) return { isError: true, content: [{ type: "text", text: `Refused: ${cloned.error}.` }] };
     }
+    const spans = resolveVoiceSpans(text, to);
+    if (spans.error) return { isError: true, content: [{ type: "text", text: `Refused: ${spans.error}.` }] };
     const refusal = guardSend(to, text);
     if (refusal) return refusal;
     const sock = getSocket();
@@ -2832,6 +2899,7 @@ server.registerTool(
         lang ?? (isEnglish(to) ? "en" : "tr"),
         cloned ?? fallbackClone ?? undefined,
         !cloned && Boolean(fallbackClone),
+        spans.voices,
       );
     } catch (err) {
       return {

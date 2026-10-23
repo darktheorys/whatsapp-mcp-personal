@@ -7,6 +7,11 @@
 //   [slow]...[/slow]          the span at 1.35x the length, for a drawn-out punchline
 //   [fast]...[/fast]          the span at 0.8x the length, for a rushed aside
 //   ... or …                  an automatic 450 ms beat
+//   [voice NAME]...[/voice]   the span in another voice: a cloned voice by name, or say:NAME for a
+//                             macOS `say` voice. Several voices in one note, for a dialogue
+//
+// A voice span is resolved by the caller (server.mjs), which checks each clone against the chat it
+// is sent to exactly as a whole-note clone is checked. Unclosed spans run to the end of the note.
 //
 // Only voice notes read this. In a text message the brackets would be sent literally, so a message
 // that may go out as text should not carry them.
@@ -17,29 +22,42 @@ const ELLIPSIS_PAUSE_MS = 450;
 const MAX_SEGMENTS = 40;
 const SCALES = { slow: 1.35, fast: 0.8 };
 
-const TOKEN = /\[pause(?:\s+(\d{2,4}))?\]|\[(slow|fast)\]|\[\/(slow|fast)\]/gi;
+// A clone name is what voices.mjs accepts. A `say` voice name may carry spaces and brackets
+// ("Cem (Enhanced)"), so it gets its own, wider set.
+const VOICE_NAME = String.raw`[a-z0-9_-]{1,40}|say:[A-Za-z][A-Za-z0-9 ()._-]{0,40}`;
+const TOKEN = new RegExp(
+  String.raw`\[pause(?:\s+(\d{2,4}))?\]|\[(slow|fast)\]|\[\/(slow|fast)\]|\[voice\s+(${VOICE_NAME})\]|\[\/voice\]`,
+  "gi",
+);
 
-// -> [{ type: "speech", text, scale } | { type: "pause", ms }], adjacent pauses merged, never empty
-// of speech unless the input was.
+// -> [{ type: "speech", text, scale, voice } | { type: "pause", ms }], adjacent pauses merged, never
+// empty of speech unless the input was. `voice` is null outside a [voice] span, otherwise the name
+// as written ("gollum" or "say:Yelda").
 export function parseSpeechMarkup(input) {
   const text = String(input ?? "").replace(/…|\.{3,}/g, ` [pause ${ELLIPSIS_PAUSE_MS}] `);
   const parts = [];
   let scale = 1;
+  let voice = null;
   let last = 0;
   const speech = (chunk) => {
     const trimmed = chunk.replace(/\s+/g, " ").trim();
     // A chunk with no letter or digit in it (the "." left behind by "[/slow].") gives Piper nothing to
     // say and it fails outright with "# channels not specified", so it is dropped here.
-    if (trimmed && /[\p{L}\p{N}]/u.test(trimmed)) parts.push({ type: "speech", text: trimmed, scale });
+    if (trimmed && /[\p{L}\p{N}]/u.test(trimmed)) parts.push({ type: "speech", text: trimmed, scale, voice });
   };
   for (const match of text.matchAll(TOKEN)) {
     speech(text.slice(last, match.index));
     last = match.index + match[0].length;
-    if (match[0].toLowerCase().startsWith("[pause")) {
+    const token = match[0].toLowerCase();
+    if (token.startsWith("[pause")) {
       const ms = Math.min(MAX_PAUSE_MS, Number(match[1] ?? DEFAULT_PAUSE_MS));
       parts.push({ type: "pause", ms });
     } else if (match[2]) {
       scale = SCALES[match[2].toLowerCase()];
+    } else if (match[4]) {
+      voice = match[4].startsWith("say:") ? match[4] : match[4].toLowerCase();
+    } else if (token === "[/voice]") {
+      voice = null;
     } else {
       scale = 1;
     }
