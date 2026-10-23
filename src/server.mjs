@@ -21,7 +21,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { loadOrCreateDaemonToken, serveOnSocket } from "./daemon-transport.mjs";
 import { DocumentScanError, documentScanTexts } from "./doc-scan.mjs";
-import { parseSpeechMarkup, toSayText } from "./speech-markup.mjs";
+import { MAX_SEGMENTS, parseSpeechMarkup, speechSegmentCount, toSayText } from "./speech-markup.mjs";
 import { XTTS_SAMPLE_RATE, xttsRender } from "./xtts-client.mjs";
 import { defaultCloneFor, resolveClone } from "./voices.mjs";
 import {
@@ -501,12 +501,21 @@ export async function synthWav(text, voice, rate, lang, outWav, { clone, cloneOp
   );
 }
 
-// One macOS `say` render to a wav. `rate` is the multiplier on say's own default pace.
+// One macOS `say` render to a wav. `rate` is the multiplier on say's own default pace. The text goes
+// in through a file, never as an argument: `say` parses a text argument that starts with "-f" as its
+// input-file option, so "-f<path>" in a voice note would read that file out loud and send it, past
+// the secret scan, which only ever saw the text.
 function sayRender(text, name, rate, outWav) {
   const aiff = `${outWav}.aiff`;
-  execFileSync("say", ["-v", name, "-r", String(Math.round(DEFAULT_SAY_WPM * rate)), "-o", aiff, text]);
-  execFileSync("afconvert", [aiff, outWav, "-d", "LEI16", "-f", "WAVE"]);
-  rmSync(aiff, { force: true });
+  const input = `${outWav}.txt`;
+  writeFileSync(input, text);
+  try {
+    execFileSync("say", ["-v", name, "-r", String(Math.round(DEFAULT_SAY_WPM * rate)), "-o", aiff, "-f", input]);
+    execFileSync("afconvert", [aiff, outWav, "-d", "LEI16", "-f", "WAVE"]);
+  } finally {
+    rmSync(aiff, { force: true });
+    rmSync(input, { force: true });
+  }
 }
 
 // Checks the [voice NAME] spans in a voice note's text before anything is spent on it. Every clone
@@ -514,6 +523,10 @@ function sayRender(text, name, rate, outWav) {
 // cannot carry a voice into a chat its owner did not list. A tag that does not parse is refused
 // rather than read out loud. -> { voices: { name: ref } } or { error }.
 export function resolveVoiceSpans(text, to) {
+  const count = speechSegmentCount(text);
+  if (count > MAX_SEGMENTS) {
+    return { error: `the note has ${count} parts and at most ${MAX_SEGMENTS} fit, split it into two notes` };
+  }
   const segments = parseSpeechMarkup(text);
   if (segments.some((s) => s.type === "speech" && /\[\/?voice\b/i.test(s.text))) {
     return { error: "a [voice] tag is malformed: use [voice NAME] or [voice say:NAME], closed by [/voice]" };
@@ -651,7 +664,15 @@ async function speakToBuffer(
   try {
     const wav = join(dir, "out.wav");
     const clean = stripEmoji(text);
-    const spoken = lang === "tr" ? respellLoanwords(clean) : clean;
+    // Markup tags are left alone: respelling "[voice loop]" into "[voice lup]" would name a voice
+    // nobody approved for the chat.
+    const spoken =
+      lang === "tr"
+        ? clean
+            .split(/(\[[^\]]*\])/)
+            .map((part, i) => (i % 2 ? part : respellLoanwords(part)))
+            .join("")
+        : clean;
     await synthWav(spoken, voice, rate, lang, wav, { clone, cloneOptional, voices });
     return encodeVoiceNote(wav);
   } finally {
@@ -712,6 +733,9 @@ export function resolveMentions(to, names, ownJid) {
     const jid = matches[0].who === "(you)" ? jidNormalizedUser(ownJid) : matches[0].who;
     if (!jid) throw new Error(`Refused: cannot work out the number for "${query}".`);
     if (isMentionBlocked(jid)) throw new Error(`Refused: "${query}" is on the do-not-tag list.`);
+    // The do-not-tag list holds phone numbers, and a lid's digits are a different number, so a person
+    // whose number never resolved could be a listed bot behind a lid. Not tagging them is the safe side.
+    if (jid.endsWith("@lid")) throw new Error(`Refused: "${query}" has no known phone number, so it is not tagged.`);
     resolved.push({ query: String(query).replace(/^@/, "").trim(), jid, digits: jid.split("@")[0] });
   }
   return resolved;
@@ -850,6 +874,16 @@ export function splitForSend(text) {
     .map((u) => u.trim())
     .filter(Boolean);
   let glue = "\n\n";
+  // No blank lines but single line breaks (a list, URLs one per line): split on the lines and glue
+  // them back with a line break, so the formatting survives. Splitting on sentences here used to
+  // swallow every newline and send the list as one run-on line.
+  if (units.length < 2 && t.includes("\n")) {
+    units = t
+      .split(/\n/)
+      .map((u) => u.trim())
+      .filter(Boolean);
+    glue = "\n";
+  }
   if (units.length < 2) {
     units = t
       .split(/(?<=[.!?\u2026])\s+/u)
@@ -1918,15 +1952,29 @@ export const PROTOCOL_REVOKE = 0;
 export const PROTOCOL_MESSAGE_EDIT = 14;
 
 // The row an edit or delete becomes, or null when there is nothing to store. Pure, for the test.
-export function protocolChangeEntry(protocol, { fromMe, ts, from, name, editedText, targetByClaude }) {
+// The person behind a jid, without the device suffix or the address form's domain.
+const authorKey = (jid) =>
+  String(jid ?? "")
+    .split("@")[0]
+    .split(":")[0];
+
+// `target` is the logged message the change points at. Only its own author may change it: a
+// protocolMessage names its target by id alone, so without this check anyone in a group could mark
+// the owner's message deleted or give it new text, and every read would then show their version.
+export function protocolChangeEntry(protocol, { fromMe, ts, from, name, editedText, targetByClaude, target }) {
   const targetId = protocol?.key?.id;
   if (!targetId) return null;
   if (protocol.type !== PROTOCOL_REVOKE && protocol.type !== PROTOCOL_MESSAGE_EDIT) return null;
   // This server already wrote a row when it edited or deleted its own message.
   if (targetByClaude) return null;
+  const direction = fromMe ? "out" : "in";
+  // A change to a message that is not in the log has nothing to point at.
+  if (!target) return null;
+  if (target.direction !== direction) return null;
+  if (direction === "in" && authorKey(target.from) !== authorKey(from)) return null;
   const kind = protocol.type === PROTOCOL_REVOKE ? "delete" : "edit";
   return {
-    direction: fromMe ? "out" : "in",
+    direction,
     kind,
     to: targetId,
     ts,
@@ -1947,6 +1995,7 @@ async function recordProtocolChange(jid, waMessage, protocol) {
     name: waMessage.pushName,
     editedText: edited?.text,
     targetByClaude: target?.by === "claude",
+    target,
   });
   if (entry) appendMessage(jid, entry);
 }

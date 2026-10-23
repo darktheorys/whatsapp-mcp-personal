@@ -2,7 +2,7 @@
 // Covers the one piece of logic here that can fail silently: which incoming messages the
 // allowlist lets through, and which JID a chat gets stored under once it does.
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -530,6 +530,10 @@ assert.equal(scanDocument(zipOf("word/document.xml", "<w:t>hello</w:t>"), ".docx
   );
   const oneLong = "tek ".repeat(150).trim();
   assert.deepEqual(splitForSend(oneLong), [oneLong], "one unbroken sentence is never cut in the middle");
+  const list = Array.from({ length: 30 }, (_, i) => `madde ${i}: https://example.com/${i}`).join("\n");
+  const listParts = splitForSend(list);
+  assert.ok(listParts.length > 1, "a long list still splits");
+  assert.equal(listParts.join("\n"), list, "a list split on its lines keeps every line break");
 
   assert.equal(triggerLabel({ fromMe: false, tagged: true, replyingToMe: false }), "[tag]");
   assert.equal(triggerLabel({ fromMe: false, tagged: false, replyingToMe: true }), "[reply to you]");
@@ -659,7 +663,8 @@ assert.equal(scanDocument(zipOf("word/document.xml", "<w:t>hello</w:t>"), ".docx
 {
   const { protocolChangeEntry, PROTOCOL_REVOKE, PROTOCOL_MESSAGE_EDIT, SPEAKING_RATE_MIN, SPEAKING_RATE_MAX } =
     await import("./src/server.mjs");
-  const base = { fromMe: false, ts: 99, from: "4915100000001@s.whatsapp.net", name: "Z" };
+  const original = { direction: "in", from: "4915100000001@s.whatsapp.net" };
+  const base = { fromMe: false, ts: 99, from: "4915100000001@s.whatsapp.net", name: "Z", target: original };
   assert.deepEqual(
     protocolChangeEntry({ type: PROTOCOL_REVOKE, key: { id: "T1" } }, base),
     { direction: "in", kind: "delete", to: "T1", ts: 99, from: "4915100000001@s.whatsapp.net", name: "Z" },
@@ -677,6 +682,31 @@ assert.equal(scanDocument(zipOf("word/document.xml", "<w:t>hello</w:t>"), ".docx
   );
   assert.equal(protocolChangeEntry({ type: 3, key: { id: "T1" } }, base), null, "other protocol types are not rows");
   assert.equal(protocolChangeEntry({ type: PROTOCOL_REVOKE }, base), null, "no target, nothing to store");
+  assert.equal(
+    protocolChangeEntry({ type: PROTOCOL_REVOKE, key: { id: "T1" } }, { ...base, target: null }),
+    null,
+    "a change to a message that is not in the log is not stored",
+  );
+  assert.equal(
+    protocolChangeEntry(
+      { type: PROTOCOL_MESSAGE_EDIT, key: { id: "T1" } },
+      { ...base, from: "4915100000002@s.whatsapp.net", editedText: "sahte" },
+    ),
+    null,
+    "someone else cannot edit a person's message",
+  );
+  assert.equal(
+    protocolChangeEntry({ type: PROTOCOL_REVOKE, key: { id: "T1" } }, { ...base, target: { direction: "out" } }),
+    null,
+    "a group member cannot delete one of the owner's messages",
+  );
+  assert.ok(
+    protocolChangeEntry(
+      { type: PROTOCOL_REVOKE, key: { id: "T1" } },
+      { ...base, from: "4915100000001:3@s.whatsapp.net" },
+    ),
+    "the same person from another device still counts as the author",
+  );
   const store = await import("./src/store.mjs");
   const E = "120363000000000109@g.us";
   store.appendMessage(E, { direction: "in", from: base.from, text: "ilk hali", ts: 10, id: "ED1" });
@@ -1529,6 +1559,18 @@ assert.deepEqual(unansweredChats([STATS], 1 * H), [], "answering it takes it off
 
   // Persistence: the whole point is surviving a restart.
   assert.ok(upsertTask(digest).task, "task is stored");
+  // Re-setting a fired one-off with a new time arms it again, and a weekly task can become a one-off.
+  upsertTask({ id: "rearm", once: "2026-10-01T09:00", prompt: "p" });
+  markRan("rearm", new Date(2026, 9, 1, 9, 1).getTime());
+  ackTask("rearm");
+  assert.equal(loadSchedule().find((t) => t.id === "rearm").enabled, false, "an acknowledged one-off switches off");
+  upsertTask({ id: "rearm", once: "2026-10-02T09:00", at: undefined, prompt: "p" });
+  assert.notEqual(loadSchedule().find((t) => t.id === "rearm").enabled, false, "a new time switches it back on");
+  upsertTask({ id: "weekly-to-once", at: "09:00", days: [1], prompt: "p" });
+  const converted = upsertTask({ id: "weekly-to-once", once: "2026-10-05T09:00", at: undefined, prompt: "p" });
+  assert.ok(converted.task && converted.task.days === undefined, "a weekly task turned one-off drops its days");
+  removeTask("rearm");
+  removeTask("weekly-to-once");
   assert.equal(loadSchedule().length, 1);
   assert.match(upsertTask({ id: "nope", at: "99:99", prompt: "p" }).error, /HH:MM/, "invalid tasks are refused");
   assert.equal(loadSchedule().length, 1, "and not written");
@@ -1938,6 +1980,7 @@ assert.deepEqual(unansweredChats([STATS], 1 * H), [], "answering it takes it off
 
   // [voice NAME] spans in one note get the same per-chat check as a whole-note clone, before any send.
   const { resolveVoiceSpans } = await import("./src/server.mjs");
+  const { parseSpeechMarkup } = await import("./src/speech-markup.mjs");
   writeFileSync(
     join(dir, "voices.json"),
     JSON.stringify({
@@ -1972,6 +2015,17 @@ assert.deepEqual(unansweredChats([STATS], 1 * H), [], "answering it takes it off
     "a macOS voice needs no clone",
   );
   assert.deepEqual(resolveVoiceSpans("düz metin", group).voices, {}, "plain text has no spans");
+  const long = Array.from({ length: 25 }, (_, i) => `[voice anyone]satir ${i}[/voice] [pause 200]`).join(" ");
+  assert.match(
+    resolveVoiceSpans(long, group).error,
+    /at most 40/,
+    "a dialogue too long for one note is refused, not cut off",
+  );
+  assert.equal(
+    parseSpeechMarkup("[voice SAY:Yelda]x[/voice]")[0].voice,
+    "say:Yelda",
+    "a macOS voice name keeps its case",
+  );
 
   // The client against a fake service: it sends the token, a refusal rejects, a hang times out.
   const sockPath = process.env.WA_XTTS_SOCK;
@@ -2024,6 +2078,11 @@ assert.deepEqual(unansweredChats([STATS], 1 * H), [], "answering it takes it off
     }),
     "a multi-voice note with the service down fails rather than switching engines",
   );
+  // `say` gets its text from a file, so text that looks like its -f option is just spoken.
+  if (process.platform === "darwin") {
+    await synthWav("-f/nonexistent-zz", "Alex", 1, "en", join(dir, "say.wav"));
+    assert.ok(existsSync(join(dir, "say.wav")), "text starting with -f is read aloud, not opened as a file");
+  }
 }
 
 // One-off reminders: `once` fires at its moment, retries until acknowledged, then switches off.

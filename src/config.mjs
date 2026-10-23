@@ -397,8 +397,9 @@ export function hasVoiceDisabled(jid) {
   return no_voice_jids.includes(jid);
 }
 
-// See no_mention_jids in defaultConfig. Compared on the number part, so a device suffix or a
-// phone-versus-lid form of the same JID does not slip past.
+// See no_mention_jids in defaultConfig. Compared on the number part, so a device suffix does not slip
+// past. A lid is a different number from the phone number, so this cannot match one: resolveMentions
+// refuses to tag anyone still known only by a lid.
 export function isMentionBlocked(jid) {
   const digits = (j) => String(j).split("@")[0].split(":")[0];
   const { no_mention_jids } = loadConfig();

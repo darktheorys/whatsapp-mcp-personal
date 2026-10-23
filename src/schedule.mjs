@@ -150,9 +150,23 @@ export function upsertTask(task) {
   if (problem) return { error: problem };
   const tasks = loadSchedule();
   const existing = tasks.findIndex((t) => t.id === task.id);
+  const base = existing >= 0 ? tasks[existing] : {};
   // lastRun is preserved across an edit: changing a prompt should not make today's already-sent
   // digest go out a second time.
-  const merged = { ...(existing >= 0 ? tasks[existing] : {}), ...task };
+  const merged = { ...base, ...task };
+  // A new time is a new task as far as firing goes. Without this, re-setting a one-off that already
+  // fired kept it switched off, and turning a weekly task into a one-off kept its `days`, which no
+  // one-off may have, so it was rejected at every tick: both looked saved and never fired.
+  const rescheduled =
+    existing >= 0 &&
+    ((task.once !== undefined && task.once !== base.once) || (task.at !== undefined && task.at !== base.at));
+  if (task.once !== undefined) delete merged.days;
+  if (rescheduled) {
+    if (task.enabled === undefined) merged.enabled = true;
+    merged.pendingAck = false;
+  }
+  const mergedProblem = validateTask(merged);
+  if (mergedProblem) return { error: mergedProblem };
   if (existing >= 0) tasks[existing] = merged;
   else tasks.push(merged);
   saveSchedule(tasks);
