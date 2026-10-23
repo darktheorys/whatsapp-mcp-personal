@@ -162,7 +162,10 @@ export function upsertTask(task) {
     ((task.once !== undefined && task.once !== base.once) || (task.at !== undefined && task.at !== base.at));
   if (task.once !== undefined) delete merged.days;
   if (rescheduled) {
-    if (task.enabled === undefined) merged.enabled = true;
+    // Only a one-off that switched itself off after firing is switched back on. A task the owner
+    // turned off stays off when its time is changed.
+    const selfDisabled = base.once !== undefined && base.enabled === false && base.lastRun !== undefined;
+    if (task.enabled === undefined && selfDisabled) merged.enabled = true;
     merged.pendingAck = false;
   }
   const mergedProblem = validateTask(merged);

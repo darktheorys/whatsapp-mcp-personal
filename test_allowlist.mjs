@@ -700,6 +700,11 @@ assert.equal(scanDocument(zipOf("word/document.xml", "<w:t>hello</w:t>"), ".docx
     null,
     "a group member cannot delete one of the owner's messages",
   );
+  assert.equal(
+    protocolChangeEntry({ type: PROTOCOL_REVOKE, key: { id: "T1" } }, { ...base, fromMe: true }),
+    null,
+    "the owner's device cannot mark someone else's message deleted either",
+  );
   assert.ok(
     protocolChangeEntry(
       { type: PROTOCOL_REVOKE, key: { id: "T1" } },
@@ -972,6 +977,10 @@ assert.equal(scanDocument(zipOf("word/document.xml", "<w:t>hello</w:t>"), ".docx
     "a dropped ending does too",
   );
   assert.equal(speechMatchScore([], "güzel şey"), 0, "silence scores 0");
+  assert.ok(
+    speechMatchScore(said("bu çok"), "bu çok önemli") < 0.85,
+    "a dropped ordinary word that merely starts like a number (önemli) still counts",
+  );
   assert.equal(
     speechMatchScore(
       said("2022 sonbaharında enflasyon %80'i geçti"),
@@ -1594,6 +1603,14 @@ assert.deepEqual(unansweredChats([STATS], 1 * H), [], "answering it takes it off
   upsertTask({ id: "weekly-to-once", at: "09:00", days: [1], prompt: "p" });
   const converted = upsertTask({ id: "weekly-to-once", once: "2026-10-05T09:00", at: undefined, prompt: "p" });
   assert.ok(converted.task && converted.task.days === undefined, "a weekly task turned one-off drops its days");
+  upsertTask({ id: "kept-off", at: "09:00", prompt: "p", enabled: false });
+  upsertTask({ id: "kept-off", at: "10:00", prompt: "p" });
+  assert.equal(
+    loadSchedule().find((t) => t.id === "kept-off").enabled,
+    false,
+    "a task the owner switched off stays off when its time changes",
+  );
+  removeTask("kept-off");
   removeTask("rearm");
   removeTask("weekly-to-once");
   assert.equal(loadSchedule().length, 1);
