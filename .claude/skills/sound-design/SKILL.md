@@ -57,7 +57,27 @@ Powerpoint Sunumları"). The page lists them by category, which shows what the g
   slow `--mood sad --bpm 70` bed fits a parable better than the bouncy pop bed, which fits the comic
   ones.
 
-## Recipe for a narrated joke video
+## The fast path: one storyboard, one render call, one build
+
+For a narrated pps video, do not hand-write slide code or timelines. Write a storyboard and let
+`pps.py` do the rest (its docstring has the full format: slide styles title, text, wordart,
+reveal, image and closing, lines per slide with an optional other voice and effect).
+
+1. Write `state/tmp/pps-src/NAME.json`. Spell numbers as words in narration ("iki bin yirmi iki"),
+   keep each sentence 6 words or more, and avoid "bugün" (XTTS says "bagün"; use "şimdi").
+2. `pps.py lines state/tmp/pps-src/NAME.json` prints the lines. Pass that list as `lines` to
+   `wa_render_voice` in one call (one call per line also works). Each sentence is rendered alone,
+   transcribed and scored against its text, with up to three takes. Look at the returned scores:
+   under about 0.7 on a long line, read the transcript and reword it, since some words XTTS keeps
+   getting wrong whatever the take.
+3. `pps.py build state/tmp/pps-src/NAME.json` draws the slides, times them to the lines, adds the
+   bed and effects (a whoosh per slide, a drum roll after a reveal slide and a ta-da on the next,
+   rimshot and applause at the end), mixes, renders `state/outbox/NAME.mp4` and runs `check_av.py`.
+   Its `problems` list should be empty; open the contact sheet before sending.
+
+`check_av.py MEDIA --script lines.txt` is the before-sending check on its own, for anything else.
+
+## Recipe for a narrated joke video (by hand, when the storyboard does not fit)
 
 1. Write the lines. Each character gets a voice from the owner's approved cast (`state/notes.md`).
 2. Render each line to a file with `wa_render_voice` (same `[voice NAME]` spans as voice notes).

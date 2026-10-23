@@ -22,7 +22,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { loadOrCreateDaemonToken, serveOnSocket } from "./daemon-transport.mjs";
 import { DocumentScanError, documentScanTexts } from "./doc-scan.mjs";
-import { MAX_SEGMENTS, parseSpeechMarkup, speechSegmentCount, toSayText } from "./speech-markup.mjs";
+import { MAX_SEGMENTS, parseSpeechMarkup, speechSegmentCount, splitSentences, toSayText } from "./speech-markup.mjs";
 import { XTTS_SAMPLE_RATE, xttsRender } from "./xtts-client.mjs";
 import { defaultCloneFor, resolveClone } from "./voices.mjs";
 import {
@@ -362,6 +362,34 @@ export function speechEndSeconds(words, text) {
   return null;
 }
 
+// How well a render says what it was meant to: the longest run of intended words heard in order,
+// over the longer of the two word counts. Babble added in the middle or at the end ("anlatıyorum
+// bunun") and a dropped word both lower it. 1 is exact, an empty transcript is 0.
+// Numbers are left out on both sides: the text spells them ("iki bin yirmi iki", "yüzde seksen")
+// and whisper writes digits ("2022", "%80"), which are the same words, not a bad take.
+const NUMBER_WORD =
+  /^(sifir|bir|iki|uc|dort|bes|alti|yedi|sekiz|dokuz|on|yirmi|otuz|kirk|elli|altmis|yetmis|seksen|doksan|yuz|yuzde|bin|milyon|milyar)/;
+const isNumberish = (k) => /\d/.test(k) || NUMBER_WORD.test(k);
+export function speechMatchScore(words, text) {
+  const want = text
+    .split(/\s+/)
+    .map(wordKey)
+    .filter((k) => k && !isNumberish(k));
+  const heard = words.map((w) => wordKey(w.text)).filter((k) => k && !isNumberish(k));
+  if (!want.length) return 1;
+  if (!want.length || !heard.length) return 0;
+  const row = Array.from({ length: heard.length + 1 }, () => 0);
+  for (const w of want) {
+    let prev = 0;
+    for (let j = 1; j <= heard.length; j++) {
+      const keep = row[j];
+      row[j] = w === heard[j - 1] ? prev + 1 : Math.max(row[j], row[j - 1]);
+      prev = keep;
+    }
+  }
+  return row[heard.length] / Math.max(want.length, heard.length);
+}
+
 // `lang` is the language the note was spoken in: whisper forced to Turkish on an English note finds
 // the wrong words, so the end of speech came out wrong.
 async function trimTrailingBabble(wav, text, lang = "tr") {
@@ -375,8 +403,13 @@ async function trimTrailingBabble(wav, text, lang = "tr") {
       ["-m", whisperModel(), "-f", wav16, "-l", lang === "en" ? "en" : "tr", "-ml", "1", "-sow"],
       { ...limit, encoding: "utf8" },
     );
-    const end = speechEndSeconds(parseWordTimestamps(stdout), text);
-    if (end === null) return;
+    const words = parseWordTimestamps(stdout);
+    const end = speechEndSeconds(words, text);
+    if (end === null) return speechMatchScore(words, text);
+    const keptScore = speechMatchScore(
+      words.filter((w) => w.start < end + 0.12),
+      text,
+    );
     const total = Number(
       (
         await execFileAsync("ffprobe", ["-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", wav], {
@@ -387,7 +420,7 @@ async function trimTrailingBabble(wav, text, lang = "tr") {
     );
     const cut = end + 0.12;
     // Only a real tail is removed: nothing under a quarter second, and never more than 40% of the note.
-    if (!(total - cut > 0.25) || cut < total * 0.6) return;
+    if (!(total - cut > 0.25) || cut < total * 0.6) return speechMatchScore(words, text);
     const trimmed = join(dir, "trimmed.wav");
     await execFileAsync(
       "ffmpeg",
@@ -408,14 +441,46 @@ async function trimTrailingBabble(wav, text, lang = "tr") {
       limit,
     );
     renameSync(trimmed, wav);
+    return keptScore;
   } catch (err) {
     logger.warn(
       { err: String(err?.message ?? err) },
       "could not trim the tail of a voice note, sending it as rendered",
     );
+    return null;
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+}
+
+// One XTTS sentence, checked. XTTS samples, so the same text gives a different take each time, and
+// now and then a take adds a syllable or a word ("anlatıyorum bunun") or garbles one. With `verify`
+// each take is transcribed (the babble trim already does that) and scored against the text, and a
+// poor take is rendered again, up to MAX_TAKES, keeping the best. A score of null means the check
+// itself could not run, which is not a reason to retry. -> { score, takes }
+const MAX_TAKES = 3;
+const GOOD_TAKE = 0.85;
+// Whisper is shaky on a sentence of two or three words, so those pass at a lower score instead of
+// burning takes on a transcription error.
+const goodEnough = (score, text) => score >= (text.split(/\s+/).length <= 3 ? 0.6 : GOOD_TAKE);
+async function renderXttsChecked(request, lang, verify) {
+  let best = null;
+  let attempts = 0;
+  for (let take = 1; take <= (verify ? MAX_TAKES : 1); take++) {
+    const file = take === 1 ? request.outWav : `${request.outWav}.take${take}.wav`;
+    await xttsRender({ ...request, outWav: file });
+    attempts = take;
+    const score = await trimTrailingBabble(file, request.text, lang);
+    if (best === null || (score ?? 1) > (best.score ?? 1)) {
+      if (best && best.file !== request.outWav) rmSync(best.file, { force: true });
+      best = { file, score, takes: take };
+    } else if (file !== request.outWav) {
+      rmSync(file, { force: true });
+    }
+    if (score === null || goodEnough(score, request.text)) break;
+  }
+  if (best.file !== request.outWav) renameSync(best.file, request.outWav);
+  return { score: best.score, takes: attempts };
 }
 
 // Writes `text` to `outWav`. The default engine is the resident XTTS-v2 service (xtts-client.mjs):
@@ -436,12 +501,29 @@ async function trimTrailingBabble(wav, text, lang = "tr") {
 // reference clip resolveVoiceSpans approved for this chat. A note with spans has no Piper fallback: a
 // dialogue where one part silently comes out in the wrong voice is wrong in the same way a clone that
 // falls back is.
-export async function synthWav(text, voice, rate, lang, outWav, { clone, cloneOptional, voices = {} } = {}) {
+//
+// `verify` re-renders a sentence whose transcript does not match its text (renderXttsChecked), and
+// `split` renders each sentence on its own with a short beat between, so a stray syllable at a
+// sentence end is trimmed instead of carried into the next one. Both apply to XTTS only. Returns a
+// report per spoken XTTS part: [{ text, score, takes }].
+export async function synthWav(
+  text,
+  voice,
+  rate,
+  lang,
+  outWav,
+  { clone, cloneOptional, voices = {}, verify = true, split = true } = {},
+) {
   const parsed = parseSpeechMarkup(text);
   const segments = parsed.length ? parsed : [{ type: "speech", text, scale: 1, voice: null }];
+  const report = [];
+  const xtts = async (request) => {
+    const result = await renderXttsChecked(request, lang, verify);
+    report.push({ text: request.text, ...result });
+  };
   if (segments.some((s) => s.voice)) {
     await joinSegments(
-      segments,
+      split ? splitSentences(segments) : segments,
       XTTS_SAMPLE_RATE,
       async (segment, file) => {
         const span = segment.voice;
@@ -449,7 +531,7 @@ export async function synthWav(text, voice, rate, lang, outWav, { clone, cloneOp
         if (!span && voice) return sayRender(segment.text, voice, rate / segment.scale, file);
         const ref = span ? voices[span] : clone?.ref;
         if (span && !ref) throw new Error(`the "${span}" voice was not approved for this chat`);
-        await xttsRender({
+        await xtts({
           text: segment.text,
           lang,
           speaker: ref ? undefined : XTTS_DEFAULT_SPEAKER,
@@ -457,22 +539,22 @@ export async function synthWav(text, voice, rate, lang, outWav, { clone, cloneOp
           speed: rate / segment.scale,
           outWav: file,
         });
-        await trimTrailingBabble(file, segment.text, lang);
       },
       outWav,
     );
-    return;
+    return report;
   }
   if (voice) {
     sayRender(toSayText(text), voice, rate, outWav);
-    return;
+    return report;
   }
+  const xttsSegments = split ? splitSentences(segments) : segments;
   try {
     await joinSegments(
-      segments,
+      xttsSegments,
       XTTS_SAMPLE_RATE,
       async (segment, file) => {
-        await xttsRender({
+        await xtts({
           text: segment.text,
           lang,
           speaker: clone ? undefined : XTTS_DEFAULT_SPEAKER,
@@ -480,11 +562,10 @@ export async function synthWav(text, voice, rate, lang, outWav, { clone, cloneOp
           speed: rate / segment.scale,
           outWav: file,
         });
-        await trimTrailingBabble(file, segment.text, lang);
       },
       outWav,
     );
-    return;
+    return report;
   } catch (err) {
     // An explicitly requested clone never falls back. A chat whose *default* voice is a clone
     // (cloneOptional) does: nobody asked for that voice in particular, and being unable to answer at
@@ -500,6 +581,7 @@ export async function synthWav(text, voice, rate, lang, outWav, { clone, cloneOp
     (segment, file) => piperRender(segment.text, lang, rate, segment.scale, file),
     outWav,
   );
+  return report;
 }
 
 // One macOS `say` render to a wav. `rate` is the multiplier on say's own default pace. The text goes
@@ -2997,48 +3079,97 @@ export function resolveFileVoices(text, clone) {
 server.registerTool(
   "wa_render_voice",
   {
-    title: "Render speech to a file in the outbox",
+    title: "Render speech to files in the outbox",
     description:
       "Speak text into state/outbox/NAME.wav without sending anything, for narration under a video or " +
-      "a soundtrack built with the sound-design skill. Same engines and [voice NAME] spans as " +
-      "wa_send_voice. A cloned voice is only allowed here when voices.json lets it into every chat, " +
-      "since the file can go anywhere afterwards. The text gets the same secret scan as a send.",
+      "a soundtrack built with the sound-design skill. Give `text` and `name` for one line, or `lines` " +
+      "for many in one call. Same engines and [voice NAME] spans as wa_send_voice. Each sentence is " +
+      "rendered alone and checked against its text, with up to three takes, and the result reports " +
+      "each line's length and match score (1 is exact). A cloned voice is only allowed when " +
+      "voices.json lets it into every chat, since the file can go anywhere afterwards. The text gets " +
+      "the same secret scan as a send.",
     inputSchema: {
-      text: z.string().min(1),
-      name: z.string().describe("File name without extension: lowercase letters, digits, - or _"),
+      text: z.string().min(1).optional(),
+      name: z.string().optional().describe("File name without extension: lowercase letters, digits, - or _"),
       voice: z.string().optional().describe("A macOS `say` voice name for the parts outside [voice] tags"),
       clone: z.string().optional().describe("A cloned voice for the parts outside [voice] tags"),
+      lines: z
+        .array(
+          z.object({
+            name: z.string(),
+            text: z.string().min(1),
+            clone: z.string().optional(),
+            voice: z.string().optional(),
+          }),
+        )
+        .max(40)
+        .optional()
+        .describe("Several lines in one call; each takes its own name, text and voice"),
       language: z.enum(["tr", "en"]).optional(),
       rate: z.number().positive().optional(),
     },
     annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
   },
-  async ({ text, name, voice, clone, language, rate }) => {
+  async ({ text, name, voice, clone, lines, language, rate }) => {
     const refuse = (why) => ({ isError: true, content: [{ type: "text", text: `Refused: ${why}.` }] });
-    if (!/^[a-z0-9_-]{1,40}$/.test(name)) return refuse("the name must be lowercase letters, digits, - or _");
-    const secret = scanOutbound(text);
-    if (secret) return refuse(secret);
-    const resolved = resolveFileVoices(text, clone);
-    if (resolved.error) return refuse(resolved.error);
-    mkdirSync(GENERATE_OUT_DIR, { recursive: true });
-    const out = join(GENERATE_OUT_DIR, `${name}.wav`);
-    const lang = language ?? "tr";
-    // The XTTS service only writes under the temp directory (its own guard), so the render happens
-    // there and the finished file is copied into the outbox.
-    const dir = mkdtempSync(join(tmpdir(), "wa-render-"));
-    try {
-      const tmp = join(dir, "out.wav");
-      await synthWav(spokenText(stripEmoji(text), lang), voice, rate ?? speakingRate(), lang, tmp, {
-        clone: resolved.clone,
-        voices: resolved.voices,
-      });
-      copyFileSync(tmp, out);
-    } catch (err) {
-      return { isError: true, content: [{ type: "text", text: `TTS failed: ${err}` }] };
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
+    const jobs = lines ?? (text && name ? [{ name, text, voice, clone }] : null);
+    if (!jobs?.length) return refuse("give `text` and `name`, or `lines`");
+    // Every line is checked before any is rendered, so a bad one does not leave half a batch behind.
+    for (const job of jobs) {
+      if (!/^[a-z0-9_-]{1,40}$/.test(job.name))
+        return refuse(`"${job.name}" must be lowercase letters, digits, - or _`);
+      const secret = scanOutbound(job.text);
+      if (secret) return refuse(`line "${job.name}": ${secret}`);
+      const resolved = resolveFileVoices(job.text, job.clone);
+      if (resolved.error) return refuse(`line "${job.name}": ${resolved.error}`);
+      job.resolved = resolved;
     }
-    return { content: [{ type: "text", text: `Rendered ${out}` }] };
+    if (new Set(jobs.map((j) => j.name)).size !== jobs.length) return refuse("two lines have the same name");
+    mkdirSync(GENERATE_OUT_DIR, { recursive: true });
+    const lang = language ?? "tr";
+    const results = [];
+    for (const job of jobs) {
+      const out = join(GENERATE_OUT_DIR, `${job.name}.wav`);
+      // The XTTS service only writes under the temp directory (its own guard), so the render happens
+      // there and the finished file is copied into the outbox.
+      const dir = mkdtempSync(join(tmpdir(), "wa-render-"));
+      try {
+        const tmp = join(dir, "out.wav");
+        const report = await synthWav(
+          spokenText(stripEmoji(job.text), lang),
+          job.voice,
+          rate ?? speakingRate(),
+          lang,
+          tmp,
+          {
+            clone: job.resolved.clone,
+            voices: job.resolved.voices,
+          },
+        );
+        copyFileSync(tmp, out);
+        const scores = report.map((r) => r.score).filter((x) => typeof x === "number");
+        results.push({
+          name: job.name,
+          path: out,
+          seconds: Number(
+            execFileSync("ffprobe", ["-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", out], {
+              encoding: "utf8",
+            }).trim(),
+          ),
+          score: scores.length ? Math.round(Math.min(...scores) * 100) / 100 : null,
+          takes: report.reduce((n, r) => n + r.takes, 0),
+        });
+      } catch (err) {
+        results.push({ name: job.name, error: String(err.message ?? err) });
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }
+    const failed = results.filter((r) => r.error);
+    return {
+      ...(failed.length === results.length ? { isError: true } : {}),
+      content: [{ type: "text", text: JSON.stringify(results, null, 1) }],
+    };
   },
 );
 

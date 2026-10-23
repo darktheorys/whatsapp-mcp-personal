@@ -88,6 +88,27 @@ function parseAll(input) {
   return merged;
 }
 
+// Each sentence of a spoken segment as its own segment, with a short beat between. XTTS sometimes
+// tacks a syllable onto the end of a sentence it reads in the middle of a longer text, where the
+// babble trim cannot reach it. Read alone, every sentence end is a segment end and gets trimmed.
+// A sentence without a letter or digit (a lone "!") stays with the one before it.
+export const SENTENCE_BEAT_MS = 150;
+export function splitSentences(segments) {
+  const out = [];
+  for (const seg of segments) {
+    if (seg.type !== "speech") {
+      out.push(seg);
+      continue;
+    }
+    const parts = seg.text.split(/(?<=[.!?\u2026])\s+/u).filter((p) => /[\p{L}\p{N}]/u.test(p));
+    parts.forEach((text, i) => {
+      if (i) out.push({ type: "pause", ms: SENTENCE_BEAT_MS });
+      out.push({ ...seg, text });
+    });
+  }
+  return out;
+}
+
 // Plain spoken text with the markup removed, for engines that cannot use it and for anywhere the
 // brackets must not show.
 export function stripSpeechMarkup(input) {
