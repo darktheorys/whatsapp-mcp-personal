@@ -36,7 +36,7 @@ def key(word):
 # Numbers are dropped on both sides: a script spells them ("iki bin yirmi iki") and whisper writes
 # digits ("2022"), which is the same thing said, not a missing line.
 NUMBER_WORD = re.compile(
-    r"^(sifir|bir|iki|uc|dort|bes|alti|yedi|sekiz|dokuz|on|yirmi|otuz|kirk|elli|altmis|yetmis|seksen|doksan|yuz|yuzde|bin|milyon|milyar)"
+    r"^(sifir|bir|iki|uc|dort|bes|alti|yedi|sekiz|dokuz|on|yirmi|otuz|kirk|elli|altmis|yetmis|seksen|doksan|yuz|yuzde|bin|milyon|milyar)(i|si|de|da|nci|inci|uncu)?$"
 )
 
 

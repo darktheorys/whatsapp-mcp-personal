@@ -93,15 +93,42 @@ def hexrgb(h):
     return tuple(int(h[i : i + 2], 16) for i in (0, 2, 4))
 
 
-def gradient(top, bottom):
-    img = Image.new("RGB", (W, H))
+def lerp(a, b, k):
+    return tuple(int(x + (y - x) * k) for x, y in zip(a, b))
+
+
+def background(kind, top, bottom):
+    """The slide's backdrop. pps files were never uniform: plain gradients, but also stripes,
+    checkerboards and radial glows, often all in one deck."""
+    img = Image.new("RGB", (W, H), bottom)  # the outer colour fills whatever a pattern leaves open
     d = ImageDraw.Draw(img)
-    for y in range(H):
-        k = y / (H - 1)
-        d.line(
-            [(0, y), (W, y)],
-            fill=tuple(int(a + (b - a) * k) for a, b in zip(top, bottom)),
-        )
+    if kind == "radial":
+        cx, cy, far = W / 2, H / 2, math.hypot(W / 2, H / 2)
+        for r in range(int(far), 0, -6):
+            d.ellipse(
+                [cx - r, cy - r * 0.75, cx + r, cy + r * 0.75],
+                fill=lerp(top, bottom, r / far),
+            )
+    elif kind == "diagonal":
+        for x in range(-H, W, 3):
+            d.line(
+                [(x, H), (x + H, 0)], fill=lerp(top, bottom, (x + H) / (W + H)), width=4
+            )
+    elif kind == "stripes":
+        for x in range(0, W + H, 40):
+            col = top if (x // 40) % 2 else lerp(top, bottom, 0.5)
+            d.polygon([(x, 0), (x + 20, 0), (x + 20 - H, H), (x - H, H)], fill=col)
+    elif kind == "checker":
+        for gx in range(0, W, 60):
+            for gy in range(0, H, 60):
+                col = top if (gx // 60 + gy // 60) % 2 else bottom
+                d.rectangle([gx, gy, gx + 60, gy + 60], fill=col)
+    elif kind == "horizontal":
+        for x in range(W):
+            d.line([(x, 0), (x, H)], fill=lerp(top, bottom, x / (W - 1)))
+    else:
+        for y in range(H):
+            d.line([(0, y), (W, y)], fill=lerp(top, bottom, y / (H - 1)))
     return img
 
 
@@ -115,18 +142,28 @@ def fit(d, text, font_path, size, max_w):
     return ImageFont.truetype(font_path, size), size
 
 
-def wordart(d, text, y, size, wave=12):
+WORDART_SCHEMES = {
+    "rainbow": RAINBOW,
+    "fire": [(255, 230, 0), (255, 150, 0), (255, 60, 0)],
+    "ice": [(255, 255, 255), (150, 220, 255), (60, 160, 255)],
+    "gold": [(255, 220, 80), (230, 170, 30), (255, 240, 150)],
+    "candy": [(255, 80, 180), (255, 255, 255), (120, 220, 255)],
+}
+
+
+def wordart(d, text, y, size, wave=12, scheme="rainbow", tilt=0.0):
     font, size = fit(d, text, IMPACT, size, W - 60)
+    colors = WORDART_SCHEMES.get(scheme, RAINBOW)
     widths = [d.textlength(ch, font=font) for ch in text]
     x = (W - sum(widths)) / 2
     for i, ch in enumerate(text):
-        dy = math.sin(i / 1.6) * wave
+        dy = math.sin(i / 1.6) * wave + (i - len(text) / 2) * tilt
         d.text((x + 5, y + dy + 6), ch, font=font, fill=(40, 0, 60))
         d.text(
             (x, y + dy),
             ch,
             font=font,
-            fill=RAINBOW[i % len(RAINBOW)],
+            fill=colors[i % len(colors)],
             stroke_width=3,
             stroke_fill=(20, 20, 20),
         )
@@ -134,62 +171,110 @@ def wordart(d, text, y, size, wave=12):
     return size
 
 
-def body(d, lines, y, size=40, fill=(255, 255, 255), stroke=(0, 0, 90)):
+def body(d, lines, y, size=40, fill=(255, 255, 255), stroke=(0, 0, 90), align="center"):
     for line in lines:
-        font, s = fit(d, line, COMIC, size, W - 60)
+        font, s = fit(d, line, COMIC, size, W - 100)
         w = d.textlength(line, font=font)
-        d.text(
-            ((W - w) / 2, y),
-            line,
-            font=font,
-            fill=fill,
-            stroke_width=2,
-            stroke_fill=stroke,
-        )
+        x = {"left": 60, "right": W - 60 - w}.get(align, (W - w) / 2)
+        d.text((x, y), line, font=font, fill=fill, stroke_width=2, stroke_fill=stroke)
         y += int(s * 1.35)
     return y
 
 
-def stars(d, n, seed, avoid=(170, 470)):
-    """Sparkles in the margins only, never over the text band."""
+def decor(d, kind, n, seed, avoid=(170, 470)):
+    """Sparkles, hearts or bubbles in the margins, never over the text band."""
+    if kind == "none":
+        return
     r = random.Random(seed)
     for _ in range(n):
-        x, y, s = r.randint(10, W - 10), r.randint(10, H - 10), r.randint(6, 14)
+        x, y, s = r.randint(10, W - 10), r.randint(10, H - 10), r.randint(6, 16)
         if avoid[0] < y < avoid[1] and 60 < x < W - 60:
             continue
-        d.polygon(
+        if kind == "bubbles":
+            d.ellipse([x - s, y - s, x + s, y + s], outline=(255, 255, 255), width=2)
+        elif kind == "hearts":
+            d.ellipse([x - s, y - s, x, y], fill=(255, 90, 150))
+            d.ellipse([x, y - s, x + s, y], fill=(255, 90, 150))
+            d.polygon(
+                [(x - s, y - s / 2), (x + s, y - s / 2), (x, y + s)],
+                fill=(255, 90, 150),
+            )
+        else:
+            d.polygon(
+                [
+                    (x, y - s),
+                    (x + s / 3, y - s / 3),
+                    (x + s, y),
+                    (x + s / 3, y + s / 3),
+                    (x, y + s),
+                    (x - s / 3, y + s / 3),
+                    (x - s, y),
+                    (x - s / 3, y - s / 3),
+                ],
+                fill=(255, 255, 160),
+            )
+
+
+HEAD_COLORS = [
+    (255, 255, 120),
+    (120, 255, 255),
+    (255, 170, 230),
+    (255, 255, 255),
+    (180, 255, 150),
+]
+STROKES = [(0, 0, 90), (90, 0, 0), (0, 60, 0), (40, 0, 60), (0, 0, 0)]
+
+
+def look_for(slide, seed):
+    """A different look per slide, picked from the deck's seed so a rebuild draws the same deck.
+    Anything set in the slide's own "look" wins."""
+    r = random.Random(seed)
+    look = {
+        "bg": r.choice(
             [
-                (x, y - s),
-                (x + s / 3, y - s / 3),
-                (x + s, y),
-                (x + s / 3, y + s / 3),
-                (x, y + s),
-                (x - s / 3, y + s / 3),
-                (x - s, y),
-                (x - s / 3, y - s / 3),
-            ],
-            fill=(255, 255, 160),
-        )
+                "vertical",
+                "vertical",
+                "horizontal",
+                "diagonal",
+                "radial",
+                "stripes",
+                "checker",
+            ]
+        ),
+        "palette": r.choice(PALETTES),
+        "align": r.choice(["center", "center", "left"]),
+        "scale": r.choice([0.85, 0.95, 1.0, 1.1, 1.2]),
+        "scheme": r.choice(list(WORDART_SCHEMES)),
+        "wave": r.choice([4, 8, 12, 18]),
+        "tilt": r.choice([0.0, 0.0, -0.6, 0.6]),
+        "decor": r.choice(["stars", "stars", "bubbles", "hearts", "none"]),
+        "head": r.choice(HEAD_COLORS),
+        "stroke": r.choice(STROKES),
+        "panel": r.random() < 0.35,
+    }
+    look.update(slide.get("look", {}))
+    if slide.get("colors"):
+        look["palette"] = tuple(hexrgb(c) for c in slide["colors"])
+    return look
 
 
-def draw_slide(slide, i, out):
+def draw_slide(slide, i, out, seed="deck"):
     if slide.get("style") == "image":
-        img = Image.open(slide["image"]).convert("RGB").resize((W, H))
-        img.save(out)
+        Image.open(slide["image"]).convert("RGB").resize((W, H)).save(out)
         return
-    top, bottom = (
-        tuple(hexrgb(c) for c in slide["colors"])
-        if slide.get("colors")
-        else PALETTES[i % len(PALETTES)]
-    )
-    img = gradient(top, bottom)
-    d = ImageDraw.Draw(img)
-    style = slide.get("style", "text")
+    lk = look_for(slide, f"{seed}-{i}")
+    top, bottom = lk["palette"]
+    img = background(lk["bg"], top, bottom)
+    d = ImageDraw.Draw(img, "RGBA")
+    if lk["panel"]:  # a translucent box behind the text, the "text frame" look
+        d.rounded_rectangle([40, 120, W - 40, H - 40], radius=24, fill=(0, 0, 0, 90))
+    k, style = lk["scale"], slide.get("style", "text")
+    art = dict(scheme=lk["scheme"], wave=lk["wave"], tilt=lk["tilt"])
     if style == "title":
-        stars(d, 16, i)
-        wordart(d, slide["title"], 130, 72)
+        decor(d, lk["decor"], 16, i)
+        wordart(d, slide["title"], 130, int(72 * k), **art)
         if slide.get("sub"):
-            body(d, [slide["sub"]], 290, 30, (255, 255, 0), (120, 0, 0))
+            body(d, [slide["sub"]], 290, int(30 * k), lk["head"], (120, 0, 0))
         body(
             d,
             ["!!! BİLGİSAYARINIZIN SESİNİ AÇINIZ !!!"],
@@ -199,11 +284,20 @@ def draw_slide(slide, i, out):
             (160, 0, 0),
         )
     elif style in ("wordart", "reveal", "closing"):
-        stars(d, 20 if style != "wordart" else 10, i)
+        decor(d, lk["decor"], 20 if style != "wordart" else 10, i)
         y = 90 if slide.get("body") else 190
-        wordart(d, slide["title"], y, 80 if style == "wordart" else 66, 12)
+        wordart(
+            d, slide["title"], y, int((80 if style == "wordart" else 66) * k), **art
+        )
         if slide.get("body"):
-            body(d, slide["body"], 270, 38)
+            body(
+                d,
+                slide["body"],
+                270,
+                int(38 * k),
+                stroke=lk["stroke"],
+                align=lk["align"],
+            )
         if slide.get("sub"):
             body(
                 d,
@@ -215,10 +309,30 @@ def draw_slide(slide, i, out):
     else:
         y = 50
         if slide.get("heading"):
-            y = body(d, [slide["heading"]], y, 44, (255, 255, 120)) + 20
-        y = body(d, slide.get("body", []), max(y, 140), 40)
+            y = (
+                body(
+                    d, [slide["heading"]], y, int(44 * k), lk["head"], align=lk["align"]
+                )
+                + 20
+            )
+        y = body(
+            d,
+            slide.get("body", []),
+            max(y, 140),
+            int(40 * k),
+            stroke=lk["stroke"],
+            align=lk["align"],
+        )
         if slide.get("note"):
-            body(d, [slide["note"]], max(y + 30, 400), 32, (255, 230, 200), (120, 0, 0))
+            body(
+                d,
+                [slide["note"]],
+                max(y + 30, 400),
+                32,
+                (255, 230, 200),
+                (120, 0, 0),
+                align=lk["align"],
+            )
     img.save(out)
 
 
@@ -368,7 +482,7 @@ def build(sb):
     mixed = py("mix.py", work / "timeline.json", work / "soundtrack.wav")
 
     for i, slide in enumerate(slides):
-        draw_slide(slide, i, work / f"s{i}.png")
+        draw_slide(slide, i, work / f"s{i}.png", sb["name"])
     show = {
         "audio": str(work / "soundtrack.wav"),
         "fade": 0.5,
