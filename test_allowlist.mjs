@@ -955,6 +955,31 @@ assert.equal(scanDocument(zipOf("word/document.xml", "<w:t>hello</w:t>"), ".docx
   assert.deepEqual(words[1], { start: 6.67, end: 7.68, text: "ocak." }, "times and text parse");
   assert.equal(speechEndSeconds(words, "Korkma, ocak."), 7.68, "the end of the last intended word");
   assert.equal(speechEndSeconds(words, "Korkma, OCAK"), 7.68, "case and punctuation do not matter");
+  // A take is scored by how much of the text it says, in order, against how many words it says.
+  const { speechMatchScore } = await import("./src/server.mjs");
+  const said = (line) => line.split(" ").map((text) => ({ text, start: 0, end: 0 }));
+  assert.equal(
+    speechMatchScore(said("Temel bir gün bilgisayar almış"), "Temel bir gün bilgisayar almış."),
+    1,
+    "an exact take scores 1",
+  );
+  assert.ok(
+    speechMatchScore(said("bugün size makaleyi anlatıyorum bunun"), "bugün size makaleyi anlatıyorum.") < 0.85,
+    "an extra word inside the take marks it for another take",
+  );
+  assert.ok(
+    speechMatchScore(said("Temel bir gün"), "Temel bir gün bilgisayar almış") < 0.85,
+    "a dropped ending does too",
+  );
+  assert.equal(speechMatchScore([], "güzel şey"), 0, "silence scores 0");
+  assert.equal(
+    speechMatchScore(
+      said("2022 sonbaharında enflasyon %80'i geçti"),
+      "İki bin yirmi iki sonbaharında enflasyon yüzde sekseni geçti",
+    ),
+    1,
+    "numbers spelled in the text and written as digits by whisper are not a mismatch",
+  );
   const glued = [{ start: 4, end: 5, text: "ocakta." }];
   assert.ok(
     Math.abs(speechEndSeconds(glued, "son ocak.") - (4 + 1 * (4 / 6))) < 1e-9,
@@ -2035,6 +2060,13 @@ assert.deepEqual(unansweredChats([STATS], 1 * H), [], "answering it takes it off
     parseSpeechMarkup("[voice SAY:Yelda]x[/voice]")[0].voice,
     "say:Yelda",
     "a macOS voice name keeps its case",
+  );
+  const { splitSentences } = await import("./src/speech-markup.mjs");
+  const split = splitSentences(parseSpeechMarkup("[voice anyone]Bir cümle. İkinci cümle![/voice] [pause 300] son"));
+  assert.deepEqual(
+    split.map((p) => (p.type === "pause" ? `pause ${p.ms}` : `${p.voice}:${p.text}`)),
+    ["anyone:Bir cümle.", "pause 150", "anyone:İkinci cümle!", "pause 300", "null:son"],
+    "each sentence becomes its own part in the same voice, with a short beat between",
   );
 
   // The client against a fake service: it sends the token, a refusal rejects, a hang times out.
