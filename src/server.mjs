@@ -1,6 +1,7 @@
 import { execFile, execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import {
+  copyFileSync,
   existsSync,
   mkdirSync,
   readdirSync,
@@ -645,6 +646,16 @@ function respellLoanwords(text) {
   return result;
 }
 
+// Loanword respelling for Turkish. Markup tags are left alone: respelling "[voice loop]" into
+// "[voice lup]" would name a voice nobody approved for the chat.
+function spokenText(clean, lang) {
+  if (lang !== "tr") return clean;
+  return clean
+    .split(/(\[[^\]]*\])/)
+    .map((part, i) => (i % 2 ? part : respellLoanwords(part)))
+    .join("");
+}
+
 // Shared by wa_send_voice and wa_send's voice-only auto-route, so both go through one TTS path.
 // `rate` omitted falls back to the persisted default (see speakingRate()/"/speaking-speed"),
 // not to each engine's own stock pace. `lang` ("tr"/"en") picks the Piper voice on the default
@@ -664,15 +675,7 @@ async function speakToBuffer(
   try {
     const wav = join(dir, "out.wav");
     const clean = stripEmoji(text);
-    // Markup tags are left alone: respelling "[voice loop]" into "[voice lup]" would name a voice
-    // nobody approved for the chat.
-    const spoken =
-      lang === "tr"
-        ? clean
-            .split(/(\[[^\]]*\])/)
-            .map((part, i) => (i % 2 ? part : respellLoanwords(part)))
-            .join("")
-        : clean;
+    const spoken = spokenText(clean, lang);
     await synthWav(spoken, voice, rate, lang, wav, { clone, cloneOptional, voices });
     return encodeVoiceNote(wav);
   } finally {
@@ -2971,6 +2974,71 @@ server.registerTool(
     return {
       content: [{ type: "text", text: `Sent voice message to ${to}.` }],
     };
+  },
+);
+
+// Voices that may be rendered to a file. A file in the outbox can be sent to any allowlisted chat
+// (inside a video, as audio), so a clone qualifies only when it is already allowed in every chat,
+// "*" in voices.json. A voice limited to certain chats stays a voice-note-only voice, and the file
+// path can never take it anywhere a voice note could not go.
+export function resolveFileVoices(text, clone) {
+  const limited = (name) => `the "${name}" voice is limited to certain chats, so it cannot be rendered to a file`;
+  const spans = resolveVoiceSpans(text, "*");
+  if (spans.error) {
+    const name = /is not allowed/.test(spans.error) ? spans.error.match(/"([^"]+)"/)?.[1] : null;
+    return { error: name ? limited(name) : spans.error };
+  }
+  if (!clone) return { voices: spans.voices };
+  const cloned = resolveClone(clone, "*");
+  if (cloned.error) return { error: /is not allowed/.test(cloned.error) ? limited(clone) : cloned.error };
+  return { voices: spans.voices, clone: cloned };
+}
+
+server.registerTool(
+  "wa_render_voice",
+  {
+    title: "Render speech to a file in the outbox",
+    description:
+      "Speak text into state/outbox/NAME.wav without sending anything, for narration under a video or " +
+      "a soundtrack built with the sound-design skill. Same engines and [voice NAME] spans as " +
+      "wa_send_voice. A cloned voice is only allowed here when voices.json lets it into every chat, " +
+      "since the file can go anywhere afterwards. The text gets the same secret scan as a send.",
+    inputSchema: {
+      text: z.string().min(1),
+      name: z.string().describe("File name without extension: lowercase letters, digits, - or _"),
+      voice: z.string().optional().describe("A macOS `say` voice name for the parts outside [voice] tags"),
+      clone: z.string().optional().describe("A cloned voice for the parts outside [voice] tags"),
+      language: z.enum(["tr", "en"]).optional(),
+      rate: z.number().positive().optional(),
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+  },
+  async ({ text, name, voice, clone, language, rate }) => {
+    const refuse = (why) => ({ isError: true, content: [{ type: "text", text: `Refused: ${why}.` }] });
+    if (!/^[a-z0-9_-]{1,40}$/.test(name)) return refuse("the name must be lowercase letters, digits, - or _");
+    const secret = scanOutbound(text);
+    if (secret) return refuse(secret);
+    const resolved = resolveFileVoices(text, clone);
+    if (resolved.error) return refuse(resolved.error);
+    mkdirSync(GENERATE_OUT_DIR, { recursive: true });
+    const out = join(GENERATE_OUT_DIR, `${name}.wav`);
+    const lang = language ?? "tr";
+    // The XTTS service only writes under the temp directory (its own guard), so the render happens
+    // there and the finished file is copied into the outbox.
+    const dir = mkdtempSync(join(tmpdir(), "wa-render-"));
+    try {
+      const tmp = join(dir, "out.wav");
+      await synthWav(spokenText(stripEmoji(text), lang), voice, rate ?? speakingRate(), lang, tmp, {
+        clone: resolved.clone,
+        voices: resolved.voices,
+      });
+      copyFileSync(tmp, out);
+    } catch (err) {
+      return { isError: true, content: [{ type: "text", text: `TTS failed: ${err}` }] };
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+    return { content: [{ type: "text", text: `Rendered ${out}` }] };
   },
 );
 

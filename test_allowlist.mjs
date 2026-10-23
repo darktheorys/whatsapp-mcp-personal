@@ -2015,6 +2015,16 @@ assert.deepEqual(unansweredChats([STATS], 1 * H), [], "answering it takes it off
     "a macOS voice needs no clone",
   );
   assert.deepEqual(resolveVoiceSpans("düz metin", group).voices, {}, "plain text has no spans");
+  // Rendering to a file is open only to voices already allowed in every chat, since a file can go anywhere.
+  const { resolveFileVoices } = await import("./src/server.mjs");
+  assert.ok(resolveFileVoices("[voice anyone]a[/voice]").voices.anyone, "an any-chat voice can be rendered to a file");
+  assert.match(
+    resolveFileVoices("[voice alice]a[/voice]").error,
+    /limited to certain chats/,
+    "a chat-limited voice cannot",
+  );
+  assert.match(resolveFileVoices("düz", "alice").error, /limited to certain chats/, "not as the base clone either");
+  assert.ok(resolveFileVoices("düz", "anyone").clone.ref, "an any-chat base clone resolves");
   const long = Array.from({ length: 25 }, (_, i) => `[voice anyone]satir ${i}[/voice] [pause 200]`).join(" ");
   assert.match(
     resolveVoiceSpans(long, group).error,
