@@ -77,6 +77,13 @@ reveal, image and closing, lines per slide with an optional other voice and effe
 
 `check_av.py MEDIA --script lines.txt` is the before-sending check on its own, for anything else.
 
+Do not ship the same deck every time (owner, 2026-10-23: "the style is good, but colours, sizes
+etc. can change"). `pps.py` gives every slide its own look, picked from the deck's name: gradient
+direction, radial, stripes or checker backgrounds, palette, text size, left or centred text, WordArt
+colour scheme (rainbow, fire, ice, gold, candy), wave and tilt, stars, hearts or bubbles, and
+sometimes a translucent panel behind the text. A different `name` gives a different deck. Set
+`"look": {...}` on a slide to pin any of these, and vary the slide styles and lengths themselves too.
+
 ## Recipe for a narrated joke video (by hand, when the storyboard does not fit)
 
 1. Write the lines. Each character gets a voice from the owner's approved cast (`state/notes.md`).
