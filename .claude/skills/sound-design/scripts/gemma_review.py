@@ -28,6 +28,7 @@ import os
 import re
 import subprocess
 import sys
+import unicodedata
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[4]
@@ -97,10 +98,30 @@ def duration(path):
 
 def words(text):
     """Lowercase words with contractions spelled out on both sides, so "can't" and "cannot" match."""
-    text = text.lower().replace("’", "'")
+    text = text.replace("’", "'").lower()
+    # Turkish and German letters fold to plain ones (ç ş ğ ö ü ß ı), the way the server's own word
+    # check does; without this "nankör" splits into "nank" and "r" and every such word looks missed.
+    text = "".join(
+        c for c in unicodedata.normalize("NFD", text) if not unicodedata.combining(c)
+    )
+    text = text.replace("ı", "i").replace("ß", "ss")
     for short, full in CONTRACTIONS:
         text = text.replace(short, full)
-    return re.findall(r"[a-z0-9]+", text)
+    # A script spells numbers ("on dört Mart iki bin yirmi yedi") and a transcript writes digits, so
+    # numbers are left out on both sides.
+    return [
+        w
+        for w in re.findall(r"[a-z0-9]+", text)
+        if not (w.isdigit() or NUMBER_WORDS.match(w))
+    ]
+
+
+NUMBER_WORDS = re.compile(
+    r"^(sifir|bir|iki|uc|dort|bes|alti|yedi|sekiz|dokuz|on|yirmi|otuz|kirk|elli|altmis|yetmis|"
+    r"seksen|doksan|yuz|bin|milyon|zero|one|two|three|four|five|six|seven|eight|nine|ten|"
+    r"eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|"
+    r"thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand|million)$"
+)
 
 
 CONTRACTIONS = [

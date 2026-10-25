@@ -395,6 +395,19 @@ def draw_clean(d, sb, shot, since_cut, t, caps, length, subs=()):
 
 
 def build(sb):
+    # House rule (owner, 2026-10-25): every video with non-English audio gets English subtitles.
+    if sb.get("lang", "en") != "en":
+        bare = [s["name"] for s in specs(sb) if not s["sub"]]
+        if bare:
+            raise SystemExit(
+                json.dumps(
+                    {
+                        "ok": False,
+                        "error": 'non-English audio needs an English subtitle on every line (the "en" field)',
+                        "missing": bare,
+                    }
+                )
+            )
     work = REPO / "state" / "tmp" / f"reel-{sb['name']}"
     work.mkdir(parents=True, exist_ok=True)
     sp, voice, fx, caps, subs, shots, length = plan(sb)
