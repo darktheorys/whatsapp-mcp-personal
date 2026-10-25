@@ -16,7 +16,9 @@ STORYBOARD.json:
   "name": "lira",                                  # file prefix, lowercase
   "voice": "6",                                    # default narrator voice (an approved clone)
   "bed": {"mood": "happy", "bpm": 108},
-  "aspect": "9:16",                                # optional, default 16:9 (9:16 is 720x1280)
+  # or a free-to-use recording, switching on a slide:
+  # "bed": {"file": "a.flac", "switch": {"file": "b.flac", "slide": 7, "start": 0, "gain_db": -3}},
+  "aspect": "9:16",                               # optional, default 16:9 (9:16 is 720x1280)
   "lang": "en",                                    # optional, language of the "sound on" line
   "slides": [
     {"style": "title", "title": "LİRAMIZ NEDEN ERİYOR?", "sub": "a smaller line",
@@ -26,6 +28,8 @@ STORYBOARD.json:
     {"style": "wordart", "title": "BÜYÜK YAZI!", "body": ["..."], "lines": ["..."]},
     {"style": "reveal", "title": "PEKİ DURSUN NE YAPMIŞ?", "lines": ["Peki Dursun ne yapmış?"]},
     {"style": "image", "image": "path/to/own.png", "lines": ["..."]},
+    {"style": "picture", "title": "BAŞLIK", "picture": "path/to/own.png", "body": ["caption"],
+     "lines": ["..."]},                            # heading, framed picture, caption
     {"style": "closing", "title": "GÜLMEK SİZE YAKIŞIYOR...", "sub": "hazırlayan: Makine", "lines": ["..."]}
   ]
 }
@@ -69,7 +73,9 @@ def set_aspect(aspect):
     if aspect == "9:16":
         W, H, YS, FS = 720, 1280, 1.5, 1.5
         YOFF = int((H - 540 * YS) / 2)
-    elif aspect != "16:9":
+    elif aspect == "16:9":
+        W, H, YS, YOFF, FS = 960, 540, 1.0, 0, 1.0
+    else:
         raise SystemExit(json.dumps({"ok": False, "error": "aspect is 16:9 or 9:16"}))
 
 
@@ -344,6 +350,31 @@ def draw_slide(slide, i, out, seed="deck", lang="tr"):
             (255, 255, 255),
             (160, 0, 0),
         )
+    elif style == "picture":
+        # The pps classic: a heading, a picture in a white frame, one line under it.
+        # Laid out on the whole frame, not the 540-high band: a picture wants the full height.
+        y = int(H * 0.05)
+        if slide.get("title"):
+            y = wordart(d, slide["title"], y, int(54 * k), **art) + 10
+        cap = H - int(H * (0.18 if H > W else 0.16))  # the caption band starts here
+        room = cap - y - 20
+        side = max(120, min(W - 80, room))
+        pic = Image.open(slide["picture"]).convert("RGB")
+        pic.thumbnail((side, side))
+        px, py = (W - pic.width) // 2, y + (room - pic.height) // 2
+        d.rectangle(
+            [px - 8, py - 8, px + pic.width + 8, py + pic.height + 8],
+            fill=(255, 255, 255),
+        )
+        img.paste(pic, (px, py))
+        body(
+            d,
+            slide.get("body", []),
+            max(py + pic.height + 22, cap),
+            int(34 * k),
+            stroke=lk["stroke"],
+            align="center",
+        )
     elif style in ("wordart", "reveal", "closing"):
         decor(d, lk["decor"], 20 if style != "wordart" else 10, i)
         y = Y(90 if slide.get("body") else 190)
@@ -449,6 +480,58 @@ def py(script, *args):
     return json.loads(res.stdout.strip().splitlines()[-1])
 
 
+def make_file_bed(bed, slide_at, length, out):
+    """A bed from a recording instead of the synth: looped or cut to the video's length, and
+    optionally switching to a second recording on one slide ("switch": {"file", "slide"}) with
+    a short crossfade, for a story whose mood turns. Use only recordings that are free to use
+    (public domain or a licence that allows it), never a song cut out of someone's video."""
+    first = Path(bed["file"])
+    sw = bed.get("switch")
+    if not sw:
+        cmd = ["-stream_loop", "-1", "-i", str(first), "-t", str(length)]
+        ff = ["-af", f"afade=t=out:st={max(0, length - 2.5)}:d=2.5"]
+    else:
+        cut = slide_at[sw["slide"]]
+        fade = 1.2
+        cmd = [
+            "-stream_loop",
+            "-1",
+            "-i",
+            str(first),
+            "-stream_loop",
+            "-1",
+            "-i",
+            str(sw["file"]),
+        ]
+        # Each recording is levelled on its own first: a brass march is far louder than a solo
+        # piano, and levelling the joined bed as one would bury the voice after the switch.
+        lv = "aresample=44100,loudnorm=I=-24:TP=-2:LRA=11"
+        ff = [
+            "-filter_complex",
+            f"[0:a]atrim=0:{cut + fade},asetpts=N/SR/TB,{lv}[a];"
+            f"[1:a]atrim={sw.get('start', 0)}:{sw.get('start', 0) + length - cut + fade},"
+            f"asetpts=N/SR/TB,{lv},volume={sw.get('gain_db', 0)}dB[b];"
+            f"[a][b]acrossfade=d={fade}[x];"
+            f"[x]atrim=0:{length},afade=t=out:st={max(0, length - 2.5)}:d=2.5",
+        ]
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-v",
+            "error",
+            "-y",
+            *cmd,
+            *ff,
+            "-ar",
+            "44100",
+            "-ac",
+            "2",
+            str(out),
+        ],
+        check=True,
+    )
+
+
 def build(sb):
     work = REPO / "state" / "tmp" / f"pps-{sb.get('out', sb['name'])}"
     work.mkdir(parents=True, exist_ok=True)
@@ -522,17 +605,20 @@ def build(sb):
     length = round(t - GAP + TAIL, 2)
 
     bed = sb.get("bed", {})
-    py(
-        "sfx.py",
-        "bed",
-        work / "bed.wav",
-        "--seconds",
-        length,
-        "--mood",
-        bed.get("mood", "happy"),
-        "--bpm",
-        bed.get("bpm", 108),
-    )
+    if bed.get("file"):
+        make_file_bed(bed, slide_at, length, work / "bed.wav")
+    else:
+        py(
+            "sfx.py",
+            "bed",
+            work / "bed.wav",
+            "--seconds",
+            length,
+            "--mood",
+            bed.get("mood", "happy"),
+            "--bpm",
+            bed.get("bpm", 108),
+        )
     timeline = {
         "length": length,
         "bed": {"file": str(work / "bed.wav")},
