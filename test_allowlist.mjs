@@ -18,6 +18,8 @@ process.env.WA_CONFIG_PATH = cfg;
 const voiceDir = mkdtempSync(join(tmpdir(), "wa-voices-"));
 process.env.WA_VOICES_DIR = join(voiceDir, "voices");
 process.env.WA_XTTS_SOCK = join(voiceDir, "x.sock");
+// Without a key file ElevenLabs is off, so no test reaches the real service or spends the real quota.
+process.env.WA_ELEVENLABS_KEY_PATH = join(voiceDir, "no-such-key");
 process.env.WA_DAEMON_TOKEN = join(voiceDir, "token");
 writeFileSync(process.env.WA_DAEMON_TOKEN, "t".repeat(64) + "\n");
 // The files handleIncoming writes besides the database: the wake log the live session tails, contacts,
@@ -2338,6 +2340,42 @@ assert.deepEqual(unansweredChats([STATS], 1 * H), [], "answering it takes it off
 
 // Runs last: it deliberately exhausts the window, so anything after it would see a full budget.
 // Starts from an empty window: earlier sections (the end-to-end one) send through the guard too.
+
+// ElevenLabs is the first-choice voice and must never be the reason a note fails: no key means off, a
+// refusal backs it off, and a good answer becomes a plain wav at the rate the other engines use.
+{
+  const el = await import("./src/elevenlabs-client.mjs");
+  el.resetElevenLabsForTest();
+  assert.equal(el.elevenLabsAvailable(), false, "no key file, the engine is off");
+  await assert.rejects(el.elevenLabsRender({ text: "x", outWav: join(voiceDir, "n.wav") }), /no key/);
+  writeFileSync(process.env.WA_ELEVENLABS_KEY_PATH, "ELEVENLABS_API_KEY=test-key\n");
+  assert.equal(el.elevenLabsKey(), "test-key", "a NAME=value line is accepted");
+  assert.equal(el.elevenLabsAvailable(), true);
+  let seen;
+  const good = async (url, init) => {
+    seen = { url, init };
+    return { ok: true, status: 200, arrayBuffer: async () => new Uint8Array(4800).buffer };
+  };
+  const out = join(voiceDir, "el.wav");
+  await el.elevenLabsRender({ text: "hello", lang: "en", speed: 3, outWav: out, fetchFn: good });
+  assert.match(seen.url, /pcm_24000/, "asks for 24 kHz pcm");
+  assert.equal(seen.init.headers["xi-api-key"], "test-key");
+  assert.equal(JSON.parse(seen.init.body).voice_settings.speed, 1.2, "speed is clamped to the API range");
+  const wav = readFileSync(out);
+  assert.equal(wav.subarray(0, 4).toString(), "RIFF");
+  assert.equal(wav.readUInt32LE(24), 24000, "wav header carries the sample rate");
+  assert.equal(wav.length, 44 + 4800);
+  const refuse = (status) => async () => ({ ok: false, status, text: async () => "quota_exceeded" });
+  await assert.rejects(el.elevenLabsRender({ text: "x", outWav: out, fetchFn: refuse(401) }), /refused \(401\)/);
+  assert.equal(el.elevenLabsAvailable(), false, "a refusal backs the engine off");
+  await assert.rejects(el.elevenLabsRender({ text: "x", outWav: out, fetchFn: good }), /backed off/);
+  el.resetElevenLabsForTest();
+  await assert.rejects(el.elevenLabsRender({ text: "x", outWav: out, fetchFn: refuse(500) }), /refused \(500\)/);
+  assert.equal(el.elevenLabsAvailable(), true, "a server error does not back the engine off");
+  rmSync(process.env.WA_ELEVENLABS_KEY_PATH);
+  el.resetElevenLabsForTest();
+}
+
 (await import("./src/server.mjs")).resetSendLimitForTest();
 let sent = 0;
 while (!overSendLimit()) sent++;
