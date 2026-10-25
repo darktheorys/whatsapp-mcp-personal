@@ -68,7 +68,9 @@ VOICE_COLORS = {
     "1": "#c8ff7a",
     "2": "#ff9ad5",
 }
-LEAD, GAP, TAIL = 0.15, 0.22, 1.6  # a reel starts talking at once and never pauses long
+# A second of slack before the first word (owner, 2026-10-25: words that start at once sound bad),
+# short gaps after, and a tail. Reels never pause long between lines.
+LEAD, GAP, TAIL = 1.0, 0.22, 1.6
 OUTBOX = REPO / "state" / "outbox"
 
 
@@ -85,6 +87,9 @@ def specs(sb):
                     "voice": line.get("voice", sb.get("voice", "6")),
                     "fx": line.get("fx"),
                     "sub": line.get("en"),  # a translation shown under the caption
+                    "pause": line.get(
+                        "pause", 0
+                    ),  # extra silence after the line, seconds
                 }
             )
     return out
@@ -164,7 +169,7 @@ def plan(sb):
     t = LEAD
     for si, shot in enumerate(sb["shots"]):
         start = 0.0 if si == 0 else t
-        if si:
+        if si and sb.get("sfx", True):
             fx.append(
                 {
                     "file": str(kit / "whoosh.wav"),
@@ -227,17 +232,18 @@ def plan(sb):
                     }
                 )
                 acc += span
-            t += dur + GAP
+            t += dur + GAP + line["pause"]
         shots.append({**shot, "t0": start, "t1": t})
     length = round(t - GAP + TAIL, 2)
     shots[-1]["t1"] = length
-    fx.append(
-        {
-            "file": str(kit / "rimshot.wav"),
-            "at": round(t - GAP + 0.15, 2),
-            "gain_db": -6,
-        }
-    )
+    if sb.get("sfx", True):
+        fx.append(
+            {
+                "file": str(kit / "rimshot.wav"),
+                "at": round(t - GAP + 0.15, 2),
+                "gain_db": -6,
+            }
+        )
     return sp, voice, fx, caps, subs, shots, length
 
 
@@ -414,7 +420,26 @@ def build(sb):
 
     music = sb.get("music", {})
     bed = work / "bed.wav"
-    if music.get("file"):
+    if music.get(
+        "none"
+    ):  # a deadpan sketch: no music at all, just the voices and a silent bed
+        subprocess.run(
+            [
+                "ffmpeg",
+                "-v",
+                "error",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "anullsrc=r=44100:cl=stereo",
+                "-t",
+                str(length),
+                str(bed),
+            ],
+            check=True,
+        )
+    elif music.get("file"):
         m = dict(music)
         if m.get("switch"):
             m["switch"] = {**m["switch"], "slide": m["switch"]["shot"]}
