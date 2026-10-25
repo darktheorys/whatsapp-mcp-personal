@@ -29,6 +29,11 @@ export const DAEMON_TOKEN_PATH = process.env.WA_DAEMON_TOKEN ?? join(STATE_DIR, 
 export const XTTS_SOCK_PATH = process.env.WA_XTTS_SOCK ?? join(STATE_DIR, "xtts.sock");
 export const VOICES_DIR = process.env.WA_VOICES_DIR ?? join(STATE_DIR, "voices");
 export const XTTS_DEFAULT_SPEAKER = "Damien Black";
+// ElevenLabs is the first choice for an ordinary voice note (src/elevenlabs-client.mjs). The key is a
+// file in state/, so a missing file just means the engine is off. Voice and model can be overridden.
+export const ELEVENLABS_KEY_PATH = process.env.WA_ELEVENLABS_KEY_PATH ?? join(STATE_DIR, "elevanlabs_key");
+export const ELEVENLABS_VOICE = process.env.WA_ELEVENLABS_VOICE ?? "EXAVITQu4vr4xnSDxMaL"; // Sarah
+export const ELEVENLABS_MODEL = process.env.WA_ELEVENLABS_MODEL ?? "eleven_multilingual_v2";
 
 export function ensureDirs() {
   mkdirSync(AUTH_DIR, { recursive: true, mode: 0o700 });

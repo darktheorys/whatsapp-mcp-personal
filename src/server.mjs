@@ -24,6 +24,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { loadOrCreateDaemonToken, serveOnSocket } from "./daemon-transport.mjs";
 import { DocumentScanError, documentScanTexts } from "./doc-scan.mjs";
 import { MAX_SEGMENTS, parseSpeechMarkup, speechSegmentCount, splitSentences, toSayText } from "./speech-markup.mjs";
+import { ELEVENLABS_SAMPLE_RATE, elevenLabsAvailable, elevenLabsRender } from "./elevenlabs-client.mjs";
 import { XTTS_SAMPLE_RATE, xttsRender } from "./xtts-client.mjs";
 import { defaultCloneFor, resolveClone } from "./voices.mjs";
 import {
@@ -572,6 +573,23 @@ export async function synthWav(
     sayRender(toSayText(text), voice, rate, outWav);
     return report;
   }
+  // First choice for an ordinary note: ElevenLabs. Never for a clone (nobody asked for that vendor's
+  // voice there, and a clone must not fall back). Any failure, including a used-up quota, drops
+  // through to XTTS, then Piper, then macOS `say`, so the note still goes out.
+  if (!clone && elevenLabsAvailable()) {
+    try {
+      await joinSegments(
+        segments,
+        ELEVENLABS_SAMPLE_RATE,
+        (segment, file) => elevenLabsRender({ text: segment.text, lang, speed: rate / segment.scale, outWav: file }),
+        outWav,
+      );
+      report.push({ text, score: null, takes: 1, engine: "elevenlabs" });
+      return report;
+    } catch (err) {
+      logger.warn({ err: String(err.message ?? err) }, "elevenlabs unavailable, using the local voice for this note");
+    }
+  }
   const xttsSegments = split ? splitSentences(segments) : segments;
   // The part limit is checked before sentences are split, so it is checked again here: a single
   // very long text would otherwise become dozens of sentences, each with up to three takes.
@@ -605,14 +623,30 @@ export async function synthWav(
     logger.warn({ err: String(err.message ?? err) }, "xtts unavailable, using piper for this voice note");
     report.length = 0; // whatever XTTS managed before failing is not in the note that goes out
   }
-  await joinSegments(
-    segments,
-    piperSampleRate(lang),
-    (segment, file) => piperRender(segment.text, lang, rate, segment.scale, file),
-    outWav,
-  );
+  try {
+    await joinSegments(
+      segments,
+      piperSampleRate(lang),
+      (segment, file) => piperRender(segment.text, lang, rate, segment.scale, file),
+      outWav,
+    );
+  } catch (err) {
+    // No Piper voice for this language (German has none) or Piper is broken: the system voice is the
+    // last resort, so the note still goes out.
+    logger.warn({ err: String(err.message ?? err) }, "piper unavailable, using the macOS voice for this note");
+    await joinSegments(
+      segments,
+      XTTS_SAMPLE_RATE,
+      (segment, file) =>
+        sayRender(toSayText(segment.text), SAY_FALLBACK_VOICE[lang] ?? "Samantha", rate / segment.scale, file),
+      outWav,
+    );
+  }
   return report;
 }
+
+// The macOS voice per language when every other engine is down (`say -v '?'` lists what is installed).
+const SAY_FALLBACK_VOICE = { tr: "Yelda", en: "Samantha", de: "Anna" };
 
 // One macOS `say` render to a wav. `rate` is the multiplier on say's own default pace. The text goes
 // in through a file, never as an argument: `say` parses a text argument that starts with "-f" as its
