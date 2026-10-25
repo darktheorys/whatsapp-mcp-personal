@@ -83,6 +83,17 @@ it for one build and writes `NAME-16x9.mp4` / `NAME-9x16.mp4`, so both versions 
 voice files. A vertical deck uses larger text and wraps long lines instead of shrinking them.
 `"lang": "en"` turns the opening "sound on" line English.
 
+Pictures: a `"picture"` slide is the pps classic, a heading, the picture in a white frame and one
+caption line. Generate the pictures locally (image-generation skill), one shared style phrase in
+every prompt so they match ("cheerful 2000s clipart, bright flat cartoon, plain background, no
+text"), 3 or 4 key moments, not every slide. About 8 minutes per picture, so start them first.
+
+Music: the synth bed is the fallback. A real recording reads much better, as long as it is free to
+use: public-domain recordings from Wikimedia Commons (Satie, Chopin, US military band marches)
+fit the genre. Never a song cut from someone's video. `"bed": {"file": ..., "switch": {"file":
+..., "slide": N, "gain_db": -3}}` changes music on the twist slide with a crossfade; each
+recording is levelled on its own first. Keep the downloads and a CREDITS.txt in `state/tmp/beds/`.
+
 Do not ship the same deck every time (owner, 2026-10-23: "the style is good, but colours, sizes
 etc. can change"). `pps.py` gives every slide its own look, picked from the deck's name: gradient
 direction, radial, stripes or checker backgrounds, palette, text size, left or centred text, WordArt
@@ -120,7 +131,7 @@ sometimes a translucent panel behind the text. A different `name` gives a differ
 
 ## Rules
 
-- Make the sound ourselves. The references are for learning the shape and the numbers only.
+- Make the sound ourselves, or use a recording that is free to use (public domain). The references are for learning the shape and the numbers only.
   Never cut audio out of someone's video to reuse it, and never ship a downloaded song as a bed.
 - Effects punctuate, they do not decorate: one on a slide change, one on the punchline. Six
   overlapping effects read as noise.
