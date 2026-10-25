@@ -217,3 +217,16 @@ sometimes a translucent panel behind the text. A different `name` gives a differ
   prompt for "exactly two people" or "exactly one person", no glass, no reflections, for photo styles.
   A title sits over the top fifth of the frame, so ask for headroom ("lots of empty space above her
   head") or the title covers the face.
+- **A second of slack before the first word** (owner, 2026-10-25: "words start directly which doesnt
+  sound good"): `reel.py` starts the first line 1.0 s in (`LEAD`), `pps.py` has a 2.5 s intro. Keep it
+  on every video, and leave the first shot's hook title on screen during it.
+- A line meant to be cut off ("I love y...") must be trimmed in audio: XTTS says the whole word.
+  Take Whisper's word times (`whisper-cli -ml 1 -sow`), cut about 0.08 s into the word and fade out
+  over 0.04 s. Whisper then still "hears" the finished word from context, so judge it by the cut time.
+- **Keep faces consistent**: prompts cannot hold a face steady across shots (the same "son" came out
+  as three different men, the dad as two). Show a character's face in ONE shot only and use backs,
+  over-the-shoulder views, hands and phone screens elsewhere; for a repeated face, reuse the same image
+  and change it in post (a glitch frame is the shot-1 picture with sliced rows, an RGB split and a
+  pixelated band, kept mild so the person stays recognisable).
+- **Deadpan sketches** (`"music": {"none": true}`, `"sfx": false`, `"pause": 0.4` on a line): no bed, no
+  effects, voices only. check_av then flags "silences of 0.4 s or more" on purpose, ignore it.
