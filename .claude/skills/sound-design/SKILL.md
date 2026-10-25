@@ -76,6 +76,25 @@ long, not catchy", and a model roast: "static, low effort, solemn"):
 - An end card with the lesson and a question that invites comments ("Sen olsan söyler miydin?").
 - Effects after the words, never over them, and a short beat before the end card's line.
 
+## Two content formats the owner has asked for (2026-10-25)
+
+- **Retold folk tales** (Hoca, Schilda, Gotham, Pardoner, Manju Kowai): old public-domain stories in
+  my own words, painted or print-style pictures, music from the same culture where a public-domain
+  recording exists. Pick tales with a twist that works in 40 seconds.
+- **Real-life slices** ("hikaye değil de gerçek hayat kesiti", for a Turkish audience): one location,
+  two or three people, 20 to 35 seconds, a situation every viewer has lived (a mother's "ben ölünce
+  anlarsın", a hospital appointment 18 months away, a job interview, a building meeting). Photo-style
+  pictures ("candid cinematic photograph, natural light, authentic everyday Turkish scene, 35mm"),
+  not cartoons. Deadpan narrator, characters who panic, swear and overreact, a last-line turn, then
+  the moral card and a question.
+- **Dark humour and swearing** (owner: "swear words etc, to make it absurd and funnier", "yine küfürlü
+  falan komik"): the characters carry it, never the narrator. Keep it to the mild and middling kind
+  (hell, bastard, bloody, damn; Turkish ulan, kahretsin, yeter be, Allah belanı versin), funnier
+  delivered straight, and it spares the feed's reach. Stay away from real people, politics, religion
+  jokes, disasters such as earthquakes, and any group of people. Ask before going stronger.
+- Turkish lines: no "bugün" (XTTS says "bagün", use "bu akşam"), numbers spelled out, and anything
+  that must be exact in the mix (a date) goes in a line of its own.
+
 ## Before sending: the Gemma review for sharp edges
 
 After `check_av.py` passes, run `scripts/gemma_review.py VIDEO --script state/tmp/reel-NAME/script.txt
@@ -129,6 +148,13 @@ use: public-domain recordings from Wikimedia Commons (Satie, Chopin, US military
 fit the genre. Never a song cut from someone's video. `"bed": {"file": ..., "switch": {"file":
 ..., "slide": N, "gain_db": -3}}` changes music on the twist slide with a crossfade; each
 recording is levelled on its own first. Keep the downloads and a CREDITS.txt in `state/tmp/beds/`.
+Where to find free recordings: FreePD shut down in 2025. Search Wikimedia Commons through its API
+(`action=query&generator=search&gsrnamespace=6`, `prop=imageinfo&iiprop=url|extmetadata`) and keep
+only results whose `LicenseShortName` says "Public domain" or CC0; US military band recordings
+there are US government works. Used so far: Satie Gymnopedie (sad, calm), Entry of the Gladiators
+(circus twist), Mozart Alla Turca and Nachtmusik (light, Turkish and German), Elgar Pomp and
+Circumstance (English), Grieg Mountain King (dark comedy), Chopin nocturne (sad), Sousa Washington
+Post (jaunty). A fitting public-domain recording for West African or Japanese folk could not be found.
 
 Do not ship the same deck every time (owner, 2026-10-23: "the style is good, but colours, sizes
 etc. can change"). `pps.py` gives every slide its own look, picked from the deck's name: gradient
@@ -174,3 +200,11 @@ sometimes a translucent panel behind the text. A different `name` gives a differ
 - A clip shorter than 0.4 s has no integrated loudness (ebur128 gates it), so the mixer levels
   short effects by peak instead. A reading of -70 LUFS on a pop means "too short", not "silent".
 - Keep studied downloads in `state/tmp/` and delete them when done.
+- Never draw a character that reads as a famous copyrighted one. Generated farmers came out like a
+  plumber from a video game and an old wizard from a film: redraw with a distinct costume, build and
+  face before anything goes on a public page. Folk tales are public domain, characters from films and
+  games are not.
+- Image generation and voice rendering share the GPU. XTTS times out under an image load ("xtts timed
+  out after 27400 ms"), so retry that one line, or render the voices before starting the images.
+  Batch limits: 40 lines per wa_render_voice call, and a call over two minutes goes to the background
+  and notifies when done. Re-render an image by writing a new file: mflux never overwrites.
