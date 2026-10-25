@@ -16,7 +16,8 @@ STORYBOARD.json:
   "music": {"file": "a.flac", "switch": {"file": "b.flac", "shot": 5, "gain_db": -3}},
   "shots": [
     {"image": "state/outbox/x.png", "motion": "in", "title": "HOOK TEXT",
-     "lines": ["narration", {"voice": "3", "text": "a character", "fx": "boing"}],
+     "lines": ["narration", {"voice": "3", "text": "a character", "fx": "boing",
+                             "en": "a translation shown under the caption"}],
      "cut_fx": "scratch"},              # an effect on the cut into this shot
     {"image": "...", "end": ["KISSADAN HİSSE", "big line"], "ask": "Sen olsan söyler miydin?",
      "lines": ["..."]}                  # end card: darkened picture, big text, the question
@@ -83,6 +84,7 @@ def specs(sb):
                     "text": line["text"],
                     "voice": line.get("voice", sb.get("voice", "6")),
                     "fx": line.get("fx"),
+                    "sub": line.get("en"),  # a translation shown under the caption
                 }
             )
     return out
@@ -158,7 +160,7 @@ def plan(sb):
     if not (kit / "tada.wav").exists():
         pps.py("sfx.py", "kit", kit)
     sp = specs(sb)
-    voice, fx, caps, shots = [], [], [], []
+    voice, fx, caps, subs, shots = [], [], [], [], []
     t = LEAD
     for si, shot in enumerate(sb["shots"]):
         start = 0.0 if si == 0 else t
@@ -205,6 +207,8 @@ def plan(sb):
                     }
                 )  # after the words, never over them
             voice.append({"file": str(f), "at": round(t, 2)})
+            if line.get("sub"):
+                subs.append({"text": line["sub"], "start": t, "end": t + dur + GAP})
             groups = chunks(line["text"])
             weights = [len(g) + 3 for g in groups]
             acc = t
@@ -234,7 +238,7 @@ def plan(sb):
             "gain_db": -6,
         }
     )
-    return sp, voice, fx, caps, shots, length
+    return sp, voice, fx, caps, subs, shots, length
 
 
 def moving(shot, base, t, zoom_room, punch):
@@ -303,7 +307,7 @@ def wrap_rows(d, text, path, size, max_w):
     return rows + ([row] if row else [])
 
 
-def draw_clean(d, sb, shot, since_cut, t, caps, length):
+def draw_clean(d, sb, shot, since_cut, t, caps, length, subs=()):
     accent = sb.get("accent", ACCENT)
     speakers = sb.get("speakers", {})
     if shot.get(
@@ -379,13 +383,21 @@ def draw_clean(d, sb, shot, since_cut, t, caps, length):
             )
         fill = "#ffffff" if not who else cap["color"]
         shadowed(d, (W // 2, y), cap["text"], font(HEAVY, size), fill)
+    sub = next((s for s in subs if s["start"] <= t < s["end"]), None)
+    if sub:  # the translation, smaller, under the caption, for the whole line
+        y = int(H * 0.845)
+        for row in wrap_rows(d, sub["text"], DEMI, 30, W - 100)[:3]:
+            shadowed(
+                d, (W // 2, y), row, font(DEMI, 30), (235, 235, 235, 235), stroke=2
+            )
+            y += 38
     d.rectangle([0, H - 5, int(W * t / length), H], fill=(255, 255, 255, 170))
 
 
 def build(sb):
     work = REPO / "state" / "tmp" / f"reel-{sb['name']}"
     work.mkdir(parents=True, exist_ok=True)
-    sp, voice, fx, caps, shots, length = plan(sb)
+    sp, voice, fx, caps, subs, shots, length = plan(sb)
 
     music = sb.get("music", {})
     bed = work / "bed.wav"
@@ -468,7 +480,7 @@ def build(sb):
         if clean:
             frame.paste(shade, (0, 0), shade)
             d = ImageDraw.Draw(frame, "RGBA")
-            draw_clean(d, sb, shot, since_cut, t, caps, length)
+            draw_clean(d, sb, shot, since_cut, t, caps, length, subs)
             ff.stdin.write(frame.tobytes())  # pyright: ignore[reportOptionalMemberAccess]
             continue
         d = ImageDraw.Draw(frame, "RGBA")
