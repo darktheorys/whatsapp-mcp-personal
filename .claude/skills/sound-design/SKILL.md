@@ -57,6 +57,25 @@ Powerpoint Sunumları"). The page lists them by category, which shows what the g
   slow `--mood sad --bpm 70` bed fits a parable better than the bouncy pop bed, which fits the comic
   ones.
 
+## Reel or pps: pick the format first
+
+A pps deck imitates the old forwarded slideshows: slow, earnest, 60 seconds or more. It is a joke
+for people who remember the genre. For anything meant to hold attention on a feed (owner,
+2026-10-25: "a good video, not a bare old pps, something that can gather attention on social
+media"), use `scripts/reel.py` instead. Same storyboard idea, same voice files and music beds,
+built for a phone feed. What a reel needs, learned from feedback on the first long pps cut ("too
+long, not catchy", and a model roast: "static, low effort, solemn"):
+
+- Under 40 seconds. The hook in the first two seconds, as both a spoken line and a big title
+  ("BU KOYUN İYİLİK YAPTI…" + "ama sonunda ne oldu biliyor musun?"). No intro music, no "sevgili
+  dostlar".
+- Narration rendered faster (`rate: 1.2` in wa_render_voice) with 0.2 s gaps, never 0.9.
+- Full-screen vertical pictures (576x1024 at 10 steps, about 2.5 minutes each), one per beat, all
+  with one shared style phrase so they match, always moving (slow zoom or pan, a punch-in on cuts).
+- Big word-by-word captions coloured by speaker, so it works with the sound off.
+- An end card with the lesson and a question that invites comments ("Sen olsan söyler miydin?").
+- Effects after the words, never over them, and a short beat before the end card's line.
+
 ## The fast path: one storyboard, one render call, one build
 
 For a narrated pps video, do not hand-write slide code or timelines. Write a storyboard and let
