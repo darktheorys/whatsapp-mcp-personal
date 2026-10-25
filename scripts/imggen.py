@@ -307,8 +307,11 @@ def main():
         if not a.image or not Path(a.image).is_file():
             fail("edit needs --image pointing at an existing file")
 
+    # mflux never overwrites: given a path that exists it saves NAME_1.png beside it, and this
+    # script then reported the old file as the new render. Render to a fresh name, move it over.
+    work = out.with_name(f".{out.stem}.rendering-{os.getpid()}{out.suffix}")
     if a.mode == "generate":
-        cmd = generate_command(models[a.model], a, out)
+        cmd = generate_command(models[a.model], a, work)
     else:
         cmd = [
             str(BIN / "mflux-generate-kontext"),
@@ -323,7 +326,7 @@ def main():
             "--seed",
             str(a.seed),
             "--output",
-            str(out),
+            str(work),
         ]
         if a.width:
             cmd += ["--width", str(a.width)]
@@ -363,16 +366,18 @@ def main():
                 proc.wait(10)
             except subprocess.TimeoutExpired:
                 proc.kill()
-            out.unlink(missing_ok=True)
+            work.unlink(missing_ok=True)
             sys.exit(143)
 
         signal.signal(signal.SIGTERM, stop)
         returncode = proc.wait()
     seconds = round(time.time() - start)
-    if returncode != 0 or not out.exists():
+    if returncode != 0 or not work.exists():
+        work.unlink(missing_ok=True)
         fail(
             f"the render failed (exit {returncode}){last_error()}, see state/imggen.log"
         )
+    os.replace(work, out)
     print(json.dumps({"ok": True, "out": str(out), "seconds": seconds}))
 
 

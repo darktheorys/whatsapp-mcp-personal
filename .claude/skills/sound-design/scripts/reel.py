@@ -52,6 +52,13 @@ W, H, FPS = 720, 1280, 30
 FONTS = Path("/System/Library/Fonts/Supplemental")
 CAPTION_FONT = str(FONTS / "Arial Black.ttf")
 TITLE_FONT = str(FONTS / "Impact.ttf")
+# The "clean" look: one sans family, white text, thin outlines and a soft shadow, crossfades instead
+# of punch-ins, a vignette and a dark gradient behind the captions. Reads as produced rather than
+# shouted, for a public page.
+HEAVY = "/System/Library/Fonts/Avenir Next.ttc#8"
+DEMI = "/System/Library/Fonts/Avenir Next.ttc#2"
+ACCENT = "#ffc93c"
+XFADE = 0.3
 VOICE_COLORS = {
     "6": "#ffffff",
     "3": "#7fe7ff",
@@ -119,9 +126,11 @@ def chunks(text, n=3, max_chars=18):
 
 
 def font(path, size, cache={}):
+    """A font by path, or path#index for one face of a .ttc collection."""
     key = (path, size)
     if key not in cache:
-        cache[key] = ImageFont.truetype(path, size)
+        file, _, index = path.partition("#")
+        cache[key] = ImageFont.truetype(file, size, index=int(index or 0))
     return cache[key]
 
 
@@ -205,7 +214,13 @@ def plan(sb):
             for g, wgt in zip(groups, weights):
                 span = dur * wgt / sum(weights)
                 caps.append(
-                    {"text": g, "start": acc, "end": acc + span, "color": color}
+                    {
+                        "text": g,
+                        "start": acc,
+                        "end": acc + span,
+                        "color": color,
+                        "voice": line["voice"],
+                    }
                 )
                 acc += span
             t += dur + GAP
@@ -220,6 +235,151 @@ def plan(sb):
         }
     )
     return sp, voice, fx, caps, shots, length
+
+
+def moving(shot, base, t, zoom_room, punch):
+    """The shot's picture at time t: a slow zoom or pan across the oversized base image."""
+    p = min(1.0, max(0.0, (t - shot["t0"]) / max(0.01, shot["t1"] - shot["t0"])))
+    motion = shot.get("motion", "in")
+    z = {"in": 1 + 0.14 * p, "out": 1.14 - 0.14 * p}.get(motion, 1.1) * (1 + punch)
+    cw, ch = min(base.width, W * zoom_room / z), min(base.height, H * zoom_room / z)
+    cx, cy = base.width / 2, base.height / 2
+    slack_x, slack_y = (base.width - cw) / 2, (base.height - ch) / 2
+    if motion == "up":
+        cy += slack_y * (1 - 2 * p)
+    elif motion == "down":
+        cy -= slack_y * (1 - 2 * p)
+    elif motion == "left":
+        cx += slack_x * (1 - 2 * p)
+    elif motion == "right":
+        cx -= slack_x * (1 - 2 * p)
+    box = (int(cx - cw / 2), int(cy - ch / 2), int(cx + cw / 2), int(cy + ch / 2))
+    return base.crop(box).resize((W, H), Image.BILINEAR)
+
+
+def clean_overlay():
+    """A soft vignette plus a dark band at the top and bottom, so white text reads on any picture."""
+    shade = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    px = shade.load()
+    for y in range(H):
+        fy = y / H
+        band = (
+            max(0.0, (fy - 0.55) / 0.45) ** 1.6 * 0.78
+            + max(0.0, (0.22 - fy) / 0.22) ** 1.8 * 0.55
+        )
+        for x in range(0, W, 4):
+            fx = (x / W - 0.5) * 2
+            v = min(0.9, band + 0.22 * fx * fx)
+            a = int(255 * v)
+            for k in range(4):
+                if x + k < W:
+                    px[x + k, y] = (0, 0, 0, a)
+    return shade
+
+
+def shadowed(d, xy, text, f, fill, anchor="mm", stroke=3):
+    x, y = xy
+    d.text((x + 3, y + 4), text, font=f, fill=(0, 0, 0, 150), anchor=anchor)
+    d.text(
+        xy,
+        text,
+        font=f,
+        fill=fill,
+        stroke_width=stroke,
+        stroke_fill=(0, 0, 0, 200),
+        anchor=anchor,
+    )
+
+
+def wrap_rows(d, text, path, size, max_w):
+    rows, row = [], ""
+    for wd in text.split():
+        cand = f"{row} {wd}".strip()
+        if row and d.textlength(cand, font=font(path, size)) > max_w:
+            rows.append(row)
+            row = wd
+        else:
+            row = cand
+    return rows + ([row] if row else [])
+
+
+def draw_clean(d, sb, shot, since_cut, t, caps, length):
+    accent = sb.get("accent", ACCENT)
+    speakers = sb.get("speakers", {})
+    if shot.get(
+        "title"
+    ):  # the hook: two clean lines that slide in, an accent bar under them
+        k = min(1.0, since_cut / 0.35)
+        ease = 1 - (1 - k) ** 3
+        rows = wrap_rows(d, shot["title"], HEAVY, 70, W - 90)
+        y = int(H * 0.085) - int(30 * (1 - ease))
+        alpha = int(255 * ease)
+        for row in rows:
+            shadowed(d, (W // 2, y), row, font(HEAVY, 70), (255, 255, 255, alpha))
+            y += 80
+        bar = int(130 * ease)
+        d.rounded_rectangle(
+            [W // 2 - bar // 2, y - 18, W // 2 + bar // 2, y - 10], 4, fill=accent
+        )
+    if shot.get("end"):
+        k = min(1.0, since_cut / 0.4)
+        d.rectangle([0, 0, W, H], fill=(10, 10, 14, int(150 * k)))
+        y = int(H * 0.30)
+        head, *rest = shot["end"]
+        shadowed(d, (W // 2, y), head, font(DEMI, 34), accent, stroke=0)
+        y += 70
+        for row in rest:
+            size = fit_size(d, row, HEAVY, 62, W - 80)
+            shadowed(
+                d, (W // 2, y), row, font(HEAVY, size), (255, 255, 255, int(255 * k))
+            )
+            y += int(size * 1.22)
+        if shot.get("ask") and since_cut > 0.7:
+            y += 50
+            size = fit_size(d, shot["ask"], DEMI, 40, W - 140)
+            tw = d.textlength(shot["ask"], font=font(DEMI, size))
+            d.rounded_rectangle(
+                [W // 2 - tw / 2 - 34, y - 38, W // 2 + tw / 2 + 34, y + 38],
+                38,
+                fill=(255, 255, 255, 235),
+            )
+            d.text(
+                (W // 2, y),
+                shot["ask"],
+                font=font(DEMI, size),
+                fill=(20, 20, 26),
+                anchor="mm",
+            )
+            bob = int(5 * math.sin(t * 5))
+            ay = y + 70 + bob
+            d.line(
+                [(W // 2 - 18, ay), (W // 2, ay + 16), (W // 2 + 18, ay)],
+                fill=accent,
+                width=6,
+            )
+    cap = next((c for c in caps if c["start"] <= t < c["end"] + 0.05), None)
+    if cap and not shot.get("end"):
+        k = min(1.0, (t - cap["start"]) / 0.1)
+        size = fit_size(d, cap["text"], HEAVY, int(58 * (1.06 - 0.06 * k)), W - 90)
+        y = int(H * 0.78)
+        who = speakers.get(cap["voice"])
+        if who:  # a speaker tag over a character's line
+            tw = d.textlength(who.upper(), font=font(DEMI, 26))
+            d.rounded_rectangle(
+                [W // 2 - tw / 2 - 18, y - 92, W // 2 + tw / 2 + 18, y - 54],
+                19,
+                fill=cap["color"],
+            )
+            d.text(
+                (W // 2, y - 73),
+                who.upper(),
+                font=font(DEMI, 26),
+                fill=(20, 20, 26),
+                anchor="mm",
+            )
+        fill = "#ffffff" if not who else cap["color"]
+        shadowed(d, (W // 2, y), cap["text"], font(HEAVY, size), fill)
+    d.rectangle([0, H - 5, int(W * t / length), H], fill=(255, 255, 255, 170))
 
 
 def build(sb):
@@ -290,31 +450,27 @@ def build(sb):
         ],
         stdin=subprocess.PIPE,
     )
+    clean = sb.get("look") == "clean"
+    shade = clean_overlay() if clean else None
     frames = int(length * FPS)
     for n in range(frames):
         t = n / FPS
         si = max(i for i, s in enumerate(shots) if s["t0"] <= t)
-        shot, base = shots[si], bases[si]
-        p = (t - shot["t0"]) / max(0.01, shot["t1"] - shot["t0"])
-        motion = shot.get("motion", "in")
-        z = {"in": 1 + 0.14 * p, "out": 1.14 - 0.14 * p}.get(motion, 1.1)
+        shot = shots[si]
         since_cut = t - shot["t0"]
-        if si and since_cut < 0.18:  # a punch-in on every cut
-            z *= 1 + 0.08 * (1 - since_cut / 0.18)
-        cw, ch = min(base.width, W * zoom_room / z), min(base.height, H * zoom_room / z)
-        cx, cy = base.width / 2, base.height / 2
-        slack_x, slack_y = (base.width - cw) / 2, (base.height - ch) / 2
-        if motion == "up":
-            cy += slack_y * (1 - 2 * p)
-        elif motion == "down":
-            cy -= slack_y * (1 - 2 * p)
-        elif motion == "left":
-            cx += slack_x * (1 - 2 * p)
-        elif motion == "right":
-            cx -= slack_x * (1 - 2 * p)
-        frame = base.crop(
-            (int(cx - cw / 2), int(cy - ch / 2), int(cx + cw / 2), int(cy + ch / 2))
-        ).resize((W, H), Image.BILINEAR)
+        punch = not clean and si and since_cut < 0.18  # a punch-in on every cut
+        frame = moving(
+            shot, bases[si], t, zoom_room, 0.08 * (1 - since_cut / 0.18) if punch else 0
+        )
+        if clean and si and since_cut < XFADE:
+            prev = moving(shots[si - 1], bases[si - 1], t, zoom_room, 0)
+            frame = Image.blend(prev, frame, since_cut / XFADE)
+        if clean:
+            frame.paste(shade, (0, 0), shade)
+            d = ImageDraw.Draw(frame, "RGBA")
+            draw_clean(d, sb, shot, since_cut, t, caps, length)
+            ff.stdin.write(frame.tobytes())  # pyright: ignore[reportOptionalMemberAccess]
+            continue
         d = ImageDraw.Draw(frame, "RGBA")
 
         if shot.get("title"):  # the hook, top of the first shot
