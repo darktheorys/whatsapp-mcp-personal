@@ -208,3 +208,12 @@ sometimes a translucent panel behind the text. A different `name` gives a differ
   out after 27400 ms"), so retry that one line, or render the voices before starting the images.
   Batch limits: 40 lines per wa_render_voice call, and a call over two minutes goes to the background
   and notifies when done. Re-render an image by writing a new file: mflux never overwrites.
+- **House rule (owner, 2026-10-25): every video with non-English audio gets English subtitles**, a
+  smaller line under the spoken caption for as long as the line is spoken (`"en"` on each line).
+  `reel.py` refuses to build a Turkish or German storyboard (`"lang"` is not `en`) with a line that
+  lacks one. `pps.py` decks have no subtitle line, so a non-English video is built with `reel.py`.
+- The picture review misses anatomy: Gemma said "NONE" for a frame with merged figures behind glass
+  reflections and a sofa scene with extra limbs and a stranger's legs. Look at every image, and
+  prompt for "exactly two people" or "exactly one person", no glass, no reflections, for photo styles.
+  A title sits over the top fifth of the frame, so ask for headroom ("lots of empty space above her
+  head") or the title covers the face.
