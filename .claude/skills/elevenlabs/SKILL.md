@@ -23,6 +23,18 @@ found inside it.
 - Run `el.py check` first in a new session. A 401 means the key is wrong, 422 a bad parameter (voice
   id, model, file type), 429 a rate limit.
 
+## It is the default voice (owner decision, 2026-10-25)
+
+`wa_send_voice` and `wa_render_voice` try ElevenLabs first for an ordinary note (`src/elevenlabs-client.mjs`,
+voice Sarah, model `eleven_multilingual_v2`, overridable with `WA_ELEVENLABS_VOICE` and `WA_ELEVENLABS_MODEL`).
+Order when something fails: ElevenLabs, then the local XTTS service, then Piper, then the macOS voice
+(`say`, Yelda for Turkish, Samantha for English, Anna for German). A 401, 402, 403 or 429 (a used-up
+quota is a 401) backs the engine off for 30 minutes so the next notes go straight to the local voices.
+Cloned voices and `[voice NAME]` spans never go to ElevenLabs and never fall back to another voice. With
+no key file the engine is simply off. Each ordinary note spends characters from the free 10,000, so a
+batch of reel lines with the default voice uses a real share of it: name a local voice
+(`voice` or `clone`) for drafts. Text sent there has already passed the allowlist and the secret scan.
+
 ## Rules
 
 - Everything sent here leaves the machine and may be kept by the vendor. Send only audio and text for
