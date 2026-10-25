@@ -36,7 +36,7 @@ VOICES_DIR = os.path.realpath(
 )
 TMP_ROOT = os.path.realpath(tempfile.gettempdir())
 MAX_TEXT = 2000
-LANGS = {"tr", "en"}
+LANGS = {"tr", "en", "de"}
 
 
 def log(message):

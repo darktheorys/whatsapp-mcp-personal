@@ -167,7 +167,14 @@ const PIPER_BIN = join(STATE_DIR, "piper-venv", "bin", "piper");
 // fallback shape as whisperModel(): a missing file degrades to whatever Piper voice is actually
 // on disk rather than crashing every send, since a hand-edited config or a not-yet-downloaded
 // tier shouldn't take TTS down entirely.
+// The languages a voice can be rendered in. German has an XTTS voice but no Piper one, so a German
+// note never falls back to Piper: reading German text with a Turkish or English Piper voice would be
+// wrong in a way that failing is not.
+const WHISPER_LANGS = new Set(["tr", "en", "de"]);
 function piperModel(lang) {
+  if (!PIPER_VOICES[lang]) {
+    throw new Error(`there is no Piper voice for "${lang}", only the XTTS service can speak it`);
+  }
   const dir = join(STATE_DIR, "piper-models");
   const wanted = join(dir, PIPER_VOICES[lang][t2sTier()]);
   if (existsSync(wanted)) return wanted;
@@ -403,7 +410,7 @@ async function trimTrailingBabble(wav, text, lang = "tr") {
     await execFileAsync("ffmpeg", ["-y", "-loglevel", "error", "-i", wav, "-ar", "16000", "-ac", "1", wav16], limit);
     const { stdout } = await execFileAsync(
       "whisper-cli",
-      ["-m", whisperModel(), "-f", wav16, "-l", lang === "en" ? "en" : "tr", "-ml", "1", "-sow"],
+      ["-m", whisperModel(), "-f", wav16, "-l", WHISPER_LANGS.has(lang) ? lang : "tr", "-ml", "1", "-sow"],
       { ...limit, encoding: "utf8" },
     );
     const words = parseWordTimestamps(stdout);
@@ -3009,9 +3016,11 @@ server.registerTool(
         .optional()
         .describe("A macOS `say` voice name, e.g. Cem or Daniel — omit for the default Piper voice"),
       language: z
-        .enum(["tr", "en"])
+        .enum(["tr", "en", "de"])
         .optional()
-        .describe("Piper voice language for this one message — omit to use the chat's default (see /language)"),
+        .describe(
+          "Language for this one message — omit to use the chat's default (see /language). German is XTTS only: there is no German Piper voice, so it needs the XTTS service up",
+        ),
       clone: z
         .string()
         .optional()
@@ -3128,7 +3137,7 @@ server.registerTool(
         .max(40)
         .optional()
         .describe("Several lines in one call; each takes its own name, text and voice"),
-      language: z.enum(["tr", "en"]).optional(),
+      language: z.enum(["tr", "en", "de"]).optional(),
       rate: z.number().positive().optional(),
     },
     annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
