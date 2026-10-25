@@ -76,6 +76,23 @@ long, not catchy", and a model roast: "static, low effort, solemn"):
 - An end card with the lesson and a question that invites comments ("Sen olsan söyler miydin?").
 - Effects after the words, never over them, and a short beat before the end card's line.
 
+## Before sending: the Gemma review for sharp edges
+
+After `check_av.py` passes, run `scripts/gemma_review.py VIDEO --script state/tmp/reel-NAME/script.txt
+[--lang en|tr|de]`. The local Gemma model listens to the audio in 25 second pieces and looks at
+frames four at a time. Measured limits (2026-10-25), so read its output as leads, never as verdicts:
+
+- It transcribes speech well, and the script compares that blind transcript with the script. Whisper
+  transcribes the same pieces, and only a word BOTH miss is a real lead ("missed_by_both"). Gemma
+  alone shortens words, skips short ones and invents phrases.
+- Its "problems you hear" lists are noise. It lists timestamps beyond the clip it was given and
+  echoes the words in the question. Ignore them, trust check_av for clicks, loudness and silence.
+- Its frame review is weak and gave one false "text cut off" on a caption sitting low on a dark
+  picture. Open any frame it flags and look yourself.
+- Words that really are mangled by XTTS show up in both transcripts: "ghosts", "Blast it", "Munch.
+  Munch." and "Chewing" came out as "Go", "Lost it", babble and "Di-ni-ing". Reword (heights,
+  Oh no no no, "Someone was eating"), never retry the same text more than twice.
+
 ## The fast path: one storyboard, one render call, one build
 
 For a narrated pps video, do not hand-write slide code or timelines. Write a storyboard and let
