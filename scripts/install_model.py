@@ -185,6 +185,12 @@ def detect(info, names):
     }
 
 
+def name_wanted(a, plan):
+    """True when the model will be registered for imggen: a name came with --as, or one is asked for
+    after the download (someone at the terminal, no --yes, architecture known)."""
+    return bool(a.alias) or bool(plan["base"] and sys.stdin.isatty() and not a.yes)
+
+
 def read_ledger():
     return json.loads(LEDGER.read_text()) if LEDGER.exists() else []
 
@@ -374,22 +380,33 @@ def main():
         "lora_file": a.lora_file or found["lora_file"],
         "base_repo": found["base_repo"],
     }
-    if a.alias:
-        if not plan["base"]:
-            sys.exit(
-                "Could not tell which architecture this is built on from the repo's metadata "
-                f"(base repo: {found['base_repo'] or 'not stated'}). Pass --base (dev, schnell, ...)."
-            )
-        if plan["lora"] and not plan["lora_file"]:
-            sys.exit(
-                "This is a LoRA but the weights file is not obvious. Pass --lora-file NAME."
-            )
+    if a.alias and not plan["base"]:
+        sys.exit(
+            "Could not tell which architecture this is built on from the repo's metadata "
+            f"(base repo: {found['base_repo'] or 'not stated'}). Pass --base (dev, schnell, ...)."
+        )
+    # A name is given now (--as) or asked for after the download (a terminal, no --yes, base known),
+    # and either way imggen_spec needs the LoRA's weights file. Check before anything downloads: asking
+    # afterwards crashed on a missing file with the whole repo already on disk and nothing recorded.
+    if plan["lora"] and not plan["lora_file"] and name_wanted(a, plan):
+        sys.exit(
+            "This is a LoRA but the weights file is not obvious. Pass --lora-file NAME "
+            "(or --yes to download it without registering a name)."
+        )
     if plan["lora"] and plan["lora_file"] and not a.include:
         # A LoRA is one weights file. Nothing else in the repo is needed to use it.
         a.include = [plan["lora_file"], "*.json", "*.md", "*.txt"]
     chosen = selected(files, a.include, a.exclude)
     if not chosen:
         sys.exit("No files match --include and --exclude.")
+    # The same crash with a different trigger: a --lora-file that is not in the repo, or an --include
+    # that leaves it out, only showed up after the download as "not in the download".
+    if plan["lora"] and plan["lora_file"] and name_wanted(a, plan):
+        if plan["lora_file"] not in {n for n, _ in chosen}:
+            sys.exit(
+                f"{plan['lora_file']} is not among the files that would be downloaded. "
+                "Check --lora-file against the repo, and that --include/--exclude keep it."
+            )
     total = sum(size for _, size in chosen)
     names = [n for n, _ in chosen]
     pickles = [n for n in names if n.lower().endswith(PICKLE)]
@@ -451,7 +468,7 @@ def main():
     seconds = round(time.time() - started)
 
     # No --as: when someone is at the terminal, ask for a name now, the weights are already on disk.
-    if not a.alias and plan["base"] and sys.stdin.isatty() and not a.yes:
+    if not a.alias and name_wanted(a, plan):
         while True:
             answer = input(
                 "\nName to use with imggen.py --model (Enter to skip): "

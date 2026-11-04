@@ -2376,6 +2376,86 @@ assert.deepEqual(unansweredChats([STATS], 1 * H), [], "answering it takes it off
   el.resetElevenLabsForTest();
 }
 
+// scripts/install_model.py: an ambiguous LoRA (several .safetensors, none named like a LoRA) used to
+// download the whole repo and only then crash in imggen_spec (Path / None), recording nothing. The check
+// must now run before any download whenever a name is given or will be asked for. The Hugging Face
+// client is faked, so this needs no network, no venv and writes nothing under state/.
+{
+  const { spawnSync } = await import("node:child_process");
+  const ledger = join(mkdtempSync(join(tmpdir(), "wa-install-model-")), "models.json");
+  const harness = `
+import builtins, contextlib, importlib.util, io, json, sys, types
+spec = importlib.util.spec_from_file_location("install_model", "scripts/install_model.py")
+m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+m.reexec_in_venv = lambda: None
+m.token = lambda: None
+m.LEDGER = m.Path(sys.argv[1])
+m.DISK_MARGIN = 0
+downloads = []
+import os, tempfile
+got = tempfile.mkdtemp()
+open(os.path.join(got, "a.safetensors"), "w").close()
+class Info:
+    tags = ["lora", "base_model:adapter:black-forest-labs/FLUX.1-dev"]
+    siblings = [types.SimpleNamespace(rfilename=n, size=0) for n in ("a.safetensors", "b.safetensors", "README.md")]
+    sha = "abc123"; gated = False; private = False; card_data = None
+class Api:
+    def __init__(self, token=None): pass
+    def model_info(self, *a, **k): return Info()
+fake = types.ModuleType("huggingface_hub")
+fake.HfApi = Api
+fake.snapshot_download = lambda **k: downloads.append(k) or got
+sys.modules["huggingface_hub"] = fake
+answers = []
+builtins.input = lambda prompt="": answers.pop(0)
+def run(argv, tty, typed):
+    del downloads[:]
+    answers[:] = typed
+    sys.argv = ["install_model.py", *argv]
+    m.sys.stdin = types.SimpleNamespace(isatty=lambda: tty)
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            m.main()
+        return {"exit": None, "downloads": len(downloads)}
+    except SystemExit as e:
+        return {"exit": str(e.code), "downloads": len(downloads)}
+print(json.dumps({
+    "alias": run(["x/y", "--as", "foo", "--yes"], False, []),
+    "asked": run(["x/y"], True, ["y", "foo"]),
+    "plain": run(["x/y", "--yes"], False, []),
+    "typo": run(["x/y", "--as", "foo", "--lora-file", "typo.safetensors", "--yes"], False, []),
+    "named": run(["x/y", "--as", "foo", "--lora-file", "a.safetensors", "--yes"], False, []),
+    "askedNamed": run(["x/y", "--lora-file", "a.safetensors"], True, ["y", "bar"]),
+    "ledger": json.load(open(m.LEDGER)),
+}))
+`;
+  // HOME is redirected so the script's cache-directory mkdir stays in a temp dir.
+  const res = spawnSync("python3", ["-c", harness, ledger], {
+    encoding: "utf8",
+    cwd: new URL(".", import.meta.url).pathname,
+    env: { ...process.env, HOME: mkdtempSync(join(tmpdir(), "wa-install-home-")) },
+  });
+  assert.equal(res.status, 0, `install_model harness failed: ${res.stderr}`);
+  const r = JSON.parse(res.stdout);
+  for (const k of ["alias", "asked"]) {
+    assert.match(r[k].exit ?? "", /weights file is not obvious/, `${k}: refused before downloading`);
+    assert.equal(r[k].downloads, 0, `${k}: nothing was downloaded`);
+  }
+  assert.equal(r.plain.exit, null, "--yes without a name still downloads an ambiguous LoRA");
+  assert.equal(r.plain.downloads, 1);
+  assert.match(r.typo.exit ?? "", /not among the files/, "a --lora-file that is not in the repo is refused up front");
+  assert.equal(r.typo.downloads, 0);
+  assert.equal(r.named.exit, null, "--lora-file settles the ambiguity and the run completes");
+  assert.equal(r.named.downloads, 1);
+  assert.equal(r.askedNamed.exit, null, "the post-download name prompt works once the file is known");
+  assert.deepEqual(
+    r.ledger.map((e) => e.alias),
+    [undefined, "foo", "bar"],
+    "the unnamed --yes download and both registrations were recorded, the refused runs recorded nothing",
+  );
+  rmSync(ledger, { force: true });
+}
+
 (await import("./src/server.mjs")).resetSendLimitForTest();
 let sent = 0;
 while (!overSendLimit()) sent++;
