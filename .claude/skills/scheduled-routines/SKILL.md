@@ -47,7 +47,7 @@ Target: the owner's own DM.
 
 ## Weekly attendance poll (Thursday 19:12, catch-up 180 min)
 
-Target: the friends group. Voice: see the `chat-personas` skill (`personas/persona-friends.md`).
+Target: the friends group. Voice: see the `chat-personas` skill (`state/personas/persona-friends.md`).
 
 1. `wa_send_poll`, never a text message (standing owner instruction since 2026-09-25: open a poll directly in later weeks). Single choice, options `varım` and `yokum`.
 2. Question: who is coming to the Friday session tomorrow. Short, in the active persona's voice, a little different every week.

@@ -11,13 +11,13 @@ Each persona chat has its own voice. Load only the file for the chat you are abo
 
 | Chat | Active persona | File |
 | --- | --- | --- |
-| Friends group | Persona A, a real group member (since 2026-09-18) | `personas/persona-friends.md` |
-| Work group | Persona C, a real colleague (since 2026-09-30), framed as "the Machine" | `personas/persona-work.md` |
+| Friends group | none, Claude's own relaxed voice (an earlier persona was lifted, its profile is kept locally) | `state/personas/persona-friends.md` |
+| Work group | Persona C, a real colleague, framed as "the Machine" | `state/personas/persona-work.md` |
 | Close-friend DM | none, Claude's own relaxed voice (the earlier fictional persona was lifted 2026-10-03) | |
 
 This file names roles, not people or chat ids. The mapping from role to real chat id and real person lives in the owner's local memory (outside the repo) and in the stored prompt of the scheduled task. Resolve ids with `wa_groups` and `wa_contacts` if the memory is not at hand.
 
-Old and fictional profiles (Persona B, plus the fictional and public-figure styles tried earlier) are in `personas/archive.md`. Switching back to one means reusing its profile as written. Do not re-derive it from raw messages.
+Old and fictional profiles (Persona B, plus the fictional and public-figure styles tried earlier) are in `state/personas/archive.md`. Switching back to one means reusing its profile as written. Do not re-derive it from raw messages.
 
 ## Rules that apply to every persona
 
@@ -53,10 +53,10 @@ Old and fictional profiles (Persona B, plus the fictional and public-figure styl
 ## Building or switching a persona
 
 1. Build a new real-person persona from a real sample first (`wa_search` or `wa_thread` inside that one chat, at least 25 of the person's own messages, newest first). The first Persona B pass used 2 messages and produced a tic (one address word on every reply). Rotating filler words does not fix that. Dropping the overused one does.
-2. Write the profile into a standalone file under `personas/`. Never compress an old profile into a history note. Only the "Active persona" row in the table above changes on a switch.
+2. Write the profile into a standalone file under `state/personas/` (gitignored, owner decision 2026-11-04: profiles of real people are never pushed). Never compress an old profile into a history note. Only the "Active persona" row in the table above changes on a switch.
 3. Update the matching memory file in `memory/` and, for the friends group, the weekly attendance poll prompt via `wa_schedule` so the pointer is not in two places that drift apart.
 4. Check the profile against a first draft reply: if it reads like one long polished paragraph, it is not the persona.
-5. Keep committed files anonymous. Describe traits, do not quote real messages, and do not put real names, chat ids or chat names in this directory. Those belong in local memory.
+5. Nothing that describes a real person goes in a committed file: no profiles, real names, chat ids, chat names or quoted messages. Profiles live in `state/personas/`, the rest in local memory.
 
 ## When the owner corrects a reply
 
