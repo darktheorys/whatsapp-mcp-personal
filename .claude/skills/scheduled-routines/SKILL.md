@@ -45,7 +45,7 @@ Target: the owner's own DM.
 2. Short Turkish summary covering only what is notable: chats that went quiet or got busier versus the previous 7 days (use the `change` field, absolute counts not percentages), any chat where `conversationsStarted` is lopsided against the owner, the owner's median reply time where it stands out, and the unanswered list with how long each has waited.
 3. Skip anything unremarkable. If nothing stands out, say so in one line.
 
-## Weekly attendance poll (weekly, 19:12, catch-up 180 min)
+## Weekly attendance poll (weekly, catch-up 180 min)
 
 Target: group chat 1. Voice: see the `chat-personas` skill (`state/personas/persona-a.md`).
 

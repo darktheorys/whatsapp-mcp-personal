@@ -16,8 +16,31 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 DOMAIN="gui/$(id -u)"
 
+xml() { sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g' <<<"$1"; }
+X_REPO="$(xml "$REPO")"
+
+# An older version of these scripts installed the agent under a different label. Unload and remove any
+# other agent whose plist launches this repo's file $1, and wait until it is gone, so two copies never
+# run side by side.
+remove_older_agents() {
+  local old label
+  for old in "$HOME"/Library/LaunchAgents/*.plist; do
+    [[ -f "$old" && "$old" != "$PLIST" ]] || continue
+    grep -qF "<string>$X_REPO/$1</string>" "$old" 2>/dev/null || continue
+    label="$(basename "$old" .plist)"
+    launchctl bootout "$DOMAIN/$label" 2>/dev/null || true
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+      launchctl print "$DOMAIN/$label" >/dev/null 2>&1 || break
+      sleep 0.5
+    done
+    rm -f "$old"
+    echo "Removed the older agent $label."
+  done
+}
+
 if [[ "${1:-}" == "--uninstall" ]]; then
   launchctl bootout "$DOMAIN/$LABEL" 2>/dev/null || true
+  remove_older_agents src/daemon.mjs
   rm -f "$PLIST"
   echo "Removed $LABEL. Re-register the MCP server as the stdio server to go back:"
   printf '  claude mcp remove whatsapp-personal && claude mcp add whatsapp-personal -- node %q\n' "$REPO/src/server.mjs"
@@ -33,10 +56,8 @@ mkdir -p "$HOME/Library/LaunchAgents"
 
 # These go into XML, and a path containing & or < would otherwise produce a plist launchd rejects
 # (or one that means something else).
-xml() { sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g' <<<"$1"; }
 X_LABEL="$(xml "$LABEL")"
 X_NODE="$(xml "$NODE")"
-X_REPO="$(xml "$REPO")"
 X_HOME="$(xml "$HOME")"
 
 # PATH matters: the server shells out to ffmpeg, whisper-cli, piper's venv, say and afconvert, and
@@ -67,15 +88,7 @@ cat >"$PLIST" <<PLIST
 </plist>
 PLIST
 
-# An older version of this script installed the agent under a different label. Unload and remove any
-# other agent that launches this repo's daemon, so two copies never fight over the one WhatsApp connection.
-for OLD_PLIST in "$HOME"/Library/LaunchAgents/*.plist; do
-  [[ -f "$OLD_PLIST" && "$OLD_PLIST" != "$PLIST" ]] || continue
-  grep -qF "$X_REPO/src/daemon.mjs" "$OLD_PLIST" 2>/dev/null || continue
-  launchctl bootout "$DOMAIN/$(basename "$OLD_PLIST" .plist)" 2>/dev/null || true
-  rm -f "$OLD_PLIST"
-  echo "Removed the older agent $(basename "$OLD_PLIST" .plist)."
-done
+remove_older_agents src/daemon.mjs
 
 launchctl bootout "$DOMAIN/$LABEL" 2>/dev/null || true
 # bootout returns before the job is gone, and a bootstrap straight after can fail with an I/O error.

@@ -63,6 +63,10 @@ window where messages were lost. The server, guards and scheduler are unchanged,
 differs (`WA_TRANSPORT=socket`). One client at a time, a new authenticated connection replaces the
 old one. In daemon mode a `connectionReplaced` does not exit, it sets `lastError` and `wa_connect`
 reclaims. Register with `claude mcp add whatsapp-personal -- node /abs/path/src/shim.mjs`.
+The launchd labels are `com.whatsapp-mcp-personal.daemon` and `com.whatsapp-mcp-personal.xtts`. Re-running
+`install-daemon.sh` or `install-xtts.sh` also unloads and removes an agent an older version installed under
+another label (matched by the repo path in its plist), and `restart-daemon.sh` asks for that re-run when the
+new label is not loaded.
 
 ## YouTube / video search and download
 
