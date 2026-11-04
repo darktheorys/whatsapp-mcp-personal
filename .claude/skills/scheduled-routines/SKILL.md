@@ -47,13 +47,13 @@ Target: the owner's own DM.
 
 ## Weekly attendance poll (weekly, catch-up 180 min)
 
-Target: group chat 1. Voice: see the `chat-personas` skill (`state/personas/persona-a.md`).
+Target: the group named in the stored prompt. Voice: the persona listed for it in `state/personas/index.md` (see the `chat-personas` skill).
 
 1. `wa_send_poll`, never a text message (standing owner instruction since 2026-09-25: open a poll directly in later weeks). Single choice, options `varım` and `yokum`.
 2. Question: who is coming to the weekly session tomorrow. Short, in the active persona's voice, a little different every week.
 3. Ask the group as a whole. Never name or chase people who did not vote, and do not follow up later in the week. Check votes with `wa_poll_results` only if the owner asks.
 4. If it fires late and it is already the session day, ask about today instead of tomorrow.
-5. When the active friends-group persona changes, update this task's prompt with `wa_schedule` so the persona named in it matches `chat-personas`.
+5. When the persona of the poll's group changes, update this task's prompt with `wa_schedule` so the persona named in it matches `chat-personas`.
 
 ## One-off reminders
 
