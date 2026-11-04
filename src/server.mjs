@@ -1277,8 +1277,8 @@ export function guardSend(to, text, { consume = true } = {}) {
 }
 
 // Revising or revoking a message is limited to ones this server sent itself. `fromMe` is not
-// enough: the owner's own messages, typed on his phone, are equally fromMe, and rewriting or deleting
-// those would let anyone who can talk the model into it edit his side of a conversation. The
+// enough: the owner's own messages, typed on their phone, are equally fromMe, and rewriting or deleting
+// those would let anyone who can talk the model into it edit their side of a conversation. The
 // `by: "claude"` tag is written at send time by the wa_send* tools and by nothing else, so it is
 // the only claim of authorship here that isn't inferred after the fact.
 // ponytail: messages sent before this tag existed have no `by` field and are therefore not
@@ -1990,7 +1990,7 @@ function helpText(jid) {
 // instant it arrives regardless of how long the wake itself is deferred.
 //
 // Ephemeral by design -- nothing here is persisted. If a durable trail of presence/composing
-// events is wanted later (the owner: "in the future i want traceability"), that's a deliberate
+// events is wanted later (the owner may want a durable trail), that's a deliberate
 // addition on top of this, not implied by it.
 const PRESENCE_WAKE_DEBOUNCE_MS = 10_000;
 // A "composing" signal that never stops (a scripted client leaving the indicator on, or just an
@@ -2460,7 +2460,7 @@ export async function handleIncoming(waMessage) {
   // landed, and autoEyes swallows its own failures, so there is no rejection to strand.
   // `by: "claude"` is written at send time by the wa_send* tools and by nothing else, so this is the
   // only non-inferred way to know a quoted message was ours. the owner's own phone-typed messages are
-  // `direction: "out"` too, and a reply to one of his is not a reply to us.
+  // `direction: "out"` too, and a reply to one of theirs is not a reply to us.
   const replyingToMe = Boolean(quoted?.id) && findMessage(jid, quoted.id)?.by === "claude";
   void autoEyes(jid, key, text, replyingToMe);
   // mention-only chats stay fully logged above for wa_recent/wa_search — only the wake is gated.

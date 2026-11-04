@@ -24,7 +24,7 @@ export function resolveClone(name, to) {
   }
   const voice = voices[name];
   if (!voice) return { error: `no cloned voice named "${name}"` };
-  // "*" means any chat. It is opt-in per voice, written into voices.json by the owner's say-so, and it
+  // "*" means any chat. It is opt-in per voice, written into voices.json at the owner's say-so, and it
   // still goes through guardSend, so the chat must be on the main allowlist. Cloned notes carry no
   // spoken disclosure (owner decision, 2026-10-15), so the chat list and the consent note are the
   // only controls on where a voice is used.

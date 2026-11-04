@@ -762,7 +762,7 @@ assert.equal(scanDocument(zipOf("word/document.xml", "<w:t>hello</w:t>"), ".docx
     ts: 3,
     id: "MG3",
   });
-  store.appendMessage(MG, { direction: "out", name: "the owner", text: "d", ts: 4, id: "MG4" });
+  store.appendMessage(MG, { direction: "out", name: "Owner", text: "d", ts: 4, id: "MG4" });
   store.appendMessage(OTHER, {
     direction: "in",
     from: "4915100000009@s.whatsapp.net",
@@ -780,7 +780,7 @@ assert.equal(scanDocument(zipOf("word/document.xml", "<w:t>hello</w:t>"), ".docx
     "case-insensitive names resolve to their numbers",
   );
   assert.equal(
-    resolveMentions(MG, ["the owner"], own)[0].jid,
+    resolveMentions(MG, ["Owner"], own)[0].jid,
     "491700000000@s.whatsapp.net",
     "the owner resolves to his own number",
   );

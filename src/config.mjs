@@ -379,8 +379,8 @@ export function allowedJid(...jids) {
 }
 
 // "/ai off" removes a chat from the allowlist entirely -- unlike every other per-chat setting
-// above, there is deliberately no "/ai on" to re-add it (the owner, 2026-08-17: "/ai on will not
-// exists apparently, but thats is ok for now"). Re-adding means hand-editing state/config.json's
+// above, there is deliberately no "/ai on" to re-add it (owner, 2026-08: no "/ai on", by
+// design). Re-adding means hand-editing state/config.json's
 // allowlist, same as bringing in a brand new chat -- see README's Setup section. This is a one-way
 // door on purpose: once a chat opts out, getting back in takes deliberate action outside the chat.
 export function removeFromAllowlist(jid) {
