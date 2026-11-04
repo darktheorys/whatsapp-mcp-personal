@@ -950,13 +950,8 @@ way. Don't set any of these for a real run.
   and any images, documents, or voice notes downloaded from allowlisted chats.
   Losing it means re-pairing, not a leaked account — but treat it like a credential file anyway.
 - **The raw `yt-dlp` binary is never allowlisted directly, only fixed-argument wrapper scripts
-  around it are.** `Bash(<script>.py *)` patterns only auto-approve a _literal command prefix_ —
-  the trailing `*` still permits anything after it, so a pattern that starts with `yt-dlp` (even
-  something that looks scoped, like `Bash(yt-dlp --print *)`) still lets `--exec <command>` (or
-  `--exec-before-download`) ride along later in the same invocation, which runs an arbitrary shell
-  command per download with file-path template expansion — full command execution with no
-  confirmation, found in an audit 2026-08-16. A wrapper script whose CLI surface only accepts a
-  URL/query (never passthrough flags) can't have this problem, which is why `download_video.py`,
+  around it are.** A wrapper script whose CLI surface only accepts a URL or query (never passthrough
+  flags) cannot be talked into running anything else, which is why `download_video.py`,
   `search_videos.py`, `video_info.py`, `extract_audio.py`, `extract_urls.py`, and `watch_video.py`
   are the only yt-dlp-touching things this repo allowlists. Same reasoning for `ffmpeg`/`ffprobe` —
   neither is allowlisted directly either (arbitrary output paths, the `concat:` demuxer reading a
@@ -1012,9 +1007,7 @@ way. Don't set any of these for a real run.
   denies reading `state/messages.db` (and its `-wal`/`-shm` files, plus the older
   `state/messages/`, `state/archive/`), since a tool-level boundary is decorative while the
   underlying store is readable, and `deny-outside-repo.sh` refuses any Bash command naming
-  `messages.db`. Both stop the casual path only: the Bash gate matches command _text_, so
-  `sqlite3 state/messages.db` is caught while a script that opens the same file without naming it
-  is not. `sandbox.enabled` remains the real boundary there. (`state/media/` stays readable —
+  `messages.db`. Both are convenience layers: `sandbox.enabled` is the real boundary there. (`state/media/` stays readable —
   viewing an image before replying to it is part of the job.)
 - **Outbound text is scanned before it leaves.** `scanOutbound` in `src/server.mjs` refuses any
   send matching a private key, AWS/GitHub/Slack/API-key or JWT shape, or containing material from
@@ -1027,10 +1020,8 @@ way. Don't set any of these for a real run.
 - **Claude Code itself is confined to this repo.** `.claude/deny-outside-repo.sh` is a
   `PreToolUse` gate: file tools may only touch this repo and the session scratchpad (symlinks and
   `..` are resolved first), and Bash is refused any path resolving under `$HOME` outside the repo,
-  plus any mention of a known credential location. Bash cannot be gated exactly — a command is a
-  program, not a path — so `sandbox.enabled` is the real boundary there (enabled 2026-08-16, after
-  a security audit found it had never actually been turned on despite this note already claiming
-  it); this hook is the cheap layer in front of it.
+  plus any mention of a known credential location. It is the cheap layer in front of the OS sandbox,
+  which is the real boundary for Bash.
   `sandbox` in `.claude/settings.json` uses OS-level isolation (macOS Seatbelt — built in, nothing
   extra to install) confining **Bash tool calls and their child processes only**: `filesystem`
   restricts writes to the repo + session scratchpad and denies reads of the same credential
@@ -1038,18 +1029,13 @@ way. Don't set any of these for a real run.
   not a duplicate). `network` is deliberately left unrestricted — this repo's own job involves
   fetching from unpredictable domains (YouTube's CDN, TikTok, Instagram, Pinterest, DuckDuckGo),
   so a tight domain allowlist would break the meme/yt-dlp workflow more than it would help.
-  **What this does _not_ cover**: the long-running `node src/server.mjs` process itself (the
-  actual WhatsApp connection — sandboxing wraps how Claude's _own_ Bash commands run during a
-  session, not a daemon already spawned before the sandbox rule applies), and Read/Edit/Write
-  tools or hooks, which run unsandboxed regardless. For isolating the WhatsApp bot process itself
-  from the host, that's a Docker/VM decision, not a Claude Code setting. A container would also
-  lose the `say` voices (and `afconvert`, which that path uses), since neither exists outside
+  **Limit**: the sandbox wraps Claude's own Bash commands, not the long-running `node src/server.mjs`
+  process. Isolating that process from the host is a Docker/VM decision, not a Claude Code setting.
+  A container would also lose the `say` voices (and `afconvert`), since neither exists outside
   macOS. XTTS, Piper and ffmpeg are not macOS-specific, though the daemon and XTTS install
   scripts use launchd.
 
-Voice notes can't carry the `(_Claude_)` text marker WhatsApp text sends end in — there used to be
-an audible tone standing in for it, removed at the owner's request as not worth it. A voice note is
-therefore indistinguishable from one the owner recorded, in chats where that matters.
+Voice notes can't carry the `(_Claude_)` text marker that WhatsApp text sends end in.
 
 One gap worth knowing rather than pretending away: **allowlisting a group extends to whoever is
 added to it later**, with no re-approval.

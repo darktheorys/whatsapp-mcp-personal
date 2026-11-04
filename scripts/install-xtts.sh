@@ -64,6 +64,16 @@ cat >"$PLIST" <<PLIST
 </plist>
 PLIST
 
+# An older version of this script installed the agent under a different label. Unload and remove any
+# other agent that launches this repo's XTTS service, so two copies never run side by side.
+for OLD_PLIST in "$HOME"/Library/LaunchAgents/*.plist; do
+  [[ -f "$OLD_PLIST" && "$OLD_PLIST" != "$PLIST" ]] || continue
+  grep -qF "$X_REPO/scripts/xtts_service.py" "$OLD_PLIST" 2>/dev/null || continue
+  launchctl bootout "$DOMAIN/$(basename "$OLD_PLIST" .plist)" 2>/dev/null || true
+  rm -f "$OLD_PLIST"
+  echo "Removed the older agent $(basename "$OLD_PLIST" .plist)."
+done
+
 launchctl bootout "$DOMAIN/$LABEL" 2>/dev/null || true
 for _ in 1 2 3 4 5 6 7 8 9 10; do
   launchctl print "$DOMAIN/$LABEL" >/dev/null 2>&1 || break

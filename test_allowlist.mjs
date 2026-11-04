@@ -2150,7 +2150,7 @@ assert.deepEqual(unansweredChats([STATS], 1 * H), [], "answering it takes it off
 {
   const { dueTasks, validateTask, upsertTask, loadSchedule, markRan, ackTask } = await import("./src/schedule.mjs");
   const at = (d, h, m) => new Date(2026, 9, d, h, m, 0, 0).getTime();
-  const reminder = { id: "rem-test", once: "2026-10-23T18:00", prompt: "remind 120363000000000201@g.us: hali saha" };
+  const reminder = { id: "rem-test", once: "2026-10-23T18:00", prompt: "remind 120363000000000201@g.us: weekly session" };
   assert.equal(validateTask(reminder), null, "a once task is valid");
   assert.match(validateTask({ ...reminder, at: "10:00" }), /not both/, "not both at and once");
   assert.match(validateTask({ ...reminder, days: [1] }), /days only goes with at/);
@@ -2187,7 +2187,7 @@ assert.deepEqual(unansweredChats([STATS], 1 * H), [], "answering it takes it off
   const a = store.addMemory(G, "Selin", "kahveyi sekersiz icer");
   assert.ok(a.id, "a note is stored");
   assert.equal(store.addMemory(G, "selin", "Kahveyi sekersiz icer").duplicate, true, "the same note twice is one note");
-  store.addMemory(G, null, "cumalari hali saha");
+  store.addMemory(G, null, "usually joins the weekly session");
   store.addMemory(H, "Selin", "baska sohbetten bir not");
   assert.equal(store.listMemories(G).length, 2, "only this chat's notes");
   assert.equal(store.listMemories(G, "SELİN").length, 1, "about matches with case and diacritics folded");
@@ -2204,7 +2204,7 @@ assert.deepEqual(unansweredChats([STATS], 1 * H), [], "answering it takes it off
     "long notes are refused",
   );
   assert.match(store.addMemory(G, null, "   ").error, /empty/, "empty notes are refused");
-  assert.match(formatMemories(store.listMemories(G)), /^#\d+ cumalari hali saha$/, "list format");
+  assert.match(formatMemories(store.listMemories(G)), /^#\d+ usually joins the weekly session$/, "list format");
   assert.match(formatMemories([]), /kayitli bir sey yok/);
 
   assert.ok(COMMANDS.memory.test("/memory") && !COMMANDS.memory.test("/memory sil"), "/memory is anchored");

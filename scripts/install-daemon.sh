@@ -67,6 +67,16 @@ cat >"$PLIST" <<PLIST
 </plist>
 PLIST
 
+# An older version of this script installed the agent under a different label. Unload and remove any
+# other agent that launches this repo's daemon, so two copies never fight over the one WhatsApp connection.
+for OLD_PLIST in "$HOME"/Library/LaunchAgents/*.plist; do
+  [[ -f "$OLD_PLIST" && "$OLD_PLIST" != "$PLIST" ]] || continue
+  grep -qF "$X_REPO/src/daemon.mjs" "$OLD_PLIST" 2>/dev/null || continue
+  launchctl bootout "$DOMAIN/$(basename "$OLD_PLIST" .plist)" 2>/dev/null || true
+  rm -f "$OLD_PLIST"
+  echo "Removed the older agent $(basename "$OLD_PLIST" .plist)."
+done
+
 launchctl bootout "$DOMAIN/$LABEL" 2>/dev/null || true
 # bootout returns before the job is gone, and a bootstrap straight after can fail with an I/O error.
 for _ in 1 2 3 4 5 6 7 8 9 10; do

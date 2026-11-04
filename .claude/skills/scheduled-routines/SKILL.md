@@ -45,14 +45,14 @@ Target: the owner's own DM.
 2. Short Turkish summary covering only what is notable: chats that went quiet or got busier versus the previous 7 days (use the `change` field, absolute counts not percentages), any chat where `conversationsStarted` is lopsided against the owner, the owner's median reply time where it stands out, and the unanswered list with how long each has waited.
 3. Skip anything unremarkable. If nothing stands out, say so in one line.
 
-## Weekly attendance poll (Thursday 19:12, catch-up 180 min)
+## Weekly attendance poll (weekly, 19:12, catch-up 180 min)
 
-Target: the friends group. Voice: see the `chat-personas` skill (`state/personas/persona-friends.md`).
+Target: group chat 1. Voice: see the `chat-personas` skill (`state/personas/persona-a.md`).
 
 1. `wa_send_poll`, never a text message (standing owner instruction since 2026-09-25: open a poll directly in later weeks). Single choice, options `varım` and `yokum`.
-2. Question: who is coming to the Friday session tomorrow. Short, in the active persona's voice, a little different every week.
+2. Question: who is coming to the weekly session tomorrow. Short, in the active persona's voice, a little different every week.
 3. Ask the group as a whole. Never name or chase people who did not vote, and do not follow up later in the week. Check votes with `wa_poll_results` only if the owner asks.
-4. If it fires late and it is already Friday, ask about today instead of tomorrow.
+4. If it fires late and it is already the session day, ask about today instead of tomorrow.
 5. When the active friends-group persona changes, update this task's prompt with `wa_schedule` so the persona named in it matches `chat-personas`.
 
 ## One-off reminders
