@@ -26,6 +26,7 @@ import { DocumentScanError, documentScanTexts } from "./doc-scan.mjs";
 import { MAX_SEGMENTS, parseSpeechMarkup, speechSegmentCount, splitSentences, toSayText } from "./speech-markup.mjs";
 import { ELEVENLABS_SAMPLE_RATE, elevenLabsAvailable, elevenLabsRender } from "./elevenlabs-client.mjs";
 import { XTTS_SAMPLE_RATE, xttsRender } from "./xtts-client.mjs";
+import { voxcpmCanRender, voxcpmRender } from "./voxcpm-client.mjs";
 import { defaultCloneFor, resolveClone } from "./voices.mjs";
 import {
   downloadMediaMessage,
@@ -471,6 +472,24 @@ async function trimTrailingBabble(wav, text, lang = "tr") {
 // itself could not run, which is not a reason to retry. -> { score, takes }
 const MAX_TAKES = 3;
 const GOOD_TAKE = 0.85;
+
+// One sentence, one engine. A cloned voice at normal speed goes to the resident VoxCPM2 service first
+// (owner decision, 2026-11-10: it was the best of four in a listening test, and it takes a `style`
+// description for emotion). Anything it cannot do, a stock voice or a speed change, and any failure
+// of it, goes to XTTS, so a note is never lost to the newer service. `style` is only ever read by
+// VoxCPM2. The same reference clip, already approved by resolveClone, is what both engines get, so a
+// fallback is the same person's voice on another engine, never another voice.
+export async function renderVoice(request, { voxcpm = voxcpmRender, xtts = xttsRender } = {}) {
+  if (voxcpmCanRender(request)) {
+    try {
+      await voxcpm(request);
+      return;
+    } catch (err) {
+      logger.warn({ err: String(err.message ?? err) }, "voxcpm unavailable, using xtts for this sentence");
+    }
+  }
+  await xtts(request);
+}
 // Whisper is shaky on a sentence of two or three words, so those pass at a lower score instead of
 // burning takes on a transcription error.
 const goodEnough = (score, text) => score >= (text.split(/\s+/).length <= 3 ? 0.6 : GOOD_TAKE);
@@ -480,7 +499,7 @@ async function renderXttsChecked(request, lang, verify) {
   for (let take = 1; take <= (verify ? MAX_TAKES : 1); take++) {
     const file = take === 1 ? request.outWav : `${request.outWav}.take${take}.wav`;
     try {
-      await xttsRender({ ...request, outWav: file });
+      await renderVoice({ ...request, outWav: file });
     } catch (err) {
       // The first take failing is a real failure. A retry failing is not: there is already a usable
       // take, and losing it would fail the whole note (or send it to Piper) over an optional redo.
@@ -561,6 +580,7 @@ export async function synthWav(
           lang,
           speaker: ref ? undefined : XTTS_DEFAULT_SPEAKER,
           ref,
+          style: segment.mood ?? undefined,
           speed: rate / segment.scale,
           outWav: file,
         });
@@ -606,6 +626,7 @@ export async function synthWav(
           lang,
           speaker: clone ? undefined : XTTS_DEFAULT_SPEAKER,
           ref: clone?.ref,
+          style: segment.mood ?? undefined,
           speed: rate / segment.scale,
           outWav: file,
         });
@@ -3039,7 +3060,10 @@ server.registerTool(
       "down); pass a macOS `say` voice name (see `say -v '?'`) to use that instead, or `clone` for a " +
       "cloned voice. Several voices fit in one note: wrap a part in [voice NAME]...[/voice] for a " +
       "cloned voice or [voice say:NAME]...[/voice] for a macOS one (each clone is checked against " +
-      "this chat like `clone` is), and the rest is read in the note's own voice. " +
+      "this chat like `clone` is), and the rest is read in the note's own voice. A cloned voice also " +
+      "takes emotion: wrap a part in [mood excited, speaking fast]...[/mood] (English description, e.g. " +
+      "sad and quiet, angry and sharp, warm, whispering) and chain several spans in one note. Use it " +
+      "whenever the feeling matters. " +
       "`language` defaults to this chat's usual language (set with /language) but can be overridden " +
       "per call — e.g. to reply in English for one message in an otherwise-Turkish chat.",
     inputSchema: {

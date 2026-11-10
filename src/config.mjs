@@ -27,6 +27,9 @@ export const DAEMON_TOKEN_PATH = process.env.WA_DAEMON_TOKEN ?? join(STATE_DIR, 
 // reference clips live in state/voices/, which is gitignored with the rest of state/ and is the only
 // place the service will read a cloning reference from.
 export const XTTS_SOCK_PATH = process.env.WA_XTTS_SOCK ?? join(STATE_DIR, "xtts.sock");
+// The resident VoxCPM2 service (scripts/voxcpm_service.py), the first choice for a cloned voice. Same
+// token, same voices dir, its own socket.
+export const VOXCPM_SOCK_PATH = process.env.WA_VOXCPM_SOCK ?? join(STATE_DIR, "voxcpm.sock");
 export const VOICES_DIR = process.env.WA_VOICES_DIR ?? join(STATE_DIR, "voices");
 export const XTTS_DEFAULT_SPEAKER = "Damien Black";
 // ElevenLabs is the first choice for an ordinary voice note (src/elevenlabs-client.mjs). The key is a

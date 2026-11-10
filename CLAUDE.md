@@ -26,6 +26,7 @@ bash scripts/setup-voice.sh [tier]  # re-run voice setup directly; pass low/mid/
 bash scripts/install-daemon.sh [--uninstall]  # launchd agent for src/daemon.mjs (owner runs it, writes ~/Library/LaunchAgents)
 bash scripts/restart-daemon.sh    # reload src/ in daemon mode
 bash scripts/install-xtts.sh [--uninstall]    # launchd agent for scripts/xtts_service.py (needs state/xtts-venv and the daemon token)
+bash scripts/install-voxcpm.sh [--uninstall]  # launchd agent for scripts/voxcpm_service.py (needs state/tts-mlx-venv with mlx-audio, and the daemon token)
 bash scripts/add-voice.sh <name> <audio> --consent "..." --allow <jid> [--default <jid>]  # register a cloned voice
 ```
 
@@ -37,7 +38,7 @@ limiting). Add new assertions to it rather than creating a second test file. It 
 new test code that needs a fresh config/db must follow the same import-order pattern. The other
 state files are redirected the same way, all into temp dirs: `WA_INBOX_PATH`, `WA_CONTACTS_PATH`,
 `WA_POLL_STATE_PATH`, `WA_PENDING_WAKE_PATH`, `WA_SCHEDULE_PATH`, `WA_POLLS_PATH`, `WA_VOICES_DIR`,
-`WA_XTTS_SOCK`, `WA_DAEMON_TOKEN`, `WA_LOG_PATH` (and `WA_DAEMON_SOCK` exists for the daemon socket). A new
+`WA_XTTS_SOCK`, `WA_VOXCPM_SOCK`, `WA_DAEMON_TOKEN`, `WA_LOG_PATH` (and `WA_DAEMON_SOCK` exists for the daemon socket). A new
 module-load-time state path needs its own override here too, or the test writes into the real
 `state/`. `WA_NO_CONNECT` also unlocks `setSocketForTest` and `resetSendLimitForTest`, which throw
 without it.
@@ -88,11 +89,18 @@ detail below. The rest, one line each:
   replays `initialize` after a daemon restart, fails in-flight requests instead of hanging them.
 - **`xtts-client.mjs`**: one JSON line over `state/xtts.sock` to `scripts/xtts_service.py`, with the
   daemon token. Rejects at once when the socket is missing, which is the caller's cue to use Piper.
+- **`voxcpm-client.mjs`**: the same one-JSON-line protocol to `state/voxcpm.sock` (`scripts/voxcpm_service.py`,
+  VoxCPM2 through mlx-audio, venv `state/tts-mlx-venv`, launchd label `com.whatsapp-mcp-personal.voxcpm`). The
+  first choice for a *cloned* voice at normal speed (best of four in a listening test, 2026-11-10). It has no
+  stock speakers and no speed control, so `renderVoice` (server.mjs) sends only a clone with `speed` 1 there and
+  everything else, plus any VoxCPM2 failure, to XTTS with the same approved reference clip, so a fallback is the
+  same person's voice on another engine. It also takes a `style` (emotion) description, cleaned by `cleanStyle`.
 - **`voices.mjs`**: cloned voices from `state/voices/voices.json`. `resolveClone` refuses a voice in
   any chat its `allowed_jids` does not list (`"*"` there means any allowlisted chat, opt-in per
   voice), and a reference clip outside `state/voices/`.
   `defaultCloneFor` picks a chat's `default_jids` voice.
-- **`speech-markup.mjs`**: `[pause]`, `[slow]`, `[fast]`, `[voice NAME]` spans and ellipsis beats in
+- **`speech-markup.mjs`**: `[pause]`, `[slow]`, `[fast]`, `[voice NAME]`, `[mood DESCRIPTION]` (emotion, English,
+  only VoxCPM2 acts on it, spans can be chained) spans and ellipsis beats in
   voice-note text, parsed into segments that `server.mjs` renders (each in its own voice) and joins
   with real silence. `resolveVoiceSpans` checks every clone in a span against the chat first.
 - **`doc-scan.mjs`**: pulls text out of pdf and office files for the outbound secret scan. Fails

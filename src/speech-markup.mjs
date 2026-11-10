@@ -9,6 +9,10 @@
 //   ... or …                  an automatic 450 ms beat
 //   [voice NAME]...[/voice]   the span in another voice: a cloned voice by name, or say:NAME for a
 //                             macOS `say` voice. Several voices in one note, for a dialogue
+//   [mood DESCRIPTION]...[/mood]  the span delivered in a described emotion or style, written in
+//                             English ("excited, speaking fast", "sad, low and quiet", "angry, sharp").
+//                             Spans can follow one another in one note. Only the VoxCPM2 engine
+//                             (cloned voices) acts on it, every other engine reads the words plainly
 //
 // A voice span is resolved by the caller (server.mjs), which checks each clone against the chat it
 // is sent to exactly as a whole-note clone is checked. Unclosed spans run to the end of the note.
@@ -26,7 +30,7 @@ const SCALES = { slow: 1.35, fast: 0.8 };
 // ("Cem (Enhanced)"), so it gets its own, wider set.
 const VOICE_NAME = String.raw`[a-z0-9_-]{1,40}|say:[A-Za-z][A-Za-z0-9 ()._-]{0,40}`;
 const TOKEN = new RegExp(
-  String.raw`\[pause(?:\s+(\d{2,4}))?\]|\[(slow|fast)\]|\[\/(slow|fast)\]|\[voice\s+(${VOICE_NAME})\]|\[\/voice\]`,
+  String.raw`\[pause(?:\s+(\d{2,4}))?\]|\[(slow|fast)\]|\[\/(slow|fast)\]|\[voice\s+(${VOICE_NAME})\]|\[\/voice\]|\[mood\s+([^\[\]]{2,120})\]|\[\/mood\]`,
   "gi",
 );
 
@@ -49,12 +53,13 @@ function parseAll(input) {
   const parts = [];
   let scale = 1;
   let voice = null;
+  let mood = null;
   let last = 0;
   const speech = (chunk) => {
     const trimmed = chunk.replace(/\s+/g, " ").trim();
     // A chunk with no letter or digit in it (the "." left behind by "[/slow].") gives Piper nothing to
     // say and it fails outright with "# channels not specified", so it is dropped here.
-    if (trimmed && /[\p{L}\p{N}]/u.test(trimmed)) parts.push({ type: "speech", text: trimmed, scale, voice });
+    if (trimmed && /[\p{L}\p{N}]/u.test(trimmed)) parts.push({ type: "speech", text: trimmed, scale, voice, mood });
   };
   for (const match of text.matchAll(TOKEN)) {
     speech(text.slice(last, match.index));
@@ -70,6 +75,10 @@ function parseAll(input) {
       voice = /^say:/i.test(match[4]) ? `say:${match[4].slice(4)}` : match[4].toLowerCase();
     } else if (token === "[/voice]") {
       voice = null;
+    } else if (match[5]) {
+      mood = match[5].replace(/\s+/g, " ").trim();
+    } else if (token === "[/mood]") {
+      mood = null;
     } else {
       scale = 1;
     }

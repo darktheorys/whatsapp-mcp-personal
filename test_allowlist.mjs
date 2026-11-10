@@ -18,6 +18,7 @@ process.env.WA_CONFIG_PATH = cfg;
 const voiceDir = mkdtempSync(join(tmpdir(), "wa-voices-"));
 process.env.WA_VOICES_DIR = join(voiceDir, "voices");
 process.env.WA_XTTS_SOCK = join(voiceDir, "x.sock");
+process.env.WA_VOXCPM_SOCK = join(voiceDir, "v.sock");
 // Without a key file ElevenLabs is off, so no test reaches the real service or spends the real quota.
 process.env.WA_ELEVENLABS_KEY_PATH = join(voiceDir, "no-such-key");
 process.env.WA_DAEMON_TOKEN = join(voiceDir, "token");
@@ -1902,9 +1903,9 @@ assert.deepEqual(unansweredChats([STATS], 1 * H), [], "answering it takes it off
   assert.deepEqual(
     parseSpeechMarkup("Merhaba [pause 700] dünya"),
     [
-      { type: "speech", text: "Merhaba", scale: 1, voice: null },
+      { type: "speech", text: "Merhaba", scale: 1, voice: null, mood: null },
       { type: "pause", ms: 700 },
-      { type: "speech", text: "dünya", scale: 1, voice: null },
+      { type: "speech", text: "dünya", scale: 1, voice: null, mood: null },
     ],
     "an explicit pause splits the speech",
   );
@@ -1961,6 +1962,69 @@ assert.deepEqual(unansweredChats([STATS], 1 * H), [], "answering it takes it off
     parseSpeechMarkup("[voice ../etc/x]bu")[0].text,
     /\[voice/,
     "a name that is not a voice name is not a tag, so the caller can refuse it",
+  );
+  // Emotion spans: [mood DESCRIPTION]...[/mood], one after another in the same note.
+  const moods = parseSpeechMarkup(
+    "düz [mood excited, speaking fast]harika![/mood] [mood sad, low and quiet]ama gitti.[/mood] son",
+  );
+  assert.deepEqual(
+    moods.map((p) => `${p.mood}:${p.text}`),
+    ["null:düz", "excited, speaking fast:harika!", "sad, low and quiet:ama gitti.", "null:son"],
+    "each span carries its own description and the text outside has none",
+  );
+  assert.equal(
+    stripSpeechMarkup("[mood angry]hayır[/mood] dedim"),
+    "hayır dedim",
+    "mood tags are stripped like the other markup",
+  );
+  assert.equal(
+    parseSpeechMarkup("[mood x]bu")[0].text.startsWith("[mood"),
+    true,
+    "a description of one character is not a tag",
+  );
+  const moodVoice = parseSpeechMarkup("[voice kral][mood angry]hayır[/mood][/voice]")[0];
+  assert.deepEqual([moodVoice.voice, moodVoice.mood], ["kral", "angry"], "a mood span can sit inside a voice span");
+  assert.equal(
+    toSayText("[mood sad]üzgün[/mood] bir"),
+    "üzgün bir",
+    "engines without emotion control read the words plainly",
+  );
+
+  // The VoxCPM2 engine: only a clone at normal speed goes there, the style is cleaned, and any
+  // failure falls through to XTTS with the same request.
+  const { voxcpmCanRender, cleanStyle, voxcpmRender } = await import("./src/voxcpm-client.mjs");
+  const { renderVoice } = await import("./src/server.mjs");
+  assert.equal(voxcpmCanRender({ ref: "/x/a.wav", speed: 1 }), true, "a clone at normal speed");
+  assert.equal(voxcpmCanRender({ ref: "/x/a.wav" }), true, "no speed means normal speed");
+  assert.equal(voxcpmCanRender({ ref: "/x/a.wav", speed: 1.15 }), false, "a speed change stays on XTTS");
+  assert.equal(voxcpmCanRender({ speaker: "Damien Black", speed: 1 }), false, "a stock voice stays on XTTS");
+  assert.equal(cleanStyle("  (angry)\n[sharp]  "), "angry sharp", "brackets and line breaks cannot break the prompt");
+  assert.equal(cleanStyle("()"), undefined, "an empty style is no style");
+  assert.equal(cleanStyle("a".repeat(500)).length, 200, "a style is capped");
+  const calls = [];
+  const req = { text: "merhaba", ref: "/x/a.wav", speed: 1, style: "happy", outWav: "/tmp/o.wav" };
+  await renderVoice(req, {
+    voxcpm: async (r) => calls.push(["voxcpm", r.style]),
+    xtts: async () => calls.push(["xtts"]),
+  });
+  assert.deepEqual(calls, [["voxcpm", "happy"]], "a clone goes to VoxCPM2 first, with its style");
+  calls.length = 0;
+  await renderVoice(req, {
+    voxcpm: async () => {
+      throw new Error("down");
+    },
+    xtts: async (r) => calls.push(["xtts", r.ref]),
+  });
+  assert.deepEqual(calls, [["xtts", "/x/a.wav"]], "a VoxCPM2 failure falls back to XTTS with the same clip");
+  calls.length = 0;
+  await renderVoice(
+    { ...req, ref: undefined, speaker: "Damien Black" },
+    { voxcpm: async () => calls.push(["voxcpm"]), xtts: async () => calls.push(["xtts"]) },
+  );
+  assert.deepEqual(calls, [["xtts"]], "a stock voice never reaches VoxCPM2");
+  await assert.rejects(
+    voxcpmRender({ text: "x", ref: "/x/a.wav", outWav: "/tmp/x.wav" }),
+    "a VoxCPM2 service that is down rejects fast",
   );
 }
 
