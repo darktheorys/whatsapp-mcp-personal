@@ -2150,7 +2150,11 @@ assert.deepEqual(unansweredChats([STATS], 1 * H), [], "answering it takes it off
 {
   const { dueTasks, validateTask, upsertTask, loadSchedule, markRan, ackTask } = await import("./src/schedule.mjs");
   const at = (d, h, m) => new Date(2026, 9, d, h, m, 0, 0).getTime();
-  const reminder = { id: "rem-test", once: "2026-10-23T18:00", prompt: "remind 120363000000000201@g.us: weekly session" };
+  const reminder = {
+    id: "rem-test",
+    once: "2026-10-23T18:00",
+    prompt: "remind 120363000000000201@g.us: weekly session",
+  };
   assert.equal(validateTask(reminder), null, "a once task is valid");
   assert.match(validateTask({ ...reminder, at: "10:00" }), /not both/, "not both at and once");
   assert.match(validateTask({ ...reminder, days: [1] }), /days only goes with at/);

@@ -24,11 +24,11 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.32.1",
     "@whiskeysockets/baileys": "7.0.0-rc14",
-    "pino": "10.3.1",
-    "zod": "4.6.5"
+    "pino": "10.4.0",
+    "zod": "4.6.7"
   },
   "devDependencies": {
-    "oxfmt": "0.68.0",
-    "oxlint": "1.83.0"
+    "oxfmt": "0.72.0",
+    "oxlint": "1.87.0"
   }
 }

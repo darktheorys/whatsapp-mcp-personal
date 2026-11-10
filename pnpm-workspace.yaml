@@ -33,6 +33,12 @@ minimumReleaseAgeExclude:
   # was published 2026-10-11T19:32Z and clears the 30-day wait on 2026-11-10T19:32Z. Remove this entry
   # after that time (pnpm rejects the lockfile until then without it).
   - ip-address
+  # Security fixes taken on 2026-11-10 (same owner decision: a CVE fix may skip the 30-day wait). Ages on that day:
+  # body-parser 2.4.0 18 days, fast-uri 3.1.9 21 days, qs 6.16.1 26 days. Remove each entry once its
+  # version is past 30 days (qs about 2026-11-14, fast-uri 2026-11-18, body-parser 2026-11-21).
+  - body-parser
+  - fast-uri
+  - qs
 
 # Security floors for transitive dependencies (pnpm audit, 2026-10-23): the oldest patched release
 # of each. All of them are past the 30-day wait except ip-address (see its exception above); the
@@ -42,11 +48,12 @@ minimumReleaseAgeExclude:
 # hono ^4.11.4).
 overrides:
   proxy-addr: 2.0.8
-  fast-uri: 3.1.8
+  body-parser: 2.4.0
+  fast-uri: 3.1.9
   ip-address: 10.7.4
-  qs: 6.16.0
+  qs: 6.16.1
   hono: 4.13.11
-  "@hono/node-server": 1.19.17
+  "@hono/node-server": 2.1.4
   music-metadata: 11.16.0
   sharp: 0.35.5
 
