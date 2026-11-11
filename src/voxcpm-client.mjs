@@ -1,3 +1,5 @@
+import { randomBytes } from "node:crypto";
+import { renameSync, rmSync } from "node:fs";
 import { VOXCPM_SOCK_PATH } from "./config.mjs";
 import { xttsRequest } from "./xtts-client.mjs";
 
@@ -28,7 +30,17 @@ export function cleanStyle(style) {
   return cleaned || undefined;
 }
 
-// Renders `text` in the voice of `ref` to a 24 kHz wav at `outWav`.
-export function voxcpmRender({ text, ref, style, outWav }, { sock = VOXCPM_SOCK_PATH } = {}) {
-  return xttsRequest({ text, ref, style: cleanStyle(style), out: outWav }, { timeoutMs: voxcpmTimeoutMs(text), sock });
+// Renders `text` in the voice of `ref` to a 24 kHz wav at `outWav`. The service writes to a unique
+// temporary name that is moved into place only once it answered: when this call times out the service
+// still finishes its job later, and if that job wrote `outWav` it would overwrite the XTTS take that
+// replaced it (or clip a file being read) after the fallback had already produced the sentence.
+export async function voxcpmRender({ text, ref, style, outWav }, { sock = VOXCPM_SOCK_PATH } = {}) {
+  const tmp = `${outWav}.vox${randomBytes(4).toString("hex")}.wav`;
+  try {
+    await xttsRequest({ text, ref, style: cleanStyle(style), out: tmp }, { timeoutMs: voxcpmTimeoutMs(text), sock });
+    renameSync(tmp, outWav);
+  } catch (err) {
+    rmSync(tmp, { force: true });
+    throw err;
+  }
 }

@@ -1994,7 +1994,7 @@ assert.deepEqual(unansweredChats([STATS], 1 * H), [], "answering it takes it off
   // The VoxCPM2 engine: only a clone at normal speed goes there, the style is cleaned, and any
   // failure falls through to XTTS with the same request.
   const { voxcpmCanRender, cleanStyle, voxcpmRender } = await import("./src/voxcpm-client.mjs");
-  const { renderVoice } = await import("./src/server.mjs");
+  const { renderVoice, moreTakesWanted } = await import("./src/server.mjs");
   assert.equal(voxcpmCanRender({ ref: "/x/a.wav", speed: 1 }), true, "a clone at normal speed");
   assert.equal(
     voxcpmCanRender({ ref: "/x/a.wav", speed: 1.15 }),
@@ -2013,7 +2013,7 @@ assert.deepEqual(unansweredChats([STATS], 1 * H), [], "answering it takes it off
     xtts: async () => calls.push(["xtts"]),
     stretch: (_file, speed) => calls.push(["stretch", speed]),
   });
-  assert.equal(engineUsed, "voxcpm", "renderVoice says which engine made the sentence, so VoxCPM2 gets one take");
+  assert.equal(engineUsed, "voxcpm", "renderVoice reports which engine made the sentence");
   assert.deepEqual(
     calls,
     [
@@ -2044,7 +2044,7 @@ assert.deepEqual(unansweredChats([STATS], 1 * H), [], "answering it takes it off
     xtts: async (r) => calls.push(["xtts", r.ref]),
     stretch: noStretch,
   });
-  assert.equal(fallbackEngine, "xtts", "a fallback is reported as XTTS, which keeps its retry takes");
+  assert.equal(fallbackEngine, "xtts", "a fallback is reported as XTTS");
   assert.deepEqual(calls, [["xtts", "/x/a.wav"]], "a VoxCPM2 failure falls back to XTTS with the same clip");
   // stretchWav is a no-op at speed 1 and leaves a missing file alone then; a real stretch changes the length.
   const { stretchWav } = await import("./src/server.mjs");
@@ -2068,9 +2068,55 @@ assert.deepEqual(unansweredChats([STATS], 1 * H), [], "answering it takes it off
     { voxcpm: async () => calls.push(["voxcpm"]), xtts: async () => calls.push(["xtts"]) },
   );
   assert.deepEqual(calls, [["xtts"]], "a stock voice never reaches VoxCPM2");
+  // Which sentences get another take: a poor score on XTTS only, never on VoxCPM2, never when the check
+  // could not run. The loop in renderXttsChecked calls exactly this.
+  const poem = "bu cümle birkaç kelimeden oluşuyor";
+  assert.equal(moreTakesWanted(0.2, poem, "xtts"), true, "a poor XTTS take is rendered again");
+  assert.equal(moreTakesWanted(0.2, poem, "voxcpm"), false, "a poor VoxCPM2 take is not: one take per sentence");
+  assert.equal(moreTakesWanted(0.95, poem, "xtts"), false, "a good take is kept");
+  assert.equal(moreTakesWanted(null, poem, "xtts"), false, "a check that could not run is not a reason to retry");
+  // The client against a fake VoxCPM2 service: the request carries the cleaned style, the reference and the
+  // token, the service is given a temporary name (a late job from a timed-out call must not touch the final
+  // file), and the file is moved into place only after the service answered.
+  const { createServer: createVoxServer } = await import("node:net");
+  const voxDir = mkdtempSync(join(tmpdir(), "wa-vox-"));
+  let voxSeen = null;
+  let voxMode = "ok";
+  const voxFake = createVoxServer((c) => {
+    let acc = "";
+    c.on("data", (d) => {
+      acc += d.toString();
+      if (!acc.includes("\n")) return;
+      voxSeen = JSON.parse(acc);
+      if (voxMode === "ok") {
+        writeFileSync(voxSeen.out, "wav");
+        c.end(JSON.stringify({ ok: true, seconds: 1 }) + "\n");
+      } else c.end(JSON.stringify({ ok: false, error: "reference must be a file under state/voices" }) + "\n");
+    });
+    c.on("error", () => {});
+  });
+  await new Promise((r) => voxFake.listen(process.env.WA_VOXCPM_SOCK, r));
+  const voxOut = join(voxDir, "o.wav");
+  await voxcpmRender({ text: "merhaba", ref: "/x/a.wav", style: "(angry)\n[sharp]", outWav: voxOut });
+  assert.equal(voxSeen.style, "angry sharp", "the cleaned style reaches the service");
+  assert.equal(voxSeen.ref, "/x/a.wav", "the approved reference reaches the service");
+  assert.equal(voxSeen.token, "t".repeat(64), "the daemon token is on every request");
+  assert.notEqual(voxSeen.out, voxOut, "the service writes to a temporary name, not the final file");
+  assert.ok(existsSync(voxOut) && !existsSync(voxSeen.out), "the file is moved into place after the answer");
+  voxMode = "refuse";
+  const voxOut2 = join(voxDir, "o2.wav");
+  await assert.rejects(
+    voxcpmRender({ text: "merhaba", ref: "/x/a.wav", outWav: voxOut2 }),
+    /refused: reference must be a file/,
+    "a refusal rejects, so the caller falls back to XTTS",
+  );
+  assert.ok(!existsSync(voxOut2), "a refused render leaves no file under the final name");
+  await new Promise((r) => voxFake.close(r));
+  rmSync(voxDir, { recursive: true, force: true });
   await assert.rejects(
     voxcpmRender({ text: "x", ref: "/x/a.wav", outWav: "/tmp/x.wav" }),
-    "a VoxCPM2 service that is down rejects fast",
+    /ENOENT|ECONNREFUSED/,
+    "a VoxCPM2 service that is down rejects at once, on the missing socket",
   );
 }
 

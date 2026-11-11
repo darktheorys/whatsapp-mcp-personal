@@ -181,11 +181,26 @@ def main():
                 if not chunk:
                     return
                 data += chunk
+            request = {}
             try:
-                reply = handle(json.loads(data.decode("utf-8")))
+                request = json.loads(data.decode("utf-8"))
+                reply = handle(request)
             except Exception as err:  # a bad request must not take the service down
                 reply = {"ok": False, "error": f"{type(err).__name__}: {err}"}
-            conn.sendall((json.dumps(reply) + "\n").encode("utf-8"))
+            try:
+                conn.sendall((json.dumps(reply) + "\n").encode("utf-8"))
+            except OSError:
+                # The daemon gave up (timed out) and used another engine: nobody will collect this file.
+                out = str(request.get("out", "")) if isinstance(request, dict) else ""
+                if (
+                    reply.get("ok")
+                    and out.endswith(".wav")
+                    and inside(os.path.dirname(out) or ".", TMP_ROOT)
+                ):
+                    try:
+                        os.unlink(out)
+                    except OSError:
+                        pass
 
     if os.path.exists(SOCK):
         probe = socket.socket(socket.AF_UNIX)

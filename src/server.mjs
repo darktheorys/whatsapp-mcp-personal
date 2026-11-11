@@ -493,12 +493,25 @@ export function stretchWav(file, speed) {
 // engines get, so a fallback is the same person's voice on another engine, never another voice.
 export async function renderVoice(request, { voxcpm = voxcpmRender, xtts = xttsRender, stretch = stretchWav } = {}) {
   if (voxcpmCanRender(request)) {
+    let rendered = false;
     try {
       await voxcpm(request);
-      stretch(request.outWav, request.speed ?? 1);
-      return "voxcpm";
+      rendered = true;
     } catch (err) {
       logger.warn({ err: String(err.message ?? err) }, "voxcpm unavailable, using xtts for this sentence");
+    }
+    if (rendered) {
+      // The stretch is local ffmpeg, not the service: if it fails the sentence is still VoxCPM2's, at its
+      // own pace, which beats rendering it a second time on another engine and blaming the service.
+      try {
+        stretch(request.outWav, request.speed ?? 1);
+      } catch (err) {
+        logger.warn(
+          { err: String(err.message ?? err) },
+          "could not change the speed of a voxcpm sentence, keeping its own pace",
+        );
+      }
+      return "voxcpm";
     }
   }
   await xtts(request);
@@ -507,6 +520,11 @@ export async function renderVoice(request, { voxcpm = voxcpmRender, xtts = xttsR
 // Whisper is shaky on a sentence of two or three words, so those pass at a lower score instead of
 // burning takes on a transcription error.
 const goodEnough = (score, text) => score >= (text.split(/\s+/).length <= 3 ? 0.6 : GOOD_TAKE);
+// Another take only for a sentence that scored poorly, and never from VoxCPM2 (owner decision,
+// 2026-11-12): the check scores shouted and sad lines low, so it re-rendered every sentence three times
+// for nothing. The tail trim still runs on its one take. A score of null means the check could not run.
+export const moreTakesWanted = (score, text, engine) =>
+  score !== null && !goodEnough(score, text) && engine !== "voxcpm";
 async function renderXttsChecked(request, lang, verify) {
   let best = null;
   let attempts = 0;
@@ -530,9 +548,7 @@ async function renderXttsChecked(request, lang, verify) {
     } else if (file !== request.outWav) {
       rmSync(file, { force: true });
     }
-    // VoxCPM2 gets one take (owner decision, 2026-11-12): the check scores shouted and sad lines low, so
-    // it re-rendered every sentence three times for nothing. The tail trim above still ran.
-    if (score === null || goodEnough(score, request.text) || engine === "voxcpm") break;
+    if (!moreTakesWanted(score, request.text, engine)) break;
   }
   if (best.file !== request.outWav) renameSync(best.file, request.outWav);
   return { score: best.score, takes: attempts };
