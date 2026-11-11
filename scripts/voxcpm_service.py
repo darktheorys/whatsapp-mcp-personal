@@ -19,6 +19,7 @@ Safety, because this process writes files and can imitate a voice (same rules as
 import hmac
 import json
 import os
+import queue
 import socket
 import subprocess
 import sys
@@ -61,12 +62,47 @@ def main():
         log("daemon token missing or too short, refusing to start")
         sys.exit(1)
 
-    started = time.time()
-    model = load(MODEL)
-    log(f"model loaded in {time.time() - started:.0f}s")
+    # MLX keeps its streams per thread: a model loaded on one thread fails on any other with "There is
+    # no Stream(cpu, 1) in current thread". The connection handlers each run on their own thread, so
+    # every call that touches the model goes through one worker thread that loaded it and owns it. It
+    # also means one render at a time, which is what the GPU wants anyway.
+    jobs = queue.Queue()
+    loaded = threading.Event()
+    boot = {}
 
-    # Only one render at a time: the GPU is the shared resource and two at once would just fight.
-    gpu = threading.Lock()
+    def worker():
+        try:
+            started = time.time()
+            model = load(MODEL)
+            boot["model"] = model
+            log(f"model loaded in {time.time() - started:.0f}s")
+        except Exception as err:
+            boot["error"] = err
+            return
+        finally:
+            loaded.set()
+        while True:
+            text, ref, kwargs, box, done = jobs.get()
+            try:
+                parts, rate = [], None
+                for chunk in model.generate(text=text, ref_audio=ref, **kwargs):
+                    parts.append(np.array(chunk.audio).astype(np.float32).reshape(-1))
+                    rate = getattr(chunk, "sample_rate", None) or getattr(
+                        model, "sample_rate", 48000
+                    )
+                box["parts"], box["rate"] = parts, rate
+            except (
+                Exception
+            ) as err:  # reported to the requester, the worker keeps going
+                box["error"] = err
+            finally:
+                done.set()
+
+    threading.Thread(target=worker, daemon=True).start()
+    loaded.wait()
+    if "error" in boot:
+        log(f"model failed to load: {boot['error']}")
+        sys.exit(1)
 
     def handle(request):
         if not hmac.compare_digest(str(request.get("token", "")), token):
@@ -99,13 +135,12 @@ def main():
         )[:200]
         kwargs = {"instruct": style} if style else {}
         began = time.time()
-        with gpu:
-            parts, rate = [], None
-            for chunk in model.generate(text=text, ref_audio=ref, **kwargs):
-                parts.append(np.array(chunk.audio).astype(np.float32).reshape(-1))
-                rate = getattr(chunk, "sample_rate", None) or getattr(
-                    model, "sample_rate", 48000
-                )
+        box, done = {}, threading.Event()
+        jobs.put((text, ref, kwargs, box, done))
+        done.wait()
+        if "error" in box:
+            raise box["error"]
+        parts, rate = box["parts"], box["rate"]
         if not parts:
             return {"ok": False, "error": "the model returned no audio"}
         raw = out + ".native.wav"
