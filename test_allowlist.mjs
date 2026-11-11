@@ -2008,11 +2008,12 @@ assert.deepEqual(unansweredChats([STATS], 1 * H), [], "answering it takes it off
   const calls = [];
   const req = { text: "merhaba", ref: "/x/a.wav", speed: 1, style: "happy", outWav: "/tmp/o.wav" };
   const noStretch = () => calls.push(["stretch"]);
-  await renderVoice(req, {
+  const engineUsed = await renderVoice(req, {
     voxcpm: async (r) => calls.push(["voxcpm", r.style]),
     xtts: async () => calls.push(["xtts"]),
     stretch: (_file, speed) => calls.push(["stretch", speed]),
   });
+  assert.equal(engineUsed, "voxcpm", "renderVoice says which engine made the sentence, so VoxCPM2 gets one take");
   assert.deepEqual(
     calls,
     [
@@ -2036,13 +2037,14 @@ assert.deepEqual(unansweredChats([STATS], 1 * H), [], "answering it takes it off
     "the default speed no longer sends a clone to XTTS: VoxCPM2 renders it and the output is stretched",
   );
   calls.length = 0;
-  await renderVoice(req, {
+  const fallbackEngine = await renderVoice(req, {
     voxcpm: async () => {
       throw new Error("down");
     },
     xtts: async (r) => calls.push(["xtts", r.ref]),
     stretch: noStretch,
   });
+  assert.equal(fallbackEngine, "xtts", "a fallback is reported as XTTS, which keeps its retry takes");
   assert.deepEqual(calls, [["xtts", "/x/a.wav"]], "a VoxCPM2 failure falls back to XTTS with the same clip");
   // stretchWav is a no-op at speed 1 and leaves a missing file alone then; a real stretch changes the length.
   const { stretchWav } = await import("./src/server.mjs");

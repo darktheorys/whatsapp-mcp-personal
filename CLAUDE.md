@@ -97,7 +97,8 @@ detail below. The rest, one line each:
   version that did sent every note to XTTS with nothing in any log. A stock voice and any VoxCPM2 failure go to
   XTTS with the same approved reference clip, so a fallback is the same person's voice on another engine. It also
   takes a `style` (emotion) description, cleaned by `cleanStyle`. The service runs the model on one worker thread
-  (MLX streams are per thread) and logs one line per render to `state/voxcpm.log`, which is how to check a note.
+  (MLX streams are per thread) and logs one line per render to `state/voxcpm.log`, which is how to check a note. VoxCPM2 clones get one take
+  per sentence (`renderXttsChecked` stops retrying when `renderVoice` returns `"voxcpm"`), XTTS keeps its three.
 - **`voices.mjs`**: cloned voices from `state/voices/voices.json`. `resolveClone` refuses a voice in
   any chat its `allowed_jids` does not list (`"*"` there means any allowlisted chat, opt-in per
   voice), and a reference clip outside `state/voices/`.

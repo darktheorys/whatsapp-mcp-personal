@@ -496,12 +496,13 @@ export async function renderVoice(request, { voxcpm = voxcpmRender, xtts = xttsR
     try {
       await voxcpm(request);
       stretch(request.outWav, request.speed ?? 1);
-      return;
+      return "voxcpm";
     } catch (err) {
       logger.warn({ err: String(err.message ?? err) }, "voxcpm unavailable, using xtts for this sentence");
     }
   }
   await xtts(request);
+  return "xtts";
 }
 // Whisper is shaky on a sentence of two or three words, so those pass at a lower score instead of
 // burning takes on a transcription error.
@@ -509,10 +510,11 @@ const goodEnough = (score, text) => score >= (text.split(/\s+/).length <= 3 ? 0.
 async function renderXttsChecked(request, lang, verify) {
   let best = null;
   let attempts = 0;
+  let engine = null;
   for (let take = 1; take <= (verify ? MAX_TAKES : 1); take++) {
     const file = take === 1 ? request.outWav : `${request.outWav}.take${take}.wav`;
     try {
-      await renderVoice({ ...request, outWav: file });
+      engine = await renderVoice({ ...request, outWav: file });
     } catch (err) {
       // The first take failing is a real failure. A retry failing is not: there is already a usable
       // take, and losing it would fail the whole note (or send it to Piper) over an optional redo.
@@ -528,7 +530,9 @@ async function renderXttsChecked(request, lang, verify) {
     } else if (file !== request.outWav) {
       rmSync(file, { force: true });
     }
-    if (score === null || goodEnough(score, request.text)) break;
+    // VoxCPM2 gets one take (owner decision, 2026-11-12): the check scores shouted and sad lines low, so
+    // it re-rendered every sentence three times for nothing. The tail trim above still ran.
+    if (score === null || goodEnough(score, request.text) || engine === "voxcpm") break;
   }
   if (best.file !== request.outWav) renameSync(best.file, request.outWav);
   return { score: best.score, takes: attempts };
