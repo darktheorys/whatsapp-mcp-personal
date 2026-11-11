@@ -165,7 +165,13 @@ def main():
         finally:
             if os.path.exists(raw):
                 os.unlink(raw)
-        return {"ok": True, "seconds": round(time.time() - began, 2)}
+        seconds = round(time.time() - began, 2)
+        # One line per render, so "did this note use VoxCPM2" has an answer in the log.
+        log(
+            f"rendered {len(text)} chars in {seconds}s, ref {os.path.basename(ref)}, "
+            f"style {'yes' if style else 'no'}"
+        )
+        return {"ok": True, "seconds": seconds}
 
     def serve(conn):
         with conn:
