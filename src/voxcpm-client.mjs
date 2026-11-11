@@ -10,8 +10,11 @@ import { xttsRequest } from "./xtts-client.mjs";
 // a second, so 200 ms a character is the worst case, plus a margin for a cold first render.
 export const voxcpmTimeoutMs = (text) => 20_000 + 250 * text.length;
 
-// Only a clone at normal speed: the service has no stock speakers and no speed control.
-export const voxcpmCanRender = ({ ref, speed }) => Boolean(ref) && Math.abs((speed ?? 1) - 1) < 0.01;
+// Only a clone: the service has no stock speakers. It has no speed control either, so the caller
+// stretches its output to the speed asked for (server.mjs renderVoice), which is why speed is not part
+// of this check. It used to be: a note without an explicit `rate` runs at the default 1.15, so none of
+// them ever reached VoxCPM2 and fell to XTTS without a trace in any log.
+export const voxcpmCanRender = ({ ref }) => Boolean(ref);
 
 // A delivery style ("excited, speaking fast", "sad, low and quiet") goes in front of the text in
 // parentheses, which is how the model reads it, so the parentheses and line breaks are taken out.

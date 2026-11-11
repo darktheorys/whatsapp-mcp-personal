@@ -91,10 +91,13 @@ detail below. The rest, one line each:
   daemon token. Rejects at once when the socket is missing, which is the caller's cue to use Piper.
 - **`voxcpm-client.mjs`**: the same one-JSON-line protocol to `state/voxcpm.sock` (`scripts/voxcpm_service.py`,
   VoxCPM2 through mlx-audio, venv `state/tts-mlx-venv`, launchd label `com.whatsapp-mcp-personal.voxcpm`). The
-  first choice for a *cloned* voice at normal speed (best of four in a listening test, 2026-11-10). It has no
-  stock speakers and no speed control, so `renderVoice` (server.mjs) sends only a clone with `speed` 1 there and
-  everything else, plus any VoxCPM2 failure, to XTTS with the same approved reference clip, so a fallback is the
-  same person's voice on another engine. It also takes a `style` (emotion) description, cleaned by `cleanStyle`.
+  first choice for a *cloned* voice (best of four in a listening test, 2026-11-10). It has no stock speakers, so
+  `renderVoice` (server.mjs) sends only clones there. It has no speed control either, so the output is stretched
+  afterwards (`stretchWav`, ffmpeg atempo). Do not route on speed: the default rate is 1.15, and an earlier
+  version that did sent every note to XTTS with nothing in any log. A stock voice and any VoxCPM2 failure go to
+  XTTS with the same approved reference clip, so a fallback is the same person's voice on another engine. It also
+  takes a `style` (emotion) description, cleaned by `cleanStyle`. The service runs the model on one worker thread
+  (MLX streams are per thread) and logs one line per render to `state/voxcpm.log`, which is how to check a note.
 - **`voices.mjs`**: cloned voices from `state/voices/voices.json`. `resolveClone` refuses a voice in
   any chat its `allowed_jids` does not list (`"*"` there means any allowlisted chat, opt-in per
   voice), and a reference clip outside `state/voices/`.

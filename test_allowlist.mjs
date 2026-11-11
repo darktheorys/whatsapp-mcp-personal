@@ -2,6 +2,7 @@
 // Covers the one piece of logic here that can fail silently: which incoming messages the
 // allowlist lets through, and which JID a chat gets stored under once it does.
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -1995,27 +1996,70 @@ assert.deepEqual(unansweredChats([STATS], 1 * H), [], "answering it takes it off
   const { voxcpmCanRender, cleanStyle, voxcpmRender } = await import("./src/voxcpm-client.mjs");
   const { renderVoice } = await import("./src/server.mjs");
   assert.equal(voxcpmCanRender({ ref: "/x/a.wav", speed: 1 }), true, "a clone at normal speed");
-  assert.equal(voxcpmCanRender({ ref: "/x/a.wav" }), true, "no speed means normal speed");
-  assert.equal(voxcpmCanRender({ ref: "/x/a.wav", speed: 1.15 }), false, "a speed change stays on XTTS");
+  assert.equal(
+    voxcpmCanRender({ ref: "/x/a.wav", speed: 1.15 }),
+    true,
+    "speed does not decide the engine: the default rate is 1.15, and routing on it sent every note to XTTS",
+  );
   assert.equal(voxcpmCanRender({ speaker: "Damien Black", speed: 1 }), false, "a stock voice stays on XTTS");
   assert.equal(cleanStyle("  (angry)\n[sharp]  "), "angry sharp", "brackets and line breaks cannot break the prompt");
   assert.equal(cleanStyle("()"), undefined, "an empty style is no style");
   assert.equal(cleanStyle("a".repeat(500)).length, 200, "a style is capped");
   const calls = [];
   const req = { text: "merhaba", ref: "/x/a.wav", speed: 1, style: "happy", outWav: "/tmp/o.wav" };
+  const noStretch = () => calls.push(["stretch"]);
   await renderVoice(req, {
     voxcpm: async (r) => calls.push(["voxcpm", r.style]),
     xtts: async () => calls.push(["xtts"]),
+    stretch: (_file, speed) => calls.push(["stretch", speed]),
   });
-  assert.deepEqual(calls, [["voxcpm", "happy"]], "a clone goes to VoxCPM2 first, with its style");
+  assert.deepEqual(
+    calls,
+    [
+      ["voxcpm", "happy"],
+      ["stretch", 1],
+    ],
+    "a clone goes to VoxCPM2 first, with its style, and the stretch step is asked for speed 1 (a no-op)",
+  );
+  calls.length = 0;
+  await renderVoice(
+    { ...req, speed: 1.15 },
+    {
+      voxcpm: async () => calls.push(["voxcpm"]),
+      xtts: async () => calls.push(["xtts"]),
+      stretch: (_file, speed) => calls.push(["stretch", speed]),
+    },
+  );
+  assert.deepEqual(
+    calls,
+    [["voxcpm"], ["stretch", 1.15]],
+    "the default speed no longer sends a clone to XTTS: VoxCPM2 renders it and the output is stretched",
+  );
   calls.length = 0;
   await renderVoice(req, {
     voxcpm: async () => {
       throw new Error("down");
     },
     xtts: async (r) => calls.push(["xtts", r.ref]),
+    stretch: noStretch,
   });
   assert.deepEqual(calls, [["xtts", "/x/a.wav"]], "a VoxCPM2 failure falls back to XTTS with the same clip");
+  // stretchWav is a no-op at speed 1 and leaves a missing file alone then; a real stretch changes the length.
+  const { stretchWav } = await import("./src/server.mjs");
+  const tdir = mkdtempSync(join(tmpdir(), "wa-stretch-"));
+  const tone = join(tdir, "t.wav");
+  execFileSync("ffmpeg", ["-y", "-loglevel", "error", "-f", "lavfi", "-i", "sine=f=440:d=2", tone]);
+  const lengthOf = () =>
+    Number(
+      execFileSync("ffprobe", ["-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", tone])
+        .toString()
+        .trim(),
+    );
+  stretchWav(tone, 1);
+  assert.ok(Math.abs(lengthOf() - 2) < 0.05, "speed 1 leaves the file as it is");
+  stretchWav(tone, 2);
+  assert.ok(Math.abs(lengthOf() - 1) < 0.1, "speed 2 halves the length");
+  rmSync(tdir, { recursive: true, force: true });
   calls.length = 0;
   await renderVoice(
     { ...req, ref: undefined, speaker: "Damien Black" },

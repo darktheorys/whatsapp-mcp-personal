@@ -473,16 +473,29 @@ async function trimTrailingBabble(wav, text, lang = "tr") {
 const MAX_TAKES = 3;
 const GOOD_TAKE = 0.85;
 
-// One sentence, one engine. A cloned voice at normal speed goes to the resident VoxCPM2 service first
-// (owner decision, 2026-11-10: it was the best of four in a listening test, and it takes a `style`
-// description for emotion). Anything it cannot do, a stock voice or a speed change, and any failure
-// of it, goes to XTTS, so a note is never lost to the newer service. `style` is only ever read by
-// VoxCPM2. The same reference clip, already approved by resolveClone, is what both engines get, so a
-// fallback is the same person's voice on another engine, never another voice.
-export async function renderVoice(request, { voxcpm = voxcpmRender, xtts = xttsRender } = {}) {
+// VoxCPM2 has no speed control, so its output is time-stretched to the speed asked for (pitch kept,
+// ffmpeg atempo, clamped to the 0.5 to 2 range XTTS accepts). Speed 1 is left alone.
+export function stretchWav(file, speed) {
+  const factor = Math.min(2, Math.max(0.5, speed));
+  if (Math.abs(factor - 1) < 0.01) return;
+  const out = `${file}.tempo.wav`;
+  execFileSync("ffmpeg", ["-y", "-loglevel", "error", "-i", file, "-filter:a", `atempo=${factor}`, out], {
+    stdio: "ignore",
+  });
+  renameSync(out, file);
+}
+
+// One sentence, one engine. A cloned voice goes to the resident VoxCPM2 service first (owner decision,
+// 2026-11-10: it was the best of four in a listening test, and it takes a `style` description for
+// emotion), at whatever speed was asked for (stretched afterwards, see stretchWav). A stock voice, and
+// any failure of VoxCPM2, goes to XTTS, so a note is never lost to the newer service. `style` is only
+// ever read by VoxCPM2. The same reference clip, already approved by resolveClone, is what both
+// engines get, so a fallback is the same person's voice on another engine, never another voice.
+export async function renderVoice(request, { voxcpm = voxcpmRender, xtts = xttsRender, stretch = stretchWav } = {}) {
   if (voxcpmCanRender(request)) {
     try {
       await voxcpm(request);
+      stretch(request.outWav, request.speed ?? 1);
       return;
     } catch (err) {
       logger.warn({ err: String(err.message ?? err) }, "voxcpm unavailable, using xtts for this sentence");
